@@ -1,0 +1,22 @@
+┌──────────────┐                    ┌──────────────┐
+│   前端       │                    │   后端       │
+│   (Vue.js)   │                    │   (FastAPI)   │
+└──────┬───────┘                    └──────┬───────┘
+       │                                    │
+       │ 1. HTTP REST API                   │
+       ├──────────────────────────────────>│
+       │ GET/POST /api/config/connection   │
+       │ GET/POST /api/config/log          │
+       │ POST /api/command                 │
+       │ POST /api/log/save                │
+       │                                    │
+       │ 2. WebSocket                      │
+       │ ws://localhost:8000/ws/drone     │
+       ├<═════════════════════════════════┤
+       │ 实时数据推送                       │
+       │ - udp_data                        │
+       │ - config_update                   │
+       │ - connection                      │
+       │ - command_response                │
+       │                                    │
+       └────────────────────────────────────┘
