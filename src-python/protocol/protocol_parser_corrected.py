@@ -77,14 +77,9 @@ class UDPHandler:
             
             # 如果未指定端口列表，使用配置中的监听端口
             if ports is None:
-                # 测试模式：只监听配置中的主端口（30509接收飞控模拟器的遥测）
-                if udp_config.mode == "testing":
-                    ports = [udp_config.listen_port]
-                else:
-                    # 生产模式：监听多个端口
-                    ports = [18504, 18506, 18507, 18511]
+                # 使用配置中的listen_ports，如果不存在则使用默认值
+                ports = [18504, 18506, 18507, 18511]
             
-            logger.info(f"启动UDP服务器模式: {udp_config.mode}")
             logger.info(f"监听地址: {listen_host}, 端口列表: {ports}")
             
             for port in ports:

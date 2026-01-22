@@ -44,31 +44,190 @@ Apollo-GCS-Web/
 
 ### 环境要求
 
-- Node.js 16+ 
+- Node.js 16+
 - Python 3.8+
 - npm 或 yarn
+- Windows 11 / macOS / Linux
 
 ### 安装依赖
 
+#### 方式一：一键安装（推荐）
+
 ```bash
-# 安装 Node.js 依赖
+# 在项目根目录执行
+npm install
+```
+
+这个命令会自动：
+- 安装根目录的Node.js依赖（Electron、concurrently等）
+- 安装前端的Node.js依赖（Vue 3、Vite、Naive UI等）
+- 安装后端的Python依赖（FastAPI、uvicorn等）
+
+#### 方式二：分别安装
+
+```bash
+# 1. 安装根目录依赖
 npm install
 
-# 安装 Python 依赖
-pip install -r src-python/requirements.txt
+# 2. 安装前端依赖
+cd src-frontend
+npm install
+cd ..
+
+# 3. 安装后端依赖
+cd src-python
+pip install -r requirements.txt
 ```
 
-### 开发模式运行
+### 启动项目
+
+#### 方式一：一键启动所有服务（推荐）
 
 ```bash
-# 启动所有服务（Electron + 前端 + 后端）
+# 在项目根目录执行，同时启动 Electron、前端和后端
 npm run dev
-
-# 分别启动
-npm run dev:electron   # 仅启动 Electron
-npm run dev:frontend  # 仅启动前端
-npm run dev:backend   # 仅启动后端
 ```
+
+这个命令会同时启动：
+- Electron 桌面应用
+- Vue 3 前端开发服务器（端口：5173）
+- Python FastAPI 后端服务器（端口：8000）
+
+**启动顺序说明：**
+1. 后端服务器启动完毕后显示：`Uvicorn running on http://0.0.0.0:8000`
+2. 前端服务器启动完毕后显示：`Local: http://localhost:5173/`
+3. Electron 应用会自动加载前端页面
+
+#### 方式二：分别启动各个服务
+
+如果您需要分别控制各个服务，可以使用以下命令：
+
+**步骤1：启动后端服务**
+
+```bash
+# 在项目根目录执行
+npm run dev:backend
+```
+
+或者直接使用Python命令：
+
+```bash
+cd src-python
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+**验证后端启动成功：**
+- 终端显示：`INFO: Uvicorn running on http://0.0.0.0:8000`
+- 浏览器访问：http://localhost:8000/docs 查看API文档
+- 浏览器访问：http://localhost:8000/health 检查服务状态
+
+**步骤2：启动前端服务**
+
+```bash
+# 在项目根目录执行
+npm run dev:frontend
+```
+
+或者直接使用Vite命令：
+
+```bash
+cd src-frontend
+npm run dev
+```
+
+**验证前端启动成功：**
+- 终端显示：`Local: http://localhost:5173/`
+- 浏览器访问：http://localhost:5173/ 查看前端界面
+
+**步骤3：启动Electron桌面应用（可选）**
+
+```bash
+# 在项目根目录执行
+npm run dev:electron
+```
+
+**注意：** Electron应用需要在前端和后端都已启动的情况下才能正常工作。
+
+### 启动流程图
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     启动流程                                │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  1. npm install (安装所有依赖)                               │
+│         ↓                                                   │
+│  2. npm run dev (一键启动)                                   │
+│         │                                                   │
+│         ├───→ 后端服务 (Python FastAPI)                     │
+│         │        端口: 8000                                   │
+│         │        功能: UDP通信、WebSocket、数据解析           │
+│         │                                                   │
+│         ├───→ 前端服务 (Vue 3 + Vite)                        │
+│         │        端口: 5173                                   │
+│         │        功能: 用户界面、WebSocket连接               │
+│         │                                                   │
+│         └───→ Electron应用 (桌面容器)                         │
+│                  功能: 封装前后端为桌面应用                  │
+│                                                              │
+│  3. 浏览器访问 http://localhost:5173/                        │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 常见启动问题排查
+
+#### 问题1：后端启动失败 - 端口被占用
+
+**错误信息：**
+```
+[Errno 10048] error while attempting to bind on address ('0.0.0.0', 8000):
+address already in use
+```
+
+**解决方案：**
+
+Windows系统：
+```bash
+# 查找占用8000端口的进程
+netstat -ano | findstr :8000
+
+# 根据PID结束进程
+taskkill /PID <进程ID> /F
+```
+
+Linux/macOS系统：
+```bash
+# 查找占用8000端口的进程
+lsof -i :8000
+
+# 根据PID结束进程
+kill <进程ID>
+```
+
+#### 问题2：前端启动失败 - 依赖缺失
+
+**错误信息：**
+```
+Error: Cannot find module 'vite'
+```
+
+**解决方案：**
+```bash
+cd src-frontend
+npm install
+```
+
+#### 问题3：Python依赖安装失败
+
+**错误信息：**
+```
+error: Microsoft Visual C++ 14.0 is required
+```
+
+**解决方案：**
+- 下载并安装 [Microsoft Visual C++ Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
+- 或使用预编译的wheel包：`pip install --only-binary :all: -r requirements.txt`
 
 ### 生产构建
 

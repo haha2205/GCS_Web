@@ -1,6 +1,5 @@
 """
 地面站配置管理
-支持生产环境和本地测试环境的灵活配置
 """
 
 import os
@@ -11,16 +10,13 @@ from dataclasses import dataclass, field
 class UDPConfig:
     """UDP通信配置"""
     # 接收配置（地面站监听）
-    listen_host: str = "0.0.0.0"  # 监听地址
-    listen_port: int = 30509     # 监听端口（默认接收飞控遥测）
-    listen_ports: list = field(default_factory=list)  # 监听端口列表（使用default_factory避免可变默认值错误）
+    listen_host: str = "0.0.0.0"
+    listen_port: int = 30509
+    listen_ports: list = field(default_factory=lambda: [30509, 18507, 18511])
     
     # 发送配置（地面站发送指令到飞控）
-    target_ip: str = "127.0.0.1"  # 飞控IP
-    target_port: int = 18504      # 飞控接收指令端口
-    
-    # 配置模式
-    mode: str = "testing"       # production / testing
+    target_ip: str = "127.0.0.1"
+    target_port: int = 18504
 
 class Config:
     """全局配置单例"""
@@ -41,30 +37,19 @@ class Config:
     
     def _load_from_env(self):
         """从环境变量加载配置"""
-        # 运行模式
-        mode = os.getenv("GCS_MODE", "testing")
-        self.udp_config.mode = mode
+        # 默认监听端口（地面站使用的监听端口）
+        # - 30509: 接收飞控遥测数据
+        # - 18507: 接收LiDAR数据
+        # - 18511: 接收规划遥测数据
+        self.udp_config.listen_ports = [30509, 18507, 18511]
+        self.udp_config.listen_port = 30509
         
-        # 根据模式设置默认配置
-        if mode == "testing":
-            # 本地测试模式：对接飞控模拟器
-            # 地面站监听的端口（接收数据）：
-            # - 30509: 接收飞控模拟器的遥测数据
-            # - 18507: 接收雷达模拟器的障碍物数据（Lidar）
-            # - 18511: 接收飞控规划端的规划遥测数据
-            # 注意：18504和18510是飞控监听的端口，地面站不应监听
-            self.udp_config.listen_ports = [30509, 18507, 18511]
-            self.udp_config.listen_port = 30509  # 默认端口保持兼容
-            
-            # 地面站发送指令的目标端口：
-            self.udp_config.target_ip = "127.0.0.1"
-            self.udp_config.target_port = 18504     # 飞控指令接收端口（fc_command_recv监听）
-        else:
-            # 生产模式（真实硬件）
-            # 可以通过环境变量覆盖
-            pass
+        # 默认发送目标（飞控IP和端口）
+        # 127.0.0.1:18504（默认本地测试）
+        self.udp_config.target_ip = "127.0.0.1"
+        self.udp_config.target_port = 18504
         
-        # 环境变量覆盖（优先级最高）
+        # 环境变量覆盖（优先级高于默认值）
         listen_port = os.getenv("GCS_LISTEN_PORT")
         if listen_port:
             self.udp_config.listen_port = int(listen_port)
@@ -84,7 +69,6 @@ class Config:
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典（用于API返回）"""
         return {
-            "mode": self.udp_config.mode,
             "listen": {
                 "host": self.udp_config.listen_host,
                 "port": self.udp_config.listen_port
@@ -97,9 +81,6 @@ class Config:
     
     def update_from_dict(self, data: Dict[str, Any]):
         """从字典更新配置"""
-        if "mode" in data:
-            self.udp_config.mode = data["mode"]
-        
         if "listen" in data:
             if "host" in data["listen"]:
                 self.udp_config.listen_host = data["listen"]["host"]
@@ -119,7 +100,6 @@ class Config:
         print("=" * 60)
         print("地面站配置信息")
         print("=" * 60)
-        print(f"运行模式: {self.udp_config.mode}")
         print(f"接收配置: {self.udp_config.listen_host}:{self.udp_config.listen_port}")
         print(f"发送目标: {self.udp_config.target_ip}:{self.udp_config.target_port}")
         print("=" * 60)
