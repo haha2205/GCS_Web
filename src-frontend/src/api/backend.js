@@ -62,6 +62,32 @@ export const connectionApi = {
 }
 
 /**
+ * UDP连接管理 API
+ */
+export const udpApi = {
+  /**
+   * 启动UDP服务器
+   */
+  startServer: async () => {
+    return await apiRequest('/api/udp/start', {}, 'POST')
+  },
+  
+  /**
+   * 停止UDP服务器
+   */
+  stopServer: async () => {
+    return await apiRequest('/api/udp/stop', {}, 'POST')
+  },
+  
+  /**
+   * 获取UDP连接状态
+   */
+  getStatus: async () => {
+    return await apiRequest('/api/udp/status')
+  }
+}
+
+/**
  * 日志配置 API
  */
 export const logApi = {
@@ -168,6 +194,7 @@ export default {
   log: logApi,
   recording: recordingApi,
   dsm: dsmApi,
+  udp: udpApi,
   request: apiRequest
 }
 

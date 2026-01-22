@@ -13,7 +13,6 @@ if current_dir not in sys.path:
 
 import asyncio
 import logging
-import csv
 from datetime import datetime
 from pydantic import BaseModel
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
@@ -22,7 +21,6 @@ from fastapi.responses import JSONResponse, FileResponse
 from typing import Dict, Any, Optional
 import json
 import time
-import struct
 
 from protocol.protocol_parser import UDPHandler, NCLinkUDPServerProtocol
 from protocol.nclink_protocol import (
@@ -51,9 +49,9 @@ from recorder.csv_helper_full import (
 class ConnectionConfig(BaseModel):
     """UDP连接配置"""
     protocol: str = "udp"
-    hostIp: str = "127.0.0.1"
+    listenAddress: str = "0.0.0.0"  # 监听地址（地面站本地IP）
     hostPort: int = 30509
-    remoteIp: str = "127.0.0.1"
+    remoteIp: str = "127.0.0.1"      # 目标地址（飞控IP）
     commandRecvPort: int = 18504
     sendOnlyPort: int = 18506
     lidarSendPort: int = 18507
@@ -345,31 +343,50 @@ async def get_connection_config():
 
 @app.post("/api/config/connection")
 async def update_connection_config(config: ConnectionConfig):
-    """更新连接配置"""
-    global connection_config, udp_server_started
+    """更新连接配置（智能判断：IP更新 vs 端口更新）"""
+    global connection_config, udp_server_started, udp_handler
     
     logger.info(f"更新连接配置: {config}")
     
-    ports_changed = (
+    # 检测配置变化类型
+    # 1. 监听配置是否改变（监听地址或端口改变，需要重启UDP服务器）
+    listen_config_changed = (
+        connection_config.listenAddress != config.listenAddress or
         connection_config.hostPort != config.hostPort or
-        connection_config.sendOnlyPort != config.sendOnlyPort or
         connection_config.lidarSendPort != config.lidarSendPort or
         connection_config.planningRecvPort != config.planningRecvPort
     )
     
+    # 2. 发送目标（IP+端口）是否改变（只需更新目标地址，不需要重启）
+    target_changed = (
+        connection_config.remoteIp != config.remoteIp or
+        connection_config.commandRecvPort != config.commandRecvPort
+    )
+    
+    # 更新配置对象
     connection_config = config
     
-    # 更新目标地址
-    if udp_handler:
-        udp_handler.set_target(connection_config.remoteIp, connection_config.commandRecvPort)
-    
-    # 重启UDP服务器
-    if ports_changed and udp_server_started:
-        logger.info("端口配置已改变，需要重启UDP服务器")
+    # 场景1: 仅监听配置改变（监听地址或端口）- 需要重启UDP服务器
+    if listen_config_changed and not target_changed:
+        logger.info(f"场景1: 监听配置已改变，重启UDP服务器")
+        logger.info(f"  监听地址: {config.listenAddress}")
+        logger.info(f"  监听端口: {config.hostPort}, {config.lidarSendPort}, {config.planningRecvPort}")
         
-        if udp_handler:
-            await udp_handler.stop_server()
-            logger.info("UDP服务器已停止")
+        if udp_handler and udp_server_started:
+            try:
+                await udp_handler.stop_server()
+                logger.info("UDP服务器已停止")
+                udp_server_started = False
+            except Exception as e:
+                logger.error(f"停止UDP服务器失败: {e}")
+        
+        # 等待端口完全释放
+        await asyncio.sleep(1.0)
+        
+        # 初始化UDP处理器（如果尚未初始化）
+        if udp_handler is None:
+            udp_handler = UDPHandler(on_udp_message_received)
+            logger.info("UDP处理器已初始化")
         
         try:
             ports = [
@@ -377,9 +394,98 @@ async def update_connection_config(config: ConnectionConfig):
                 connection_config.lidarSendPort,
                 connection_config.planningRecvPort
             ]
+            # 使用配置中的监听地址
+            await udp_handler.start_server(host=config.listenAddress, ports=ports)
+            udp_server_started = True
+            logger.info(f"✓ UDP服务器已重启")
+            logger.info(f"  监听地址: {config.listenAddress}")
+            logger.info(f"  监听端口: {ports}")
             
-            await udp_handler.start_server(host="0.0.0.0", ports=ports)
-            logger.info(f"多端口UDP服务器已重启: {ports}")
+            await manager.broadcast({
+                "type": "config_update",
+                "config_type": "connection",
+                "data": config.dict(),
+                "timestamp": int(time.time() * 1000)
+            })
+            
+            return {"status": "success", "message": "端口配置已更新，UDP服务器已重启"}
+        except Exception as e:
+            logger.error(f"UDP服务器启动失败: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+    
+    # 场景2: 仅目标IP/端口改变 - 只需更新发送目标
+    elif target_changed and not listen_config_changed:
+        logger.info(f"场景2: 仅目标地址改变，更新发送目标")
+        logger.info(f"  发送目标: {connection_config.remoteIp}:{connection_config.commandRecvPort}")
+        
+        # 更新发送目标地址
+        if udp_handler and udp_server_started:
+            udp_handler.set_target(connection_config.remoteIp, connection_config.commandRecvPort)
+            logger.info(f"✓ UDP发送目标已更新: {connection_config.remoteIp}:{connection_config.commandRecvPort}")
+        else:
+            logger.warning("UDP服务器未运行，仅保存配置")
+        
+        await manager.broadcast({
+            "type": "config_update",
+            "config_type": "connection",
+            "data": config.dict(),
+            "timestamp": int(time.time() * 1000)
+        })
+        
+        return {"status": "success", "message": "配置已更新，发送目标已更改"}
+    
+    # 场景3: 无任何改变 - 仅保存配置
+    elif not target_changed and not listen_config_changed:
+        logger.info("场景3: 配置无变化，仅保存配置")
+        
+        await manager.broadcast({
+            "type": "config_update",
+            "config_type": "connection",
+            "data": config.dict(),
+            "timestamp": int(time.time() * 1000)
+        })
+        
+        return {"status": "success", "message": "配置已更新"}
+    
+    # 场景4: 监听配置和目标都改变 - 需要重启并更新目标
+    else:
+        logger.info(f"场景4: 监听配置和目标地址都改变")
+        
+        if udp_handler and udp_server_started:
+            try:
+                await udp_handler.stop_server()
+                logger.info("UDP服务器已停止")
+                udp_server_started = False
+            except Exception as e:
+                logger.error(f"停止UDP服务器失败: {e}")
+        
+        # 等待端口完全释放
+        await asyncio.sleep(1.0)
+        
+        # 初始化UDP处理器（如果尚未初始化）
+        if udp_handler is None:
+            udp_handler = UDPHandler(on_udp_message_received)
+            logger.info("UDP处理器已初始化")
+        
+        try:
+            ports = [
+                connection_config.hostPort,
+                connection_config.lidarSendPort,
+                connection_config.planningRecvPort
+            ]
+            # 使用配置中的监听地址
+            await udp_handler.start_server(
+                host=config.listenAddress,
+                ports=ports,
+                target_host=connection_config.remoteIp,
+                target_port=connection_config.commandRecvPort
+            )
+            udp_server_started = True
+            
+            logger.info(f"✓ UDP服务器已重启")
+            logger.info(f"  监听地址: {config.listenAddress}")
+            logger.info(f"  监听端口: {ports}")
+            logger.info(f"  发送目标: {connection_config.remoteIp}:{connection_config.commandRecvPort}")
             
             await manager.broadcast({
                 "type": "config_update",
@@ -392,43 +498,106 @@ async def update_connection_config(config: ConnectionConfig):
         except Exception as e:
             logger.error(f"UDP服务器启动失败: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/udp/start")
+async def start_udp_server():
+    """启动UDP服务器"""
+    global udp_handler, udp_server_started, connection_config
     
-    elif udp_server_started:
-        logger.info("端口未改变，仅更新配置")
+    try:
+        # 如果已经启动，先停止
+        if udp_server_started and udp_handler:
+            logger.info("UDP服务器已在运行，先停止...")
+            await udp_handler.stop_server()
+            udp_server_started = False
+        
+        # 初始化UDP处理器（如果尚未初始化）
+        if udp_handler is None:
+            udp_handler = UDPHandler(on_udp_message_received)
+        
+        # 启动UDP服务器
+        ports = [
+            connection_config.hostPort,
+            connection_config.lidarSendPort,
+            connection_config.planningRecvPort
+        ]
+        
+        await udp_handler.start_server(host="0.0.0.0", ports=ports)
+        udp_server_started = True
+        
+        logger.info(f"UDP服务器已启动: {ports}")
+        logger.info(f"发送目标: {connection_config.remoteIp}:{connection_config.commandRecvPort}")
         
         await manager.broadcast({
-            "type": "config_update",
-            "config_type": "connection",
-            "data": config.dict(),
+            "type": "udp_status_change",
+            "status": "connected",
+            "config": connection_config.dict(),
             "timestamp": int(time.time() * 1000)
         })
         
-        return {"status": "success", "message": "配置已更新"}
+        return {
+            "status": "success",
+            "message": "UDP服务器已启动",
+            "data": {
+                "ports": ports,
+                "target": f"{connection_config.remoteIp}:{connection_config.commandRecvPort}"
+            }
+        }
+    except Exception as e:
+        logger.error(f"启动UDP服务器失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/udp/stop")
+async def stop_udp_server():
+    """停止UDP服务器"""
+    global udp_handler, udp_server_started
     
-    else:
-        logger.info("UDP服务器未启动，开始启动...")
-        
-        try:
-            ports = [
-                connection_config.hostPort,
-                connection_config.lidarSendPort,
-                connection_config.planningRecvPort
-            ]
+    try:
+        if udp_handler and udp_server_started:
+            await udp_handler.stop_server()
+            udp_server_started = False
             
-            await udp_handler.start_server(host="0.0.0.0", ports=ports)
-            udp_server_started = True
+            logger.info("UDP服务器已停止")
             
             await manager.broadcast({
-                "type": "config_update",
-                "config_type": "connection",
-                "data": config.dict(),
+                "type": "udp_status_change",
+                "status": "disconnected",
                 "timestamp": int(time.time() * 1000)
             })
             
-            return {"status": "success", "message": "配置已更新，UDP服务器已启动"}
-        except Exception as e:
-            logger.error(f"UDP服务器启动失败: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            return {
+                "status": "success",
+                "message": "UDP服务器已停止"
+            }
+        else:
+            return {
+                "status": "success",
+                "message": "UDP服务器未运行"
+            }
+    except Exception as e:
+        logger.error(f"停止UDP服务器失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/udp/status")
+async def get_udp_status():
+    """获取UDP连接状态"""
+    # 实际检查UDP服务器是否在运行（而不仅仅是标志位）
+    is_actually_running = False
+    if udp_handler:
+        is_actually_running = udp_handler.is_running()
+    
+    # 更新状态标志以匹配实际状态
+    global udp_server_started
+    udp_server_started = is_actually_running
+    
+    return {
+        "status": "success",
+        "data": {
+            "connected": is_actually_running,
+            "config": connection_config.dict() if connection_config else None,
+            "timestamp": int(time.time() * 1000)
+        }
+    }
 
 @app.get("/api/config/log")
 async def get_log_config():
@@ -1049,25 +1218,6 @@ async def startup_event():
     global command_send_lock
     command_send_lock = asyncio.Lock()
     logger.info("指令发送锁已初始化（支持6次连续发送机制）")
-    
-    udp_config = config.get_udp_config()
-    logger.info(f"运行模式: {udp_config.mode}")
-    
-    # 创建UDP处理器
-    global udp_handler
-    udp_handler = UDPHandler(on_message=on_udp_message_received)
-    logger.info("UDP处理器已初始化")
-    
-    # 测试模式自动启动
-    if udp_config.mode == "testing":
-        logger.info("测试模式：自动启动UDP服务器...")
-        try:
-            await udp_handler.start_server()
-            logger.info("✓ 测试模式UDP服务器已启动")
-        except Exception as e:
-            logger.error(f"✗ UDP服务器启动失败: {e}")
-    else:
-        logger.info("生产模式：等待前端配置后启动")
     
     logger.info("=" * 60)
 

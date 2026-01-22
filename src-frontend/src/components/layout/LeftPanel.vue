@@ -48,12 +48,6 @@
           :style="panelFlexStyle"
           :closePanel="() => closePanel('modules')"
         />
-        <RecorderModule
-          v-if="activeModes.includes('recorder')"
-          key="recorder"
-          :style="panelFlexStyle"
-          :closePanel="() => closePanel('recorder')"
-        />
       </TransitionGroup>
     </div>
   </div>

@@ -56,14 +56,21 @@ class UDPHandler:
         
         logger.info(f"UDP处理器初始化完成 (目标: {self.target_host}:{self.target_port})")
     
-    async def start_server(self, host: Optional[str] = None, ports: Optional[list] = None):
+    async def start_server(self, host: Optional[str] = None, ports: Optional[list] = None,
+                         target_host: Optional[str] = None, target_port: Optional[int] = None):
         """启动UDP服务器
         
         Args:
             host: 绑定地址（默认从配置读取）
             ports: 端口列表（默认从配置读取或使用单端口模式）
+            target_host: 目标主机地址（可选，设置发送目标）
+            target_port: 目标端口（可选，设置发送目标）
         """
         try:
+            # 如果提供了目标地址，更新目标
+            if target_host is not None and target_port is not None:
+                self.set_target(target_host, target_port)
+            
             self._loop = asyncio.get_event_loop()
             
             # 从配置或参数获取监听端口
@@ -72,17 +79,9 @@ class UDPHandler:
             
             # 如果未指定端口列表，使用配置中的监听端口
             if ports is None:
-                # 测试模式：需要同时监听两个端口
-                # - 30509: 接收飞控模拟器的遥测数据
-                # - 18504: 接收飞控的指令响应
-                if udp_config.mode == "testing":
-                    # 优先使用配置中的listen_ports，如果不存在则使用默认值
-                    ports = getattr(udp_config, 'listen_ports', [30509, 18504])
-                else:
-                    # 生产模式：监听多个端口
-                    ports = [30509, 18507, 18511]
+                # 使用配置中的listen_ports，如果不存在则使用默认值
+                ports = getattr(udp_config, 'listen_ports', [30509, 18507, 18511])
             
-            logger.info(f"启动UDP服务器模式: {udp_config.mode}")
             logger.info(f"监听地址: {listen_host}, 端口列表: {ports}")
             
             for port in ports:
@@ -120,8 +119,14 @@ class UDPHandler:
             logger.error(f"✗ 启动UDP服务器失败: {e}")
             raise
     
+    def is_running(self):
+        """检查UDP服务器是否正在运行"""
+        return len(self._transports) > 0
+    
     async def stop_server(self):
         """停止所有UDP服务器"""
+        logger.info(f"停止UDP服务器，当前运行的端口数量: {len(self._transports)}")
+        
         for port, transport in self._transports.items():
             try:
                 transport.close()

@@ -37,11 +37,12 @@ export const useDroneStore = defineStore('drone', {
     
     // 飞控遥控数据 (ExtY_FCS_DATAFUTABA_T)
     fcsData: {
-      Tele_ftb_Roll: 0,      // 遥控滚转
-      Tele_ftb_Pitch: 0,     // 遥控俯仰
-      Tele_ftb_Yaw: 0,        // 遥控偏航
-      Tele_ftb_Col: 0,        // 遥控油门
-      Tele_ftb_Switch: 0      // 遥控开关
+      Tele_ftb_Roll: 0,             // 遥控滚转
+      Tele_ftb_Pitch: 0,            // 遥控俯仰
+      Tele_ftb_Yaw: 0,              // 遥控偏航
+      Tele_ftb_Col: 0,              // 遥控油门
+      Tele_ftb_Switch: 0,           // 遥控开关
+      Tele_ftb_com_Ftb_fail: 0      // 遥控通信失败标志
     },
     
     // GN&C总线数据 (ExtY_FCS_GNCBUS_T)
@@ -151,10 +152,10 @@ export const useDroneStore = defineStore('drone', {
     
     // ========== GCS数据 (ExtY_FCS_DATAGCS_T) ==========
     gcsData: {
-      Tele_GCS_CmdIdx: 0,
-      Tele_GCS_Mission: 0,
-      Tele_GCS_Val: 0,
-      Tele_GCS_com_GCS_fail: 0
+      Tele_GCS_CmdIdx: 0,        // 指令索引
+      Tele_GCS_Mission: 0,        // 任务编号
+      Tele_GCS_Val: 0,            // 指令参数
+      Tele_GCS_com_GCS_fail: 0    // GCS通信失败标志
     },
     
     // ========== 飞控参数 ==========
@@ -744,7 +745,7 @@ export const useDroneStore = defineStore('drone', {
     },
     
     /**
-     * 更新飞控遥控数据 (新增)
+     * 更新飞控遥控数据 (ExtY_FCS_DATAFUTABA_T)
      */
     updateFCSData(data) {
       if (data.Tele_ftb_Roll !== undefined) {
@@ -761,6 +762,9 @@ export const useDroneStore = defineStore('drone', {
       }
       if (data.Tele_ftb_Switch !== undefined) {
         this.fcsData.Tele_ftb_Switch = parseInt(data.Tele_ftb_Switch)
+      }
+      if (data.Tele_ftb_com_Ftb_fail !== undefined) {
+        this.fcsData.Tele_ftb_com_Ftb_fail = parseInt(data.Tele_ftb_com_Ftb_fail)
       }
     },
     

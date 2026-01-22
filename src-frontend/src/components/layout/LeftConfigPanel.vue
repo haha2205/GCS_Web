@@ -19,11 +19,11 @@
                 </select>
               </div>
               <div class="config-row">
-                <label>Host IP</label>
-                <input v-model="hostIp" type="text" class="config-input" placeholder="192.168.1.1" />
+                <label>监听地址</label>
+                <input v-model="listenAddress" type="text" class="config-input" placeholder="0.0.0.0" />
               </div>
               <div class="config-row">
-                <label>Host Port</label>
+                <label>监听端口</label>
                 <input v-model.number="hostPort" type="number" class="config-input" placeholder="30509" />
               </div>
             </div>
@@ -157,20 +157,26 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import { useDroneStore } from '@/store/drone'
+import { useWebSocket } from '@/composables/useWebSocket'
 import backend from '@/api/backend'
 
 const droneStore = useDroneStore()
 const connectionApi = backend.connection
+const udpApi = backend.udp
 const logApi = backend.log
 
+// WebSocket连接
+const { isConnected: wsConnected, lastMessage } = useWebSocket()
+
+// UDP连接状态
 const isConnected = ref(false)
 
 // 协议和本地配置
 const protocol = ref('udp')
-const hostIp = ref('127.0.0.1')
-const hostPort = ref(30509)            // 地面站监听端口（总体入口）
+const listenAddress = ref('0.0.0.0')  // 地面站监听地址（支持修改）
+const hostPort = ref(30509)           // 地面站监听端口
 
 // 远程端配置
 const remoteIp = ref('127.0.0.2')
@@ -202,7 +208,7 @@ const loadConfig = async () => {
     const connConfig = await connectionApi.getConfig()
     if (connConfig.data) {
       protocol.value = connConfig.data.protocol
-      hostIp.value = connConfig.data.hostIp
+      listenAddress.value = connConfig.data.listenAddress || '0.0.0.0'
       hostPort.value = connConfig.data.hostPort
       remoteIp.value = connConfig.data.remoteIp
       commandRecvPort.value = connConfig.data.commandRecvPort || 18504
@@ -230,15 +236,16 @@ const loadConfig = async () => {
 }
 
 /**
- * 保存连接配置
+ * 保存连接配置（简化版 - 后端自动判断重启逻辑）
  */
 const saveConnectionConfig = async () => {
   loading.value = true
   saveMessage.value = ''
+  
   try {
     const config = {
       protocol: protocol.value,
-      hostIp: hostIp.value,
+      listenAddress: listenAddress.value,  // 新增：监听地址
       hostPort: hostPort.value,
       remoteIp: remoteIp.value,
       commandRecvPort: commandRecvPort.value,
@@ -248,13 +255,21 @@ const saveConnectionConfig = async () => {
       planningRecvPort: planningRecvPort.value
     }
     
+    droneStore.addLog('保存连接配置...', 'info')
+    
+    // 直接调用后端API，后端会智能判断：
+    // - 如果仅IP改变：只更新发送目标
+    // - 如果端口改变：重启UDP服务器
+    // - 如果两者都改变：重启并更新目标
     const result = await connectionApi.updateConfig(config)
+    
     saveMessage.value = result.message
     saveSuccess.value = result.status === 'success'
     
     // 更新store中的配置
     droneStore.updateConfig(config)
     droneStore.addLog('连接配置已保存: ' + result.message, 'info')
+    
   } catch (error) {
     console.error('保存连接配置失败:', error)
     saveMessage.value = '保存失败: ' + error.message
@@ -262,10 +277,48 @@ const saveConnectionConfig = async () => {
     droneStore.addLog('保存连接配置失败: ' + error.message, 'error')
   } finally {
     loading.value = false
-    // 3秒后清除消息
-    if (saveSuccess.value) {
-      setTimeout(() => saveMessage.value = '', 3000)
+    
+    // 验证UDP状态
+    try {
+      const statusResult = await udpApi.getStatus()
+      if (statusResult.data) {
+        isConnected.value = statusResult.data.connected
+      }
+    } catch (error) {
+      console.warn('验证UDP状态失败:', error)
     }
+    
+    // 5秒后清除消息
+    if (saveSuccess.value) {
+      setTimeout(() => saveMessage.value = '', 5000)
+    }
+  }
+}
+
+/**
+ * 手动断开UDP连接
+ */
+const disconnectUDP = async () => {
+  loading.value = true
+  saveMessage.value = ''
+  
+  try {
+    droneStore.addLog('手动断开UDP连接...', 'info')
+    const result = await udpApi.stopServer()
+    
+    if (result.status === 'success') {
+      droneStore.addLog('UDP连接已断开', 'success')
+      saveMessage.value = 'UDP连接已断开'
+      saveSuccess.value = true
+    }
+  } catch (error) {
+    console.error('断开UDP连接失败:', error)
+    saveMessage.value = '断开失败: ' + error.message
+    saveSuccess.value = false
+    droneStore.addLog('断开UDP连接失败: ' + error.message, 'error')
+  } finally {
+    loading.value = false
+    setTimeout(() => saveMessage.value = '', 3000)
   }
 }
 
@@ -314,16 +367,48 @@ const saveLogConfig = async () => {
 }
 
 /**
- * 切换连接状态
+ * 切换连接状态（点击连接/断开按钮）
  */
-const toggleConnection = () => {
-  isConnected.value = !isConnected.value
+const toggleConnection = async () => {
   if (isConnected.value) {
-    droneStore.connect()
+    // 断开连接
+    await disconnectUDP()
   } else {
-    droneStore.disconnect()
+    // 建立连接
+    await saveConnectionConfig()
   }
 }
+
+/**
+ * 监听WebSocket消息，处理UDP状态变化
+ */
+watch(() => lastMessage?.value, (newMessage) => {
+  if (!newMessage) return
+  
+  try {
+    const data = typeof newMessage === 'string' ? JSON.parse(newMessage) : newMessage
+    
+    if (data?.type === 'udp_status_change') {
+      const previousState = isConnected.value
+      isConnected.value = (data.status === 'connected')
+      
+      // 状态变化时记录日志
+      if (previousState !== isConnected.value) {
+        if (isConnected.value) {
+          droneStore.addLog('UDP连接已建立', 'success')
+          droneStore.addLog(`监听端口: ${data.config?.hostPort}, 告知端口: ${data.config?.sendOnlyPort}`, 'info')
+        } else {
+          droneStore.addLog('UDP连接已断开', 'warning')
+        }
+      }
+    } else if (data?.type === 'config_update' && data.config_type === 'connection') {
+      // 配置更新后刷新本地状态
+      droneStore.addLog('收到配置更新通知', 'info')
+    }
+  } catch (error) {
+    console.error('处理WebSocket消息失败:', error)
+  }
+})
 
 /**
  * 清除文件名
@@ -349,9 +434,19 @@ const browseDirectory = () => {
   alert('提示：\n\n请直接在输入框中手动输入日志存储目录路径。\n\n例如：\n• Windows: E:/Logs 或 D:/MissionLogs\n• Linux/macOS: /home/user/logs 或 ./logs\n\n注意：确保指定的目录存在且有写入权限。')
 }
 
-// 组件挂载时加载配置
-onMounted(() => {
-  loadConfig()
+// 组件挂载时
+onMounted(async () => {
+  await loadConfig()
+  
+  // 初始化时检查UDP连接状态
+  try {
+    const statusResult = await udpApi.getStatus()
+    if (statusResult.data) {
+      isConnected.value = statusResult.data.connected
+    }
+  } catch (error) {
+    console.warn('获取UDP状态失败:', error)
+  }
 })
 </script>
 
