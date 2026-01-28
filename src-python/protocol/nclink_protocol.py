@@ -2459,11 +2459,13 @@ def encode_gcs_command(seq_id: uint32_T,
         编码后的字节数组 (32字节)
     """
     import time
-    timestamp = int(time.time() * 1000)
+    timestamp = int(time.time() * 1000) % (2**32)
     
     # GCSCommand_T结构: uint32 + uint32 + 3*double + double + uint8 + int32
     # = 4 + 4 + 24 + 8 + 1 + 4 = 45字节 (按照C结构体)
-    struct_format = '!IIddddBI'  # network字节序
+    # CmdIdx是int32_t，应该使用 'i' 而不是 'I'
+    # 注意：为了与系统其他部分保持一致（通常的小端序C结构体），使用 '<'
+    struct_format = '<IIddddBi'  # 小端序
     
     data = struct.pack(
         struct_format,
@@ -2569,7 +2571,6 @@ def encode_extu_fcs_from_dict(pids_data: dict, cmd_idx: int = 0, cmd_mission: in
         float(pids_data.get('fKrR', 0.2)),        # F_KrR
         float(pids_data.get('fIrR', 0.01)),       # F_IrR
         float(pids_data.get('fKrAy', 0.1)),       # F_KrAy
-        float(pids_data.get('fIrAy', 0.01)),      # F_IrAy
         float(pids_data.get('fKrPSI', 1.0)),      # F_KrPSI
         # 偏航和高度控制（5个）
         float(pids_data.get('fKcH', 0.36)),        # F_KcH
@@ -2630,7 +2631,6 @@ def encode_command_packet(func_code: int, payload: bytes = b'') -> bytes:
                 0.2,    # F_KrR (偏航角速度P系数)
                 0.01,   # F_IrR (偏航角速度I系数)
                 0.1,    # F_KrAy (偏航加速度P系数) [新增]
-                0.01,   # F_IrAy (偏航加速度I系数) [新增]
                 1.0,    # F_KrPSI (偏航角P系数)
                 0.36,   # F_KcH (高度P系数)
                 0.015,  # F_IcH (高度I系数)

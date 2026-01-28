@@ -2,7 +2,7 @@
 CSV数据记录辅助函数（完整版）
 基于interface.h中完整的ExtY_FCS_T结构体定义
 实现"宽表"格式的CSV记录（不带category列）
-总列数：225列（重新核对后）
+总列数：221列（重新核对后）
 """
 
 from typing import Dict, Any
@@ -12,19 +12,20 @@ from datetime import datetime
 # ==================== 列数常量 ====================
 
 # 总列数（重新核对）
-TOTAL_COLUMNS = 230  # 225 -AIM(1) -AB(1) +GCS(7) = 230
+# 1 + 8 + 12 + 53 + 73 + 3 + 6 + 4 + 21 + 21 + 1 + 18 = 221
+TOTAL_COLUMNS = 221
 
 # 各数据段的列数（根据interface.h严格计数）
 COL_TIMESTAMP = 1
 COL_PWMS = 8
 COL_STATES = 12
 COL_DATACTRL = 53
-COL_GNCBUS = 75
+COL_GNCBUS = 73     # Was 75, removed mode_horiz/token_horiz
 COL_AVOIFLAG = 3
 COL_FUTABA = 6
-COL_GCS = 11
-COL_AC_AIM2AB = 21  # Corrected from 22
-COL_AC_AB = 21      # Corrected from 22
+COL_GCS = 4         # Was 11, fixed to match ExtY_FCS_DATAGCS_T
+COL_AC_AIM2AB = 21 
+COL_AC_AB = 21      
 COL_PARAM = 1
 COL_ESC = 18
 
@@ -40,9 +41,6 @@ OFFSET_AC_AIM2AB = OFFSET_GCS + COL_GCS
 OFFSET_AC_AB = OFFSET_AC_AIM2AB + COL_AC_AIM2AB
 OFFSET_PARAM = OFFSET_AC_AB + COL_AC_AB
 OFFSET_ESC = OFFSET_PARAM + COL_PARAM
-
-# 验证总数
-# 1 + 8 + 12 + 53 + 75 + 3 + 6 + 4 + 22 + 22 + 1 + 18 = 225 ✓
 
 
 # ==================== 辅助函数 ====================
@@ -178,8 +176,8 @@ def get_full_header() -> str:
         "dataCtrl_n_colInLoop_col_law_out"
     ])
     
-    # 5. GNCBUS数据 (75字段)
-    # TokenMode (17)
+    # 5. GNCBUS数据 (73字段)
+    # TokenMode (17) - Fixed: removed mode_horiz/token_horiz
     header_fields.extend([
         "GNCBus_TokenMode_OnSky",
         "GNCBus_TokenMode_Ctrl_Mode",
@@ -197,9 +195,7 @@ def get_full_header() -> str:
         "GNCBus_TokenMode_step_nav",
         "GNCBus_TokenMode_mode_vert",
         "GNCBus_TokenMode_token_vert",
-        "GNCBus_TokenMode_step_vert",
-        "GNCBus_TokenMode_mode_horiz",
-        "GNCBus_TokenMode_token_horiz"
+        "GNCBus_TokenMode_step_vert"
     ])
     # FtbOpt (10)
     header_fields.extend([
@@ -305,7 +301,7 @@ def get_full_header() -> str:
         "Tele_ftb_com_Ftb_fail"
     ])
     
-    # 8. DATAGCS数据 (4字段)
+    # 8. DATAGCS数据 (4字段) - Fixed: removed extra planning fields
     header_fields.extend([
         "Tele_GCS_CmdIdx",
         "Tele_GCS_Mission",
@@ -313,7 +309,7 @@ def get_full_header() -> str:
         "Tele_GCS_com_GCS_fail"
     ])
     
-    # 9. ac_aim2AB数据 (22字段)
+    # 9. ac_aim2AB数据 (21字段)
     header_fields.extend([
         "ac_aim2AB_lon", "ac_aim2AB_lat", "ac_aim2AB_psi", "ac_aim2AB_alt",
         "ac_aim2AB_len", "ac_aim2AB_rad", "ac_aim2AB_Vx2nextdot",
@@ -324,7 +320,7 @@ def get_full_header() -> str:
         "ac_aim2AB_turn_type", "ac_aim2AB_Inv_type", "ac_aim2AB_type_line"
     ])
     
-    # 10. acAB数据 (22字段)
+    # 10. acAB数据 (21字段)
     header_fields.extend([
         "acAB_lon", "acAB_lat", "acAB_psi", "acAB_alt",
         "acAB_len", "acAB_rad", "acAB_Vx2nextdot",
@@ -358,7 +354,7 @@ def get_data_for_type(data_type: str, data: Dict[str, Any]) -> str:
         data: 数据字典
     
     Returns:
-        CSV格式字符串（总225列）
+        CSV格式字符串（总221列）
     """
     try:
         timestamp = _safe_str(data.get('timestamp', datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]))
@@ -377,11 +373,11 @@ def get_data_for_type(data_type: str, data: Dict[str, Any]) -> str:
             return _format_voiflag_row(timestamp, telemetry_data)
         elif data_type == 'fcs_datafutaba':
             return _format_futaba_row(timestamp, telemetry_data)
-        elif data_type == 'planning_telemetry':  # Updated from fcs_datagcs
+        elif data_type == 'fcs_datagcs':  # Fixed: Only fcs_datagcs uses this, NOT planning_telemetry
             return _format_gcs_row(timestamp, telemetry_data)
-        elif data_type == 'fcs_line_aim2ab':  # Updated from fcs_ac_aim2ab
+        elif data_type == 'fcs_line_aim2ab':
             return _format_aim2ab_row(timestamp, telemetry_data)
-        elif data_type == 'fcs_line_ab':  # Updated from fcs_ac_ab
+        elif data_type == 'fcs_line_ab':
             return _format_acab_row(timestamp, telemetry_data)
         elif data_type == 'fcs_param':
             return _format_param_row(timestamp, telemetry_data)
@@ -448,85 +444,80 @@ def _format_datactrl_row(timestamp: str, datactrl_data: Dict[str, Any]) -> str:
     row = [timestamp]
     
     # PWMS + STATES为空 (20列)
-    row.extend([""] * (COL_TIMESTAMP + COL_PWMS + COL_STATES - 1))
+    row.extend([""] * (OFFSET_DATACTRL - 1))
     
-    # DATACTRL数据 (53列)
-    # ailOutLoop (8)
-    ail_out = datactrl_data.get('ailOutLoop', {})
-    row.append(f"{_safe_float(ail_out.get('dY_delta')):.4f}")
-    row.append(f"{_safe_float(ail_out.get('Vy_dY2Vy')):.4f}")
-    row.append(f"{_safe_float(ail_out.get('Vy_var')):.4f}")
-    row.append(f"{_safe_float(ail_out.get('Vy_delta')):.4f}")
-    row.append(f"{_safe_float(ail_out.get('Vy_P')):.4f}")
-    row.append(f"{_safe_float(ail_out.get('Vy_Int')):.4f}")
-    row.append(f"{_safe_float(ail_out.get('Vy_D')):.4f}")
-    row.append(f"{_safe_float(ail_out.get('ail_ffc')):.4f}")
+    # Helper to get value regardless of structure
+    def get_val(key):
+        return datactrl_data.get(key, 0)
+
+    # ailOutLoop
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_dY_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_dY2Vy')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_Int')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_D')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_ail_ffc')):.4f}")
     
-    # ailInLoop (8)
-    ail_in = datactrl_data.get('ailInLoop', {})
-    row.append(f"{_safe_float(ail_in.get('ail_trim')):.4f}")
-    row.append(f"{_safe_float(ail_in.get('phi_trim')):.4f}")
-    row.append(f"{_safe_float(ail_in.get('phi_var')):.4f}")
-    row.append(f"{_safe_float(ail_in.get('delta_phi')):.4f}")
-    row.append(f"{_safe_float(ail_in.get('phi_P')):.4f}")
-    row.append(f"{_safe_float(ail_in.get('phi_D')):.4f}")
-    row.append(f"{_safe_float(ail_in.get('ail_fbc')):.4f}")
-    row.append(f"{_safe_float(ail_in.get('ail_law_out')):.4f}")
-    
-    # eleOutLoop (8)
-    ele_out = datactrl_data.get('eleOutLoop', {})
-    row.append(f"{_safe_float(ele_out.get('dX_delta')):.4f}")
-    row.append(f"{_safe_float(ele_out.get('Vx_dX2Vx')):.4f}")
-    row.append(f"{_safe_float(ele_out.get('Vx_var')):.4f}")
-    row.append(f"{_safe_float(ele_out.get('Vx_delta')):.4f}")
-    row.append(f"{_safe_float(ele_out.get('Vx_P')):.4f}")
-    row.append(f"{_safe_float(ele_out.get('Vx_Int')):.4f}")
-    row.append(f"{_safe_float(ele_out.get('Vx_D')):.4f}")
-    row.append(f"{_safe_float(ele_out.get('ele_ffc')):.4f}")
-    
-    # EleInLoop (8)
-    ele_in = datactrl_data.get('EleInLoop', {})
-    row.append(f"{_safe_float(ele_in.get('theta_trim')):.4f}")
-    row.append(f"{_safe_float(ele_in.get('ele_trim')):.4f}")
-    row.append(f"{_safe_float(ele_in.get('theta_var')):.4f}")
-    row.append(f"{_safe_float(ele_in.get('delta_theta')):.4f}")
-    row.append(f"{_safe_float(ele_in.get('theta_P')):.4f}")
-    row.append(f"{_safe_float(ele_in.get('theta_D')):.4f}")
-    row.append(f"{_safe_float(ele_in.get('ele_fbc')):.4f}")
-    row.append(f"{_safe_float(ele_in.get('ele_law_out')):.4f}")
-    
-    # RudOutLoop (3)
-    rud_out = datactrl_data.get('RudOutLoop', {})
-    row.append(f"{_safe_float(rud_out.get('psi_dy')):.4f}")
-    row.append(f"{_safe_float(rud_out.get('psi_delta')):.4f}")
-    row.append(f"{_safe_float(rud_out.get('R_dPsi2R')):.4f}")
-    
-    # rudInLoop (7)
-    rud_in = datactrl_data.get('rudInLoop', {})
-    row.append(f"{_safe_float(rud_in.get('rud_trim')):.4f}")
-    row.append(f"{_safe_float(rud_in.get('R_var')):.4f}")
-    row.append(f"{_safe_float(rud_in.get('dR_delta')):.4f}")
-    row.append(f"{_safe_float(rud_in.get('R_P')):.4f}")
-    row.append(f"{_safe_float(rud_in.get('R_Int')):.4f}")
-    row.append(f"{_safe_float(rud_in.get('rud_fbc')):.4f}")
-    row.append(f"{_safe_float(rud_in.get('rud_law_out')):.4f}")
-    
-    # colOutLoop (8)
-    col_out = datactrl_data.get('colOutLoop', {})
-    row.append(f"{_safe_float(col_out.get('H_delta')):.4f}")
-    row.append(f"{_safe_float(col_out.get('Hdot_dH2Vz')):.4f}")
-    row.append(f"{_safe_float(col_out.get('Hdot_var')):.4f}")
-    row.append(f"{_safe_float(col_out.get('Hdot_delta')):.4f}")
-    row.append(f"{_safe_float(col_out.get('Hdot_P')):.4f}")
-    row.append(f"{_safe_float(col_out.get('Hdot_Int')):.4f}")
-    row.append(f"{_safe_float(col_out.get('Hdot_D')):.4f}")
-    row.append(f"{_safe_float(col_out.get('col_fbc')):.4f}")
-    
-    # colInLoop (3)
-    col_in = datactrl_data.get('colInLoop', {})
-    row.append(f"{_safe_float(col_in.get('col_Vx')):.4f}")
-    row.append(f"{_safe_float(col_in.get('col_law')):.4f}")
-    row.append(f"{_safe_float(col_in.get('col_law_out')):.4f}")
+    # ailInLoop
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_ail_trim')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_trim')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_delta_phi')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_D')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_ail_fbc')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_ail_law_out')):.4f}")
+
+    # eleOutLoop
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_dX_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_dX2Vx')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_Int')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_D')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_ele_ffc')):.4f}")
+
+    # EleInLoop
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_trim')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_ele_trim')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_delta_theta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_D')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_ele_fbc')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_ele_law_out')):.4f}")
+
+    # RudOutLoop
+    row.append(f"{_safe_float(get_val('dataCtrl_n_RudOutLoop_psi_dy')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_RudOutLoop_psi_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_RudOutLoop_R_dPsi2R')):.4f}")
+
+    # rudInLoop
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_rud_trim')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_R_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_dR_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_R_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_R_Int')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_rud_fbc')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_rud_law_out')):.4f}")
+
+    # colOutLoop
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_H_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_dH2Vz')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_Int')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_D')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_col_fbc')):.4f}")
+
+    # colInLoop
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colInLoop_col_Vx')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colInLoop_col_law')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colInLoop_col_law_out')):.4f}")
     
     # 其他全部为空
     fill_count = TOTAL_COLUMNS - len(row)
@@ -536,34 +527,31 @@ def _format_datactrl_row(timestamp: str, datactrl_data: Dict[str, Any]) -> str:
 
 
 def _format_gncbus_row(timestamp: str, gncbus_data: Dict[str, Any]) -> str:
-    """格式化GNCBUS数据行（75列）"""
+    """格式化GNCBUS数据行（73列）"""
     row = [timestamp]
     
-    # 前面为空 (73列)
-    row.extend([""] * (COL_TIMESTAMP + COL_PWMS + COL_STATES + COL_DATACTRL - 1))
+    # 前面为空
+    row.extend([""] * (OFFSET_GNCBUS - 1))
     
-    # GNCBUS数据 (75列)
     # TokenMode (17)
     token_mode = gncbus_data.get('TokenMode', {})
-    row.append(_safe_str(token_mode.get('OnSky', 0)))
-    row.append(_safe_str(token_mode.get('Ctrl_Mode', 0)))
-    row.append(_safe_str(token_mode.get('Pre_CMD', 0)))
-    row.append(_safe_str(token_mode.get('rud_state', 0)))
-    row.append(_safe_str(token_mode.get('ail_state', 0)))
-    row.append(_safe_str(token_mode.get('ele_state', 0)))
-    row.append(_safe_str(token_mode.get('col_state', 0)))
-    row.append(_safe_str(token_mode.get('nav_guid', 0)))
-    row.append(_safe_str(token_mode.get('cmd_guid', 0)))
-    row.append(_safe_str(token_mode.get('mode_guid', 0)))
-    row.append(_safe_str(token_mode.get('step_guid', 0)))
-    row.append(_safe_str(token_mode.get('mode_nav', 0)))
-    row.append(_safe_str(token_mode.get('token_nav', 0)))
-    row.append(_safe_str(token_mode.get('step_nav', 0)))
-    row.append(_safe_str(token_mode.get('mode_vert', 0)))
-    row.append(_safe_str(token_mode.get('token_vert', 0)))
-    row.append(_safe_str(token_mode.get('step_vert', 0)))
-    row.append(_safe_str(token_mode.get('mode_horiz', 0)))
-    row.append(_safe_str(token_mode.get('token_horiz', 0)))
+    row.append(str(token_mode.get('OnSky', 0)))
+    row.append(str(token_mode.get('Ctrl_Mode', 0)))
+    row.append(str(token_mode.get('Pre_CMD', 0)))
+    row.append(str(token_mode.get('rud_state', 0)))
+    row.append(str(token_mode.get('ail_state', 0)))
+    row.append(str(token_mode.get('ele_state', 0)))
+    row.append(str(token_mode.get('col_state', 0)))
+    row.append(str(token_mode.get('nav_guid', 0)))
+    row.append(str(token_mode.get('cmd_guid', 0)))
+    row.append(str(token_mode.get('mode_guid', 0)))
+    row.append(str(token_mode.get('step_guid', 0)))
+    row.append(str(token_mode.get('mode_nav', 0)))
+    row.append(str(token_mode.get('token_nav', 0)))
+    row.append(str(token_mode.get('step_nav', 0)))
+    row.append(str(token_mode.get('mode_vert', 0)))
+    row.append(str(token_mode.get('token_vert', 0)))
+    row.append(str(token_mode.get('step_vert', 0)))
     
     # FtbOpt (10)
     ftb_opt = gncbus_data.get('FtbOpt', {})
@@ -576,12 +564,12 @@ def _format_gncbus_row(timestamp: str, gncbus_data: Dict[str, Any]) -> str:
     row.append(f"{_safe_float(ftb_opt.get('Vy_opt')):.4f}")
     row.append(f"{_safe_float(ftb_opt.get('coldt_opt')):.4f}")
     row.append(f"{_safe_float(ftb_opt.get('col0_opt')):.4f}")
-    row.append(_safe_str(ftb_opt.get('Ftb_Switch', 0)))
+    row.append(str(ftb_opt.get('Ftb_Switch', 0)))
     
     # SrcValue (2)
     src_value = gncbus_data.get('SrcValue', {})
-    row.append(_safe_str(src_value.get('ac_SrcCmdV', 0)))
-    row.append(_safe_str(src_value.get('SrcV_fus', 0)))
+    row.append(str(src_value.get('ac_SrcCmdV', 0)))
+    row.append(str(src_value.get('SrcV_fus', 0)))
     
     # MixValue (10)
     mix_value = gncbus_data.get('MixValue', {})
@@ -644,7 +632,7 @@ def _format_gncbus_row(timestamp: str, gncbus_data: Dict[str, Any]) -> str:
     hover_value = gncbus_data.get('HoverValue', {})
     row.append(f"{_safe_float(hover_value.get('lon_hov')):.8f}")
     row.append(f"{_safe_float(hover_value.get('lat_hov')):.8f}")
-    row.append(_safe_str(hover_value.get('IsHovStatus_hov', 0)))
+    row.append(str(hover_value.get('IsHovStatus_hov', 0)))
     
     # HomeValue (2)
     home_value = gncbus_data.get('HomeValue', {})
@@ -657,183 +645,3 @@ def _format_gncbus_row(timestamp: str, gncbus_data: Dict[str, Any]) -> str:
     
     return ",".join(row)
 
-
-def _format_voiflag_row(timestamp: str, voiflag_data: Dict[str, Any]) -> str:
-    """格式化AVOIFLAG数据行"""
-    row = [timestamp]
-    
-    # 前面为空 (147列)
-    row.extend([""] * OFFSET_AVOIFLAG)
-    
-    # AVOIFLAG数据 (3列)
-    row.append(_safe_str(voiflag_data.get('AvoiFlag_LaserRadar_Enabled', 0)))
-    row.append(_safe_str(voiflag_data.get('AvoiFlag_AvoidanceFlag', 0)))
-    row.append(_safe_str(voiflag_data.get('AvoiFlag_GuideFlag', 0)))
-    
-    # 其他全部为空
-    fill_count = TOTAL_COLUMNS - len(row)
-    row.extend([""] * fill_count)
-    
-    return ",".join(row)
-
-
-def _format_futaba_row(timestamp: str, futaba_data: Dict[str, Any]) -> str:
-    """格式化FUTABA数据行"""
-    row = [timestamp]
-    
-    # 前面为空 (150列)
-    row.extend([""] * OFFSET_FUTABA)
-    
-    # FUTABA数据 (6列)
-    row.append(_safe_str(futaba_data.get('Tele_ftb_Roll', 0)))
-    row.append(_safe_str(futaba_data.get('Tele_ftb_Pitch', 0)))
-    row.append(_safe_str(futaba_data.get('Tele_ftb_Yaw', 0)))
-    row.append(_safe_str(futaba_data.get('Tele_ftb_Col', 0)))
-    row.append(_safe_str(futaba_data.get('Tele_ftb_Switch', 0)))
-    row.append(_safe_str(futaba_data.get('Tele_ftb_com_Ftb_fail', 0)))
-    
-    # 其他全部为空
-    fill_count = TOTAL_COLUMNS - len(row)
-    row.extend([""] * fill_count)
-    
-    return ",".join(row)
-
-
-def _format_gcs_row(timestamp: str, gcs_data: Dict[str, Any]) -> str:
-    """格式化GCS数据行 (GCSTelemetry_T)"""
-    row = [timestamp]
-    
-    # 前面为空
-    row.extend([""] * OFFSET_GCS)
-    
-    # GCS数据 (11列)
-    row.append(str(gcs_data.get('seq_id', 0)))
-    row.append(str(gcs_data.get('timestamp', 0)))
-    row.append(f"{_safe_float(gcs_data.get('pos_x')):.4f}")
-    row.append(f"{_safe_float(gcs_data.get('pos_y')):.4f}")
-    row.append(f"{_safe_float(gcs_data.get('pos_z')):.4f}")
-    row.append(f"{_safe_float(gcs_data.get('vel')):.4f}")
-    row.append(str(gcs_data.get('update_flags', 0)))
-    row.append(str(gcs_data.get('status', 0)))
-    row.append(str(gcs_data.get('global_path_count', 0)))
-    row.append(str(gcs_data.get('local_traj_count', 0)))
-    row.append(str(gcs_data.get('obstacle_count', 0)))
-    
-    # 其他全部为空
-    fill_count = TOTAL_COLUMNS - len(row)
-    row.extend([""] * fill_count)
-    
-    return ",".join(row)
-
-
-def _format_aim2ab_row(timestamp: str, aim_data: Dict[str, Any]) -> str:
-    """格式化ac_aim2AB数据行（22列）"""
-    row = [timestamp]
-    
-    # 前面为空 (160列)
-    row.extend([""] * OFFSET_AC_AIM2AB)
-    
-    # ac_aim2AB数据 (22列)
-    row.append(f"{_safe_float(aim_data.get('lon')):.8f}")
-    row.append(f"{_safe_float(aim_data.get('lat')):.8f}")
-    row.append(f"{_safe_float(aim_data.get('psi')):.4f}")
-    row.append(f"{_safe_float(aim_data.get('alt')):.4f}")
-    row.append(f"{_safe_float(aim_data.get('len')):.4f}")
-    row.append(f"{_safe_float(aim_data.get('rad')):.4f}")
-    row.append(f"{_safe_float(aim_data.get('Vx2nextdot')):.4f}")
-    row.append(_safe_str(_safe_int(aim_data.get('next_num'))))
-    row.append(_safe_str(_safe_int(aim_data.get('next_dot'))))
-    row.append(_safe_str(_safe_int(aim_data.get('type_dot'))))
-    row.append(_safe_str(_safe_int(aim_data.get('clockwise_WP'))))
-    row.append(f"{_safe_float(aim_data.get('R_WP')):.4f}")
-    row.append(_safe_str(_safe_int(aim_data.get('type_WP'))))
-    row.append(_safe_str(_safe_int(aim_data.get('Num_type_WP'))))
-    row.append(f"{_safe_float(aim_data.get('dL_WP')):.4f}")
-    row.append(_safe_str(_safe_int(aim_data.get('Vx_type'))))
-    row.append(_safe_str(_safe_int(aim_data.get('TTC_Fault_Mode'))))
-    row.append(_safe_str(_safe_int(aim_data.get('deltaY_ctrl'))))
-    row.append(_safe_str(_safe_int(aim_data.get('turn_type'))))
-    row.append(_safe_str(_safe_int(aim_data.get('Inv_type'))))
-    row.append(_safe_str(_safe_int(aim_data.get('type_line'))))
-    
-    # 其他全部为空
-    fill_count = TOTAL_COLUMNS - len(row)
-    row.extend([""] * fill_count)
-    
-    return ",".join(row)
-
-
-def _format_acab_row(timestamp: str, ac_data: Dict[str, Any]) -> str:
-    """格式化acAB数据行（22列）"""
-    row = [timestamp]
-    
-    # 前面为空 (182列)
-    row.extend([""] * OFFSET_AC_AB)
-    
-    # acAB数据 (22列)
-    row.append(f"{_safe_float(ac_data.get('lon')):.8f}")
-    row.append(f"{_safe_float(ac_data.get('lat')):.8f}")
-    row.append(f"{_safe_float(ac_data.get('psi')):.4f}")
-    row.append(f"{_safe_float(ac_data.get('alt')):.4f}")
-    row.append(f"{_safe_float(ac_data.get('len')):.4f}")
-    row.append(f"{_safe_float(ac_data.get('rad')):.4f}")
-    row.append(f"{_safe_float(ac_data.get('Vx2nextdot')):.4f}")
-    row.append(_safe_str(_safe_int(ac_data.get('next_num'))))
-    row.append(_safe_str(_safe_int(ac_data.get('next_dot'))))
-    row.append(_safe_str(_safe_int(ac_data.get('type_dot'))))
-    row.append(_safe_str(_safe_int(ac_data.get('clockwise_WP'))))
-    row.append(f"{_safe_float(ac_data.get('R_WP')):.4f}")
-    row.append(_safe_str(_safe_int(ac_data.get('type_WP'))))
-    row.append(_safe_str(_safe_int(ac_data.get('Num_type_WP'))))
-    row.append(f"{_safe_float(ac_data.get('dL_WP')):.4f}")
-    row.append(_safe_str(_safe_int(ac_data.get('Vx_type'))))
-    row.append(_safe_str(_safe_int(ac_data.get('TTC_Fault_Mode'))))
-    row.append(_safe_str(_safe_int(ac_data.get('deltaY_ctrl'))))
-    row.append(_safe_str(_safe_int(ac_data.get('turn_type'))))
-    row.append(_safe_str(_safe_int(ac_data.get('Inv_type'))))
-    row.append(_safe_str(_safe_int(ac_data.get('type_line'))))
-    
-    # 其他全部为空
-    fill_count = TOTAL_COLUMNS - len(row)
-    row.extend([""] * fill_count)
-    
-    return ",".join(row)
-
-
-def _format_param_row(timestamp: str, param_data: Dict[str, Any]) -> str:
-    """格式化PARAM数据行"""
-    row = [timestamp]
-    
-    # 前面为空 (204列)
-    row.extend([""] * OFFSET_PARAM)
-    
-    # PARAM数据 (1列)
-    row.append(_safe_str(_safe_int(param_data.get('TimeStamp'))))
-    
-    # 其他全部为空
-    fill_count = TOTAL_COLUMNS - len(row)
-    row.extend([""] * fill_count)
-    
-    return ",".join(row)
-
-
-def _format_esc_row(timestamp: str, esc_data: Dict[str, Any]) -> str:
-    """格式化ESC数据行（18列）"""
-    row = [timestamp]
-    
-    # 前面为空 (205列)
-    row.extend([""] * OFFSET_ESC)
-    
-    # ESC数据 (18列)
-    # 误差计数 (6)
-    for i in range(1, 7):
-        row.append(_safe_str(_safe_int(esc_data.get(f'esc{i}_error_count', 0))))
-    # 转速 (6)
-    for i in range(1, 7):
-        row.append(_safe_str(_safe_int(esc_data.get(f'esc{i}_rpm', 0))))
-    # 功率百分比 (6)
-    for i in range(1, 7):
-        row.append(_safe_str(_safe_int(esc_data.get(f'esc{i}_power_rating_pct', 0))))
-    
-    # 应该正好225列，不需要填充
-    return ",".join(row)
