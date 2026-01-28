@@ -187,6 +187,74 @@ export const dsmApi = {
 }
 
 /**
+ * 回放数据 API
+ */
+export const replayApi = {
+  /**
+   * 获取回放文件列表
+   */
+  getFiles: async () => {
+    return await apiRequest('/api/replay/files')
+  },
+  
+  /**
+   * 上传回放文件
+   * @param {File} file - CSV文件
+   */
+  uploadFile: async (file) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    
+    const url = `${API_BASE_URL}/api/replay/upload`
+    const options = {
+      method: 'POST'
+    }
+    
+    try {
+      const response = await fetch(url, options)
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`API 请求失败: ${response.status} - ${errorText}`)
+      }
+      return await response.json()
+    } catch (error) {
+      console.error('上传回放文件失败:', error)
+      throw error
+    }
+  },
+  
+  /**
+   * 获取回放状态
+   */
+  getStatus: async () => {
+    return await apiRequest('/api/replay/status')
+  },
+  
+  /**
+   * 控制回放
+   * @param {object} params - 控制参数
+   */
+  controlReplay: async (params) => {
+    return await apiRequest('/api/replay/control', params, 'POST')
+  },
+  
+  /**
+   * 获取回放变量列表（新增）
+   */
+  getHeaders: async () => {
+    return await apiRequest('/api/replay/headers')
+  },
+  
+  /**
+   * 获取回放变量数据（新增）
+   * @param {object} params - {variables, max_points}
+   */
+  getSeries: async (params) => {
+    return await apiRequest('/api/replay/series', params, 'POST')
+  }
+}
+
+/**
  * 统一导出
  */
 export default {
@@ -194,6 +262,7 @@ export default {
   log: logApi,
   recording: recordingApi,
   dsm: dsmApi,
+  replay: replayApi,
   udp: udpApi,
   request: apiRequest
 }

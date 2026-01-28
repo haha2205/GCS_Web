@@ -38,7 +38,7 @@ NCLINK_HEAD0 = 0xFF
 NCLINK_HEAD1 = 0xFC
 NCLINK_END0 = 0xA1
 NCLINK_END1 = 0xA2
-BUFFER_SIZE_MAX = 4096
+BUFFER_SIZE_MAX = 16384
 
 # 飞控功能字定义
 NCLINK_SEND_EXTU_FCS = 0x40
@@ -411,9 +411,9 @@ class ExtY_FCS_DATACTRL_T:
 class ExtY_FCS_STATES_T:
     """飞行状态数据
     
-    - real_T states_lat (8字节，double）
-    - real_T states_lon (8字节，double）
-    - real32_T states_height (4字节，float）
+    - real_T states_lat (8字节，double)
+    - real_T states_lon (8字节，double)
+    - real32_T states_height (4字节，float)
     - 10个real32_T，共40字节（各4字节）
     总计：8+8+4+40 = 56字节
     """
@@ -1254,25 +1254,11 @@ class ExtY_FCS_LINESTRUC_ac_aim2AB_T:
         """
         # 格式字符串：< (小端序) + dd (2*double=16) + 5f (5*float=20) + bb (2*int8=2)
         #             + 2Bf (2*uint8+1*float=6) + 2Bf (2*uint8+1*float=6) + 6B (6*uint8=6)
-        # 总计：16 + 20 + 2 + 6 + 6 + 6 = 56字节？不对！应该是87字节
+        # 总计：16 + 20 + 2 + 6 + 6 + 6 = 56字节？不对！应该是：87字节
         
         # 让我重新按照interface.h的字段顺序：
-        # 2*real_T (16) + 第6-11字段6*real32_T (24) +
-        # 2*int8_T (2) + 第12-14字段3*uint8_T (3) +
-        # 第15字段real32_T (4) + 第16-17字段2*uint8_T (2) +
-        # 第18字段real32_T (4) + 第19-24字段6*uint8_T (6)
-        # = 16 + 24 + 2 + 3 + 4 + 2 + 4 + 6 = 61？还是不对！
-        
-        # 查看interface.h第237-259行的实际结构：
-        # 实际上应该是：2*real_T + 6*real32_T + 2*int8_T + 3*uint8_T + 1*real32_T + 2*uint8_T + 1*real32_T + 9*uint8_T
-        # = 16 + 24 + 2 + 3 + 4 + 2 + 4 + 9 = 64？还是不对！应该是87字节
-        
-        # 我需要严格按照interface.h的字段列表：
-        # field[0-1]: real_T, real_T (16)
-        # field[2-11]: 10*real32_T (40)
-        # field[12-13]: int8_T, int8_T (2)
-        # field[14-22]: 9*uint8_T (9)
-        # = 16 + 40 + 2 + 9 = 67？还是不对！
+        # 2*real_T + 6*real32_T + 2*int8_T + 3*uint8_T + 1*real32_T + 2*uint8_T + 1*real32_T + 9*uint8_T
+        # = 16 + 24 + 2 + 3 + 4 + 2 + 4 + 9 = 64？还是不对！
         
         # 让我直接按照from_bytes的解析逻辑编写to_bytes
         # from_bytes中：2*double + 15*float + 2*int8 + 9*uint8 = 16 + 60 + 2 + 9 = 87字节
@@ -1333,7 +1319,8 @@ class ExtY_FCS_LINESTRUC_ac_aim2AB_T:
             'TTC_Fault_Mode': self.ac_aim2AB_TTC_Fault_Mode,
             'deltaY_ctrl': self.ac_aim2AB_deltaY_ctrl,
             'turn_type': self.ac_aim2AB_turn_type,
-            'Inv_type': self.ac_aim2AB_Inv_type
+            'Inv_type': self.ac_aim2AB_Inv_type,
+            'type_line': self.ac_aim2AB_type_line
         }
 
 
@@ -1616,12 +1603,12 @@ class ObstacleInfo_T:
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ObstacleInfo_T':
         """从字节数据解析障碍物信息"""
-        # 总共 13个float32 + 1个int32 = 56字节
-        fmt = '<fffffffffffff f'  # 13 floats + 1 int
-        if len(data) < 56:
+        # 总共 11个float32 + 1个int32 + 1个float32 = 52字节
+        fmt = '<fffffffffff i f'  # 11 floats + 1 int + 1 float
+        if len(data) < 52:
             return cls()
         
-        values = struct.unpack(fmt, data[:56])
+        values = struct.unpack(fmt, data[:52])
         return cls(
             position_x=values[0],
             position_y=values[1],
@@ -1634,7 +1621,7 @@ class ObstacleInfo_T:
             distance=values[8],
             azimuth=values[9],
             confidence=values[10],
-            point_count=int(values[11]),
+            point_count=values[11],
             density=values[12]
         )
 
@@ -1653,6 +1640,74 @@ class ObstacleOutput_T:
     frame_id: int32_T = 0
     input_point_count: int32_T = 0
     filtered_point_count: int32_T = 0
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> 'ObstacleOutput_T':
+        """从字节数据解析"""
+        # 结构: obstacle_count(4) + obstacles数组(52*50=2600) + frame_info 等
+        # 只有当数据长度足够时才进行完整解析
+        if len(data) < 20:  # 最小安全长度
+            return cls()
+        
+        offset = 0
+        
+        # 解析obstacle_count
+        obstacle_count = struct.unpack('<i', data[offset:offset+4])[0]
+        offset += 4
+        
+        # 障碍物数组位于偏移 4 处，固定大小 50 * 52 = 2600 字节
+        obstacles_start = 4
+        obstacles_size = 50 * 52 # MAX_OBSTACLES = 50, sizeof(ObstacleInfo_T) = 52
+        
+        # 时间戳和帧信息位于数组之后
+        # 4 + 2600 = 2604
+        info_offset = obstacles_start + obstacles_size
+        
+        # 检查数据长度是否足够包含尾部信息 (2604 + 8+8+4+4+4 = 2632)
+        if len(data) < info_offset + 28:
+            # 如果数据不够长
+             pass
+
+        # 解析障碍物
+        obstacles = []
+        max_valid = min(obstacle_count, 50)
+        
+        curr_obs_offset = obstacles_start
+        for i in range(max_valid):
+            if curr_obs_offset + 52 <= len(data):
+                obs = ObstacleInfo_T.from_bytes(data[curr_obs_offset : curr_obs_offset+52])
+                obstacles.append(obs)
+            curr_obs_offset += 52
+            
+        # 解析尾部信息 (时间戳等)
+        timestamp_sec = 0.0
+        timestamp_us = 0
+        frame_id = 0
+        input_point_count = 0
+        filtered_point_count = 0
+
+        if len(data) >= info_offset + 28:
+             off = info_offset
+             timestamp_sec = struct.unpack('<d', data[off:off+8])[0]
+             off += 8
+             timestamp_us = struct.unpack('<Q', data[off:off+8])[0]
+             off += 8
+             frame_id = struct.unpack('<i', data[off:off+4])[0]
+             off += 4
+             input_point_count = struct.unpack('<i', data[off:off+4])[0]
+             off += 4
+             filtered_point_count = struct.unpack('<i', data[off:off+4])[0]
+             off += 4
+
+        return cls(
+            obstacle_count=obstacle_count,
+            obstacles=obstacles,
+            timestamp_sec=timestamp_sec,
+            timestamp_us=timestamp_us,
+            frame_id=frame_id,
+            input_point_count=input_point_count,
+            filtered_point_count=filtered_point_count
+        )
     
     def to_json(self) -> dict:
         return {
@@ -1678,70 +1733,165 @@ class SystemStatus_T:
 
 
 # ================================================================
-# 航迹规划系统数据结构体
+# GCS航迹规划/遥测协议定义
 # ================================================================
 
 @dataclass
 class PathPoint_T:
-    """路径点 (ENU坐标系, 单位: m)"""
-    x: real_T = 0.0
-    y: real_T = 0.0
-    z: real_T = 0.0
+    """路径点坐标 (对应C的PathPoint_T)"""
+    x: real_T = 0.0  # double
+    y: real_T = 0.0  # double
+    z: real_T = 0.0  # double
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> 'PathPoint_T':
+        """从24字节数据解析"""
+        if len(data) < 24:
+            return cls()
+        values = struct.unpack('<3d', data[:24])
+        return cls(x=values[0], y=values[1], z=values[2])
+
+    def to_bytes(self) -> bytes:
+        """编码为24字节数据"""
+        return struct.pack('<3d', self.x, self.y, self.z)
+
+    def to_json(self) -> dict:
+        return {'x': self.x, 'y': self.y, 'z': self.z}
 
 
 @dataclass
 class Object3d_T:
-    """3D障碍物信息"""
-    cx: real_T = 0.0  # 中心坐标X (ENU系, 米)
-    cy: real_T = 0.0  # 中心坐标Y (ENU系, 米)
-    cz: real_T = 0.0  # 中心坐标Z (ENU系, 米)
-    sx: real_T = 0.0  # 长度 (米)
-    sy: real_T = 0.0  # 宽度 (米)
-    sz: real_T = 0.0  # 高度 (米)
-    vx: real_T = 0.0  # 速度X (米/秒)
-    vy: real_T = 0.0  # 速度Y (米/秒)
-    vz: real_T = 0.0  # 速度Z (米/秒)
+    """障碍物信息 (对应C的Object3d_T)"""
+    cx: real_T = 0.0
+    cy: real_T = 0.0
+    cz: real_T = 0.0
+    sx: real_T = 0.0
+    sy: real_T = 0.0
+    sz: real_T = 0.0
+    vx: real_T = 0.0
+    vy: real_T = 0.0
+    vz: real_T = 0.0
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> 'Object3d_T':
+        """从72字节数据解析"""
+        if len(data) < 72:
+            return cls()
+        values = struct.unpack('<9d', data[:72])
+        return cls(cx=values[0], cy=values[1], cz=values[2],
+                   sx=values[3], sy=values[4], sz=values[5],
+                   vx=values[6], vy=values[7], vz=values[8])
+
+    def to_bytes(self) -> bytes:
+        """编码为72字节数据"""
+        return struct.pack('<9d', self.cx, self.cy, self.cz, self.sx, self.sy, self.sz, self.vx, self.vy, self.vz)
+
+    def to_json(self) -> dict:
+        return {
+            'center': {'x': self.cx, 'y': self.cy, 'z': self.cz},
+            'size': {'x': self.sx, 'y': self.sy, 'z': self.sz},
+            'velocity': {'x': self.vx, 'y': self.vy, 'z': self.vz}
+        }
 
 
 @dataclass
 class GCSTelemetry_T:
-    """遥测数据结构体 (Drone -> GCS)"""
+    """GCS遥测数据，对应功能码 0x71 (新版结构)"""
     seq_id: uint32_T = 0
     timestamp: uint32_T = 0
-    
-    # 当前状态
     current_pos_x: real_T = 0.0
     current_pos_y: real_T = 0.0
     current_pos_z: real_T = 0.0
     current_vel: real_T = 0.0
-    
-    # 更新标志
     update_flags: uint8_T = 0
     status: uint8_T = 0
-    
-    # 路径点计数
     global_path_count: uint16_T = 0
     local_traj_count: uint16_T = 0
     obstacle_count: uint16_T = 0
+    
+    # 动态数据
+    global_path: List[PathPoint_T] = field(default_factory=list)
+    local_path: List[PathPoint_T] = field(default_factory=list)
+    obstacles: List[Object3d_T] = field(default_factory=list)
 
+    @classmethod
+    def from_bytes(cls, data: bytes) -> Optional['GCSTelemetry_T']:
+        """从字节数据解析GCS遥测信息 (新版结构)"""
+        try:
+            offset = 0
+            
+            # 固定部分: 2*uint32 + 4*double + 2*uint8 + 3*uint16 = 8 + 32 + 2 + 6 = 48 bytes
+            if len(data) < 48:
+                logger.warning(f"[GCSTelemetry_T] 数据长度不足，无法解析固定头部: {len(data)} < 48")
+                return None
 
-@dataclass
-class GCSCommand_T:
-    """地面站指令结构体 (GCS -> Drone)"""
-    seq_id: uint32_T = 0
-    timestamp: uint32_T = 0
-    
-    # 目标位置 (ENU 坐标系)
-    target_pos_x: real_T = 0.0
-    target_pos_y: real_T = 0.0
-    target_pos_z: real_T = 0.0
-    
-    # 速度约束
-    cruise_speed: real_T = 0.0
-    
-    # 控制标志
-    enable_flag: uint8_T = 0
-    CmdIdx: int32_T = 0
+            # 解析固定部分
+            (seq_id, timestamp,
+             current_pos_x, current_pos_y, current_pos_z, current_vel,
+             update_flags, status,
+             global_path_count, local_traj_count, obstacle_count) = struct.unpack_from('<II4dBB3H', data, offset)
+            offset += 48
+
+            # 验证总长度是否足够
+            expected_len = offset + (global_path_count * 24) + (local_traj_count * 24) + (obstacle_count * 72)
+            if len(data) < expected_len:
+                logger.warning(f"[GCSTelemetry_T] 数据长度不足，无法解析动态数组: {len(data)} < {expected_len}")
+                return None
+
+            # 解析全局路径
+            global_path = []
+            for _ in range(global_path_count):
+                global_path.append(PathPoint_T.from_bytes(data[offset:offset+24]))
+                offset += 24
+
+            # 解析局部路径
+            local_path = []
+            for _ in range(local_traj_count):
+                local_path.append(PathPoint_T.from_bytes(data[offset:offset+24]))
+                offset += 24
+
+            # 解析障碍物
+            obstacles = []
+            for _ in range(obstacle_count):
+                obstacles.append(Object3d_T.from_bytes(data[offset:offset+72]))
+                offset += 72
+            
+            return cls(
+                seq_id=seq_id,
+                timestamp=timestamp,
+                current_pos_x=current_pos_x,
+                current_pos_y=current_pos_y,
+                current_pos_z=current_pos_z,
+                current_vel=current_vel,
+                update_flags=update_flags,
+                status=status,
+                global_path_count=global_path_count,
+                local_traj_count=local_traj_count,
+                obstacle_count=obstacle_count,
+                global_path=global_path,
+                local_path=local_path,
+                obstacles=obstacles
+            )
+        except Exception as e:
+            logger.error(f"解析 GCSTelemetry_T 失败: {e}")
+            return None
+
+    def to_json(self) -> dict:
+        """将遥测数据转换为JSON格式"""
+        return {
+            'seq_id': self.seq_id,
+            'timestamp': self.timestamp,
+            'position': {'x': self.current_pos_x, 'y': self.current_pos_y, 'z': self.current_pos_z},
+            'velocity': self.current_vel,
+            'update_flags': self.update_flags,
+            'status': self.status,
+            'global_path_count': self.global_path_count,
+            'global_path': [p.to_json() for p in self.global_path],
+            'local_traj_count': self.local_traj_count,
+            'local_path': [p.to_json() for p in self.local_path],
+            'obstacle_count': self.obstacle_count,
+            'obstacles': [o.to_json() for o in self.obstacles]
+        }
 
 
 # ================================================================
@@ -1808,7 +1958,7 @@ class NCLinkFrame:
         [帧头2字节] [命令1字节] [长度2字节] [数据N字节] [校验1字节] [帧尾2字节]
         
         格式说明：
-        !BBH = [头1][头2][长度]
+        !BBH = [头1][头2][命令]
         但这是错的！应该是：
         !BBH = [头1][头2][命令] + 长度单独打包
         """
@@ -1904,7 +2054,7 @@ class NCLinkProtocolParser:
             data_len = struct.unpack_from('!H', self.buffer, 3)[0]
             
             # 检查帧是否完整
-            # 格式: head(2) + func(1) + len(2) + data(data_len) + checksum(1) + end(2) = 8 + data_len
+            # 格式: head(2) + func(1) + len(2) + data(data_len) + checksum(1) + tail(2)
             total_len = 2 + 1 + 2 + data_len + 1 + 2  # head + func + len + data + checksum + end
             if len(self.buffer) < total_len:
                 break
@@ -1940,8 +2090,11 @@ class NCLinkProtocolParser:
         Returns:
             解析后的消息字典，失败返回None
         """
-        # 打印调试信息
-        hex_preview = frame_data[:20].hex(' ') if len(frame_data) >= 20 else frame_data.hex(' ')
+        # 打印调试信息（兼容Python 3.7）
+        import binascii
+        preview_data = frame_data[:20] if len(frame_data) >= 20 else frame_data
+        hex_bytes = binascii.hexlify(preview_data).decode('ascii')
+        hex_preview = ' '.join([hex_bytes[i:i+2] for i in range(0, len(hex_bytes), 2)])
         print(f"[协议解析] 帧数据预览: {hex_preview}")
         
         # 验证最小帧长度
@@ -1959,7 +2112,7 @@ class NCLinkProtocolParser:
         data_len = struct.unpack_from('!H', frame_data, 3)[0]
         
         # 验证数据长度是否合理
-        if data_len > 4096:
+        if data_len > BUFFER_SIZE_MAX:
             print(f"[协议解析] ⚠ 数据长度异常: {data_len}（超过最大值）")
             return None
         
@@ -1980,8 +2133,12 @@ class NCLinkProtocolParser:
             print(f"[协议解析] ✗ 提取payload失败: {e}")
             return None
         
-        # 验证校验和
-        expected_checksum = NCLinkFrame.calculate_checksum(func_code, payload)
+        # 飞控遥测校验和计算：对 帧头(2) + 功能码(1) + 长度(2) + 载荷(N) 进行异或
+        frame_for_checksum = frame_data[:5+data_len]
+        expected_checksum = 0
+        for byte in frame_for_checksum:
+            expected_checksum ^= byte
+
         print(f"[协议解析] 校验和: 计算{expected_checksum:02X}, 接收{checksum:02X}")
         if checksum != expected_checksum:
             print(f"[协议解析] ✗ 校验和不匹配")
@@ -2228,24 +2385,19 @@ class NCLinkProtocolParser:
         # ============ 规划系统数据包解析 (0x70-0x71) ============
         elif func_code == NCLINK_GCS_TELEMETRY:
             # 0x71: 规划系统遥测
-            if len(payload) >= 16:
-                fmt = '!IIfffBBHHH'
-                values = struct.unpack(fmt, payload[:22])
-                self.gcs_telemetry = GCSTelemetry_T(
-                    seq_id=values[0],
-                    timestamp=values[1],
-                    current_pos_x=values[2],
-                    current_pos_y=values[3],
-                    current_pos_z=values[4],
-                    current_vel=0.0,
-                    update_flags=values[5],
-                    status=values[6],
-                    global_path_count=values[7],
-                    local_traj_count=values[8],
-                    obstacle_count=values[9]
-                )
-                message['type'] = 'planning_telemetry'
-                message['data'] = self.gcs_telemetry.__dict__
+            try:
+                self.gcs_telemetry = GCSTelemetry_T.from_bytes(payload)
+                if self.gcs_telemetry:
+                    message['type'] = 'planning_telemetry'
+                    message['data'] = self.gcs_telemetry.to_json()
+                    logger.info(f"[协议解析] ✓ 成功解析规划遥测数据 (0x71): {message['data']}")
+                else:
+                    message['type'] = 'planning_telemetry_failed'
+                    message['data'] = {'error': 'Failed to parse GCSTelemetry_T from bytes'}
+            except Exception as e:
+                logger.error(f"[协议解析] ✗ 解析规划遥测数据 (0x71) 时发生异常: {e}")
+                message['type'] = 'planning_telemetry_error'
+                message['data'] = {'error': str(e)}
         
         else:
             # 未知功能码
@@ -2269,6 +2421,7 @@ __all__ = [
     'ExtY_FCS_PWMS_T', 'ExtY_FCS_STATES_T', 'ExtY_FCS_DATACTRL_T',
     'ExtY_FCS_GNCBUS_T', 'ExtY_FCS_AVOIFLAG_T', 'ExtY_FCS_ESC_T',
     'ExtY_FCS_PARAM_T', 'ObstacleOutput_T', 'SystemStatus_T',
+    'GCSTelemetry_T', 'ExtY_FCS_LINESTRUC_ac_aim2AB_T', 'ExtY_FCS_LINESTRUC_acAB_T',
     'NCLinkFrame', 'encode_command_packet',
     'encode_takeoff_command', 'encode_land_command',
     'encode_hover_command', 'encode_rtl_command',
@@ -2416,6 +2569,7 @@ def encode_extu_fcs_from_dict(pids_data: dict, cmd_idx: int = 0, cmd_mission: in
         float(pids_data.get('fKrR', 0.2)),        # F_KrR
         float(pids_data.get('fIrR', 0.01)),       # F_IrR
         float(pids_data.get('fKrAy', 0.1)),       # F_KrAy
+        float(pids_data.get('fIrAy', 0.01)),      # F_IrAy
         float(pids_data.get('fKrPSI', 1.0)),      # F_KrPSI
         # 偏航和高度控制（5个）
         float(pids_data.get('fKcH', 0.36)),        # F_KcH

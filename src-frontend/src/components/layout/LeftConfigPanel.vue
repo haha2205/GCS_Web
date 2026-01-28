@@ -75,40 +75,8 @@
       <div class="config-section">
         <h4 class="section-title">数据记录</h4>
         <div class="config-grid">
-          <div class="config-row">
-            <label>日志目录</label>
-            <div class="file-input">
-              <input
-                v-model="logDirectory"
-                type="text"
-                class="config-input"
-                placeholder="例如: E:/Logs 或 /home/user/logs"
-                :disabled="loading"
-                @keyup.enter="saveLogConfig"
-              />
-              <button class="browse-btn" @click="browseDirectory" :disabled="loading" title="选择目录">
-                📁 浏览
-              </button>
-            </div>
-          </div>
-          <div class="config-row">
-            <label>日志文件名（可选）</label>
-            <div class="file-input">
-              <input
-                v-model="logFileName"
-                type="text"
-                class="config-input"
-                placeholder="例如: my_drone_log (留空使用自动命名）"
-                :disabled="loading"
-                @keyup.enter="saveLogConfig"
-              />
-              <button class="clear-btn" @click="clearFileName" :disabled="loading" title="清除文件名">
-                🗑 清除
-              </button>
-            </div>
-          </div>
           <div class="info-row">
-            <span class="info-text">💡 提示：留空文件名将自动生成格式：drone_log_YYYYMMDD_HHMMSS.csv</span>
+            <span class="info-text">📂 日志自动保存在项目目录的 <strong>Log/</strong> 文件夹下</span>
           </div>
           <div class="config-row switch-row">
             <label>自动记录</label>
@@ -330,20 +298,14 @@ const saveLogConfig = async () => {
   saveMessage.value = ''
   try {
     const config = {
-      logDirectory: logDirectory.value,
+      logDirectory: '',
       logFileName: logFileName.value,
       autoRecord: autoRecord.value,
       logFormat: logFormat.value,
       logLevel: logLevel.value
     }
     
-    // 检查日志目录是否已设置（如果启用自动记录）
-    if (autoRecord.value && !logDirectory.value) {
-      saveMessage.value = '请先设置日志目录'
-      saveSuccess.value = false
-      droneStore.addLog('请先设置日志目录', 'warning')
-      return
-    }
+    // 移除目录检查，默认保存到项目Log目录
     
     const result = await logApi.updateConfig(config)
     saveMessage.value = result.message

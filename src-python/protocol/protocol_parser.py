@@ -5,12 +5,19 @@ MiniQGCLinkV2.0 协议解析器（精简版）
 
 import asyncio
 import logging
-from typing import Optional, Callable, Any, Dict
+from typing import Optional, Callable, Any, Dict, List
+import struct
 
 from .nclink_protocol import (
     NCLINK_HEAD0, NCLINK_HEAD1, NCLINK_END0, NCLINK_END1,
     NCLinkProtocolParser,
-    PortType
+    PortType,
+    NCLINK_GCS_TELEMETRY,  # 导入功能码常量
+    GCSTelemetry_T,        # 导入遥测数据结构体
+)
+from .lidar_imu_protocol import (
+    NCLINK_RECEIVE_LIDAR_OBSTACLES, # 导入雷达功能码
+    ObstacleOutput_T       # 导入雷达数据结构体
 )
 # 导入config模块：直接导入（main.py已将src-python添加到sys.path）
 from config import config
@@ -171,10 +178,12 @@ class UDPHandler:
             transport = next(iter(self._transports.values()))
             transport.sendto(data, (host, port))
             logger.info(f"已发送 {len(data)} 字节到 {host}:{port}")
-            
-            # 打印数据包头部用于调试
+
+            # 打印数据包头部用于调试（兼容Python 3.7）
             if len(data) >= 10:
-                hex_preview = data[:10].hex(' ')
+                import binascii
+                hex_bytes = binascii.hexlify(data[:10]).decode('ascii')
+                hex_preview = ' '.join([hex_bytes[i:i+2] for i in range(0, len(hex_bytes), 2)])
                 logger.debug(f"发送数据预览: {hex_preview}")
                 
         except Exception as e:
@@ -226,9 +235,12 @@ class NCLinkUDPServerProtocol(asyncio.DatagramProtocol):
     def datagram_received(self, data: bytes, addr):
         """收到UDP数据包的回调"""
         logger.info(f"[端口{self.port}] 收到来自 {addr} 的数据，长度: {len(data)}")
-        
-        # 打印前10字节用于调试
-        hex_preview = data[:10].hex(' ') if len(data) >= 10 else data.hex(' ')
+
+        # 打印前10字节用于调试（兼容Python 3.7）
+        import binascii
+        preview_data = data[:10] if len(data) >= 10 else data
+        hex_preview = binascii.hexlify(preview_data).decode('ascii')
+        hex_preview = ' '.join([hex_preview[i:i+2] for i in range(0, len(hex_preview), 2)])
         logger.debug(f"[端口{self.port}] 数据预览: {hex_preview}")
         
         try:
@@ -251,3 +263,135 @@ class NCLinkUDPServerProtocol(asyncio.DatagramProtocol):
             logger.error(f"[端口{self.port}] UDP连接丢失: {exc}")
         else:
             logger.info(f"[端口{self.port}] UDP连接已关闭")
+
+
+# ================================================================
+# 协议解析器
+# ================================================================
+
+class NCLinkFrame:
+    """NCLink 帧结构"""
+    
+    @staticmethod
+    def calculate_checksum(func_code: int, payload: bytes) -> int:
+        """计算校验和"""
+        # 校验和算法：帧头(2) + 功能码(1) + 数据长度(2) + 数据区间
+        checksum = 0
+        for b in payload:
+            checksum ^= b
+        return checksum
+    
+    def parse_frame(self, frame_data: bytes, port_type: PortType) -> Optional[dict]:
+        """解析单个帧
+        
+        Args:
+            frame_data: 帧数据
+            port_type: 端口类型
+        
+        Returns:
+            解析后的消息字典，失败返回None
+        """
+        logger.debug(f"[parse_frame] 帧数据长度: {len(frame_data)}")
+        logger.debug(f"[parse_frame] 帧数据预览: {frame_data[:20].hex(' ')}")
+
+        if len(frame_data) < 8:
+            logger.error(f"[parse_frame] 帧数据长度不足: {len(frame_data)} < 8")
+            return None
+
+        if frame_data[0] != NCLINK_HEAD0 or frame_data[1] != NCLINK_HEAD1:
+            logger.error(f"[parse_frame] 帧头无效: {frame_data[:2].hex(' ')}")
+            return None
+
+        func_code = frame_data[2]
+        data_len = struct.unpack_from('!H', frame_data, 3)[0]
+        expected_frame_len = 2 + 1 + 2 + data_len + 1 + 2
+
+        if len(frame_data) < expected_frame_len:
+            logger.error(f"[parse_frame] 帧数据长度不足: {len(frame_data)} < {expected_frame_len}")
+            return None
+
+        payload = frame_data[5:5 + data_len]
+        checksum = frame_data[5 + data_len]
+        calculated_checksum = self.calculate_checksum(func_code, payload)
+
+        if checksum != calculated_checksum:
+            logger.error(f"[parse_frame] 校验和错误: 接收=0x{checksum:02X}, 计算=0x{calculated_checksum:02X}")
+            return None
+
+        logger.info(f"[parse_frame] 功能码: 0x{func_code:02X}, 数据长度: {data_len}, 校验和: 0x{checksum:02X}")
+
+        if func_code == NCLINK_GCS_TELEMETRY:
+            telemetry = GCSTelemetry_T.from_bytes(payload)
+            if telemetry:
+                logger.debug(f"[parse_frame] 规划遥测解析成功")
+                # 将对象转换为字典，添加type字段方便后续处理
+                result = telemetry.to_dict() if hasattr(telemetry, 'to_dict') else telemetry.__dict__
+                result['type'] = 'planning_telemetry'
+                result['func_code'] = func_code
+                return result
+            else:
+                logger.error("[parse_frame] 遥测数据解析失败")
+        
+        elif func_code == NCLINK_RECEIVE_LIDAR_OBSTACLES:
+            obstacles = ObstacleOutput_T.from_bytes(payload)
+            if obstacles:
+                logger.debug(f"[parse_frame] 雷达障碍物解析成功: {obstacles.obstacle_count}个")
+                result = obstacles.to_dict() if hasattr(obstacles, 'to_dict') else obstacles.__dict__
+                result['type'] = 'lidar_obstacles'
+                result['func_code'] = func_code
+                return result
+            else:
+                logger.error("[parse_frame] 雷达障碍物解析失败")
+
+        return None
+    
+    def feed_data(self, data: bytes, port_type: PortType = PortType.PORT_18504_RECEIVE) -> List[dict]:
+        """feeding数据并解析
+        
+        Args:
+            data: 接收到的字节数据
+            port_type: 端口类型（用于区分不同来源的数据）
+        
+        Returns:
+            解析后的消息列表
+        """
+        logger.debug(f"[feed_data] 接收到数据长度: {len(data)} 字节")
+        logger.debug(f"[feed_data] 数据预览: {data[:20].hex(' ')}")
+
+        self.buffer.extend(data)
+        messages = []
+
+        while len(self.buffer) >= 6:  # 最小帧长度
+            logger.debug(f"[feed_data] 当前缓冲区长度: {len(self.buffer)}")
+            logger.debug(f"[feed_data] 缓冲区预览: {self.buffer[:20].hex(' ')}")
+
+            # 检查帧头
+            if self.buffer[0] != NCLINK_HEAD0 or self.buffer[1] != NCLINK_HEAD1:
+                logger.warning(f"[feed_data] 无效帧头: {self.buffer[:2].hex(' ')}")
+                self.buffer.pop(0)
+                continue
+
+            # 检查帧长度
+            if len(self.buffer) < 8:
+                logger.debug("[feed_data] 缓冲区数据不足以解析帧头")
+                break
+
+            func_code = self.buffer[2]
+            data_len = struct.unpack_from('!H', self.buffer, 3)[0]
+            expected_frame_len = 2 + 1 + 2 + data_len + 1 + 2
+
+            if len(self.buffer) < expected_frame_len:
+                logger.debug(f"[feed_data] 缓冲区数据不足以解析完整帧: {len(self.buffer)} < {expected_frame_len}")
+                break
+
+            frame_data = self.buffer[:expected_frame_len]
+            self.buffer = self.buffer[expected_frame_len:]
+
+            logger.info(f"[feed_data] 解析帧: 功能码=0x{func_code:02X}, 数据长度={data_len}, 帧长度={expected_frame_len}")
+
+            # 调用parse_frame解析帧
+            message = self.parse_frame(frame_data, port_type)
+            if message:
+                messages.append(message)
+
+        return messages

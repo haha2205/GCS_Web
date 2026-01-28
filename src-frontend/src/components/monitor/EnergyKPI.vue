@@ -68,11 +68,11 @@ const powerHistory = ref([])
 
 // 当前指标值
 const metrics = computed(() => {
-  return props.dimensionData || {
+  return Object.assign({
     power_watts: 0,
     total_joules: 0,
     score: 1.0
-  }
+  }, props.dimensionData)
 })
 
 // 实时评分

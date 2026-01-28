@@ -29,7 +29,7 @@
     <div v-if="showInfo" class="scene-info">
       <div class="info-item">
         <span class="label">高度</span>
-        <span class="value">{{ (droneStore.fcsStates?.altitude ?? 0).toFixed(1) }}m</span>
+        <span class="value">{{ (droneStore.fcsStates?.states_height || droneStore.planningTelemetry?.currentPosZ || 0).toFixed(1) }}m</span>
       </div>
       <div class="info-item">
         <span class="label">俯仰</span>
@@ -48,7 +48,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, toRaw } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { useDroneStore } from '@/store/drone'
@@ -88,11 +88,17 @@ let scene, camera, renderer, controls
 let droneGroup, droneBody, rotors = []
 let dropLine = null
 let groundShadow = null
-let trajectoryLine = null
+let trajectoryLine = null  // 历史轨迹
+let globalPathMesh = null    // 全局路径 Mesh (Tube)
+let localTrajMesh = null    // 局部轨迹 Mesh (Tube)
+let globalPathMaterial = null
+let localTrajMaterial = null
+let lidarObstacleMeshes = []  // 雷达障碍物 Mesh 数组
 let horizonRing = null        // 空间姿态环
 let thrustPillars = []         // 推力柱数组
 let historyPoints = []
 const maxHistoryPoints = 500
+const maxTrajectoryPoints = 500  // 轨迹最大点数
 
 const sceneData = ref({
   pitch: props.pitch,
@@ -116,7 +122,15 @@ const switchViewMode = (mode) => {
 
   switch (mode) {
     case 'chase':
-      const altitude = droneStore.fcsStates?.altitude ?? 0
+      // 优先从 fcsStates 获取高度，如果没有则尝试从 planningTelemetry 获取
+      // 注意：fcsStates 使用 states_height，planningTelemetry 使用 currentPosZ
+      let chaseAltitude = 0;
+      if (droneStore.fcsStates && typeof droneStore.fcsStates.states_height === 'number' && droneStore.fcsStates.states_height !== 0) {
+        chaseAltitude = droneStore.fcsStates.states_height;
+      } else if (droneStore.planningTelemetry && typeof droneStore.planningTelemetry.currentPosZ === 'number') {
+        chaseAltitude = droneStore.planningTelemetry.currentPosZ;
+      }
+      
       const offset = new THREE.Vector3(-10, 5, 10)
       camera.position.copy(droneGroup.position.clone().add(offset))
       controls.target.copy(droneGroup.position)
@@ -148,7 +162,7 @@ const initScene = () => {
   scene.fog = new THREE.Fog(0x050508, 40, 200)
 
   // 创建相机
-  camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 500)
+  camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 5000)
   camera.position.set(8, 5, 8)
   camera.lookAt(0, 0, 0)
 
@@ -212,13 +226,17 @@ const initScene = () => {
 
   // 创建垂直投影线
   createDropLine()
-
+  
   // 创建地面阴影
   createGroundShadow()
-
+  
   // 创建历史轨迹（带垂直投影幕）
   createHistoryTrail()
-
+  
+  // 创建全局路径和局部轨迹
+  createGlobalPath()
+  createLocalTraj()
+  
   // 开始动画循环
   animate()
 }
@@ -475,6 +493,207 @@ const createHistoryTrail = () => {
   updateHistoryTrail()
 }
 
+// 创建全局路径轨迹 (初始化材质)
+const createGlobalPath = () => {
+  globalPathMaterial = new THREE.MeshStandardMaterial({
+    color: 0x3288fa,
+    emissive: 0x3288fa,
+    emissiveIntensity: 0.5,
+    roughness: 0.4,
+    metalness: 0.6
+  })
+}
+
+// 创建局部轨迹轨迹 (初始化材质)
+const createLocalTraj = () => {
+  localTrajMaterial = new THREE.MeshStandardMaterial({
+    color: 0x4caf50,
+    emissive: 0x4caf50,
+    emissiveIntensity: 0.5,
+    roughness: 0.4,
+    metalness: 0.6
+  })
+}
+
+// 更新全局路径 (TubeGeometry)
+const updateGlobalPath = (pathPoints) => {
+  if (!scene) return; 
+  if (!pathPoints || pathPoints.length === 0) return
+  
+  const rawPoints = toRaw(pathPoints)
+  // [DEBUG] 打印原始数据的第一个点，检查结构
+  console.log('[ThreeJS] rawPoints[0]:', rawPoints[0]);
+
+  const vectors = []
+  const count = Math.min(rawPoints.length, maxTrajectoryPoints)
+  
+  for (let i = 0; i < count; i++) {
+    const point = toRaw(rawPoints[i])
+    let px = 0, py = 0, pz = 0
+    
+    // 强制类型转换，防止 undefined 或 string
+    if (Array.isArray(point)) {
+      px = Number(point[0]); 
+      py = Number(point[1]); 
+      pz = Number(point[2]);
+    } else {
+      px = Number(point.x);
+      py = Number(point.y);
+      pz = Number(point.z);
+    }
+
+    // 检查 NaN (关键!)
+    if (isNaN(px) || isNaN(py) || isNaN(pz)) {
+        console.warn(`[ThreeJS] Point ${i} is Invalid (NaN):`, point);
+        continue;
+    }
+
+    // ENU (东-北-天) -> ThreeJS (X, Y, Z)
+    // 假设 y 是北(North), z 是天(Up)
+    // ThreeJS: x=East, y=Up, z=-North
+    vectors.push(new THREE.Vector3(px, pz, -py))
+  }
+  
+  if (vectors.length < 2) {
+      console.warn('[ThreeJS] 有效点数少于2个，无法绘制路径');
+      return;
+  }
+
+  const startPoint = vectors[0];
+  // console.log(`[ThreeJS Debug] Path Start: x=${startPoint.x.toFixed(1)}, y=${startPoint.y.toFixed(1)}, z=${startPoint.z.toFixed(1)}`);
+  
+  // 1. 清理旧模型
+  if (globalPathMesh) {
+    scene.remove(globalPathMesh)
+    if (globalPathMesh.geometry) globalPathMesh.geometry.dispose()
+  }
+
+  // 2. 创建曲线
+  const curve = new THREE.CatmullRomCurve3(vectors) 
+
+  // 3. 创建管道几何体
+  // 半径设大一点 0.5 -> 1.0, 确保可见
+  const tubeGeometry = new THREE.TubeGeometry(curve, Math.max(2, vectors.length), 0.5, 8, false)
+  
+  // 4. 材质设置
+  const material = new THREE.MeshPhongMaterial({
+    color: 0x3288fa,
+    emissive: 0x0044aa, 
+    specular: 0xffffff,
+    shininess: 30,
+    transparent: true,
+    opacity: 0.9,
+    side: THREE.DoubleSide
+  })
+  
+  globalPathMesh = new THREE.Mesh(tubeGeometry, material)
+  globalPathMesh.castShadow = true
+  scene.add(globalPathMesh)
+}
+
+// 更新局部轨迹 (TubeGeometry)
+const updateLocalTraj = (trajPoints) => {
+  if (!scene) return;
+  if (!trajPoints || trajPoints.length === 0) return
+  
+  const rawPoints = toRaw(trajPoints)
+  // console.log('[ThreeJS] 更新局部轨迹(Tube)，点数:', rawPoints.length);
+
+  const vectors = []
+  const count = Math.min(rawPoints.length, maxTrajectoryPoints)
+  
+  for (let i = 0; i < count; i++) {
+    const point = toRaw(rawPoints[i])
+    let px = 0, py = 0, pz = 0
+    if (Array.isArray(point)) {
+      px = point[0]; py = point[1]; pz = point[2];
+    } else {
+      px = Number(point.x) || 0;
+      py = Number(point.y) || 0;
+      pz = Number(point.z) || 0;
+    }
+    vectors.push(new THREE.Vector3(px, pz, -py))
+  }
+  
+  if (vectors.length < 2) return
+
+  // 1. 清理旧模型
+  if (localTrajMesh) {
+    scene.remove(localTrajMesh)
+    if (localTrajMesh.geometry) localTrajMesh.geometry.dispose()
+  }
+
+  const curve = new THREE.CatmullRomCurve3(vectors)
+  const tubeGeometry = new THREE.TubeGeometry(curve, Math.max(2, vectors.length * 4), 0.4, 8, false)
+  
+  const material = new THREE.MeshPhongMaterial({
+    color: 0x4caf50,
+    emissive: 0x006600, // 绿色自发光
+    transparent: true,
+    opacity: 0.9,
+    side: THREE.DoubleSide
+  })
+  
+  localTrajMesh = new THREE.Mesh(tubeGeometry, material)
+  localTrajMesh.castShadow = true
+  scene.add(localTrajMesh)
+}
+
+// 更新雷达障碍物可视化
+const updateLidarVisualization = (obstacles) => {
+  if (!scene) return
+  
+  // 1. 清理旧障碍物
+  lidarObstacleMeshes.forEach(mesh => {
+    scene.remove(mesh)
+    if (mesh.geometry) mesh.geometry.dispose()
+    if (mesh.material) mesh.material.dispose()
+  })
+  lidarObstacleMeshes = []
+
+  if (!obstacles || obstacles.length === 0) return
+  
+  const rawObstacles = toRaw(obstacles)
+  
+  rawObstacles.forEach(obs => {
+     // 提取ENU坐标和尺寸
+     const px = Number(obs.position_x) || 0;
+     const py = Number(obs.position_y) || 0;
+     const pz = Number(obs.position_z) || 0;
+     
+     const sx = Number(obs.size_x) || 1.0;
+     const sy = Number(obs.size_y) || 1.0;
+     const sz = Number(obs.size_z) || 1.0;
+     
+     // BoxGeometry(width, height, depth) -> ThreeJS (x, y, z)
+     // ENU Size: x(East), y(North), z(Up)
+     // Map to Three: x->x, z->y, y->z
+     const geometry = new THREE.BoxGeometry(sx, sz, sy); 
+     
+     const material = new THREE.MeshStandardMaterial({
+       color: 0xff3300,  // 橙红色
+       transparent: true,
+       opacity: 0.6,
+       roughness: 0.4,
+       metalness: 0.2
+     });
+     
+     const mesh = new THREE.Mesh(geometry, material);
+     
+     // 坐标转换 ENU -> ThreeJS (Right Handed Y-up)
+     // x -> x
+     // y -> -z (North is negative Z)
+     // z -> y (Up is Y)
+     // 注意：ENU的Z坐标通常是底部或中心，根据BoxGeometry，坐标是中心点
+     // 如果协议中的position_z是底部坐标，需要加上sz/2
+     // 暂时假设position_z是中心点
+     mesh.position.set(px, pz, -py);
+     
+     scene.add(mesh);
+     lidarObstacleMeshes.push(mesh);
+  });
+}
+
 // 更新历史轨迹
 const updateHistoryTrail = () => {
   if (!trajectoryLine) return
@@ -534,7 +753,15 @@ const updateDroneAttitude = () => {
     const euler = new THREE.Euler(props.pitch, props.yaw, props.roll, 'XYZ')
     droneGroup.setRotationFromEuler(euler)
     
-    const altitude = droneStore.fcsStates?.altitude ?? 0
+    // 优先从 fcsStates 获取高度，如果没有则尝试从 planningTelemetry 获取
+    // 注意：fcsStates 使用 states_height，planningTelemetry 使用 currentPosZ
+    let altitude = 0;
+    if (droneStore.fcsStates && typeof droneStore.fcsStates.states_height === 'number' && droneStore.fcsStates.states_height !== 0) {
+      altitude = droneStore.fcsStates.states_height;
+    } else if (droneStore.planningTelemetry && typeof droneStore.planningTelemetry.currentPosZ === 'number') {
+      altitude = droneStore.planningTelemetry.currentPosZ;
+    }
+    
     droneGroup.position.y = Math.max(0, altitude)
     
     // 更新投影线
@@ -611,6 +838,25 @@ watch(() => props.yaw, (newVal) => {
   sceneData.value.yaw = newVal
 })
 
+// 监听全局路径数据
+watch(() => droneStore.globalPath, (newPath) => {
+  if (newPath && newPath.length > 0) {
+    updateGlobalPath(newPath)
+  }
+}, { deep: true })
+
+// 监听局部轨迹数据
+watch(() => droneStore.localTraj, (newTraj) => {
+  if (newTraj && newTraj.length > 0) {
+    updateLocalTraj(newTraj)
+  }
+}, { deep: true })
+
+// 监听雷达障碍物数据
+watch(() => droneStore.lidarObstacles, (newObstacles) => {
+  updateLidarVisualization(newObstacles)
+}, { deep: true })
+
 // 生命周期钩子
 onMounted(() => {
   initScene()
@@ -649,6 +895,12 @@ onBeforeUnmount(() => {
     trajectoryLine.geometry.dispose()
     trajectoryLine.material.dispose()
   }
+  
+  // 清理雷达障碍物
+  lidarObstacleMeshes.forEach(mesh => {
+      if (mesh.geometry) mesh.geometry.dispose()
+      if (mesh.material) mesh.material.dispose()
+  })
 })
 </script>
 

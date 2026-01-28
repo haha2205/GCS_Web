@@ -11,6 +11,7 @@ from collections import defaultdict
 from typing import Dict, Optional
 import struct
 import logging
+import recorder.csv_helper_full as csv_helper
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,11 @@ class RawDataRecorder:
         self._init_esc_file()
         self._init_datafutaba_file()
         
+        # 新增的三大类分类文件
+        self._init_full_record_file() # fcs_telemetry
+        self._init_planning_file()    # planning
+        self._init_radar_file()       # radar
+
         logger.info(f"开始录制: {self.session_id}")
     
     def stop_recording(self):
@@ -98,6 +104,49 @@ class RawDataRecorder:
         duration = self.end_time - self.start_time if self.start_time else 0
         logger.info(f"录制已停止: {self.session_id}, 时长: {duration:.2f}秒")
         logger.info(f"数据统计: {dict(self.data_counters)}")
+    
+
+    def _init_full_record_file(self):
+        """初始化飞控遥测数据文件 (原 full_data_record)"""
+        filepath = os.path.join(self.session_directory, "fcs_telemetry.csv")
+        file_handle = open(filepath, 'w', newline='', encoding='utf-8')
+        file_handle.write(csv_helper.get_full_header() + "\n")
+        self.file_handles['fcs_telemetry'] = file_handle
+
+    def _init_planning_file(self):
+        """初始化规划数据文件 (planning_telemetry.csv)"""
+        filepath = os.path.join(self.session_directory, "planning_telemetry.csv")
+        file_handle = open(filepath, 'w', newline='', encoding='utf-8')
+        writer = csv.writer(file_handle)
+        
+        # 定义规划数据表头 (含路径统计但无需全量路径点)
+        headers = [
+            "timestamp_local", "seq_id", "timestamp_remote", 
+            "pos_x", "pos_y", "pos_z", "vel", "update_flags", "status",
+            "global_path_count", "local_traj_count", "obstacle_count"
+        ]
+        writer.writerow(headers)
+        self.file_handles['planning'] = file_handle
+        self.csv_writers['planning'] = writer
+
+    def _init_radar_file(self):
+        """初始化雷达数据文件 (radar_data.csv)"""
+        filepath = os.path.join(self.session_directory, "radar_data.csv")
+        file_handle = open(filepath, 'w', newline='', encoding='utf-8')
+        writer = csv.writer(file_handle)
+        
+        # 混合表头：可以存 Obstacles 摘要, Performance 或 Status
+        # 为了方便分析，这里主要以 Obstacles Summary 为主，兼顾 Perf/Status日志
+        headers = [
+            "timestamp_local", "msg_type",
+            "obs_count", "frame_id", "timestamp_sec", # Obstacles
+            "proc_time_ms", "fps", "points_in", "points_out", # Perf
+            "is_running", "lidar_connected", "error_code" # Status
+        ]
+        writer.writerow(headers)
+        self.file_handles['radar'] = file_handle
+        self.csv_writers['radar'] = writer
+
     
     def _init_flight_perf_file(self):
         """初始化飞行性能数据文件"""
@@ -592,22 +641,106 @@ class RawDataRecorder:
         except Exception as e:
             logger.error(f"记录GN&C总线数据失败: {e}")
     
+    def record_fcs_telemetry(self, msg_type: str, data: dict):
+        """记录飞控遥测数据 (fcs_telemetry.csv)"""
+        if not self.is_recording or 'fcs_telemetry' not in self.file_handles:
+            return
+        try:
+            wrapped_data = {
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+                'data': data
+            }
+            line = csv_helper.get_data_for_type(msg_type, wrapped_data)
+            self.file_handles['fcs_telemetry'].write(line + "\n")
+            
+            self.data_counters['fcs_telemetry'] = self.data_counters.get('fcs_telemetry', 0) + 1
+            if self.data_counters['fcs_telemetry'] % 50 == 0:
+                self.file_handles['fcs_telemetry'].flush()
+        except Exception as e:
+            logger.error(f"记录FCS遥测失败: {e}")
+
+    def record_planning_telemetry(self, data: dict):
+        """记录规划数据 (planning_telemetry.csv)"""
+        if not self.is_recording or 'planning' not in self.csv_writers:
+            return
+        try:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            writer = self.csv_writers['planning']
+            row = [
+                ts,
+                data.get('seq_id', 0),
+                data.get('timestamp', 0),
+                f"{data.get('current_pos_x', 0):.4f}",
+                f"{data.get('current_pos_y', 0):.4f}",
+                f"{data.get('current_pos_z', 0):.4f}",
+                f"{data.get('current_vel', 0):.4f}",
+                data.get('update_flags', 0),
+                data.get('status', 0),
+                data.get('global_path_count', 0),
+                data.get('local_traj_count', 0),
+                data.get('obstacle_count', 0)
+            ]
+            writer.writerow(row)
+            self.file_handles['planning'].flush()
+        except Exception as e:
+            logger.error(f"记录规划数据失败: {e}")
+
+    def record_radar_data(self, msg_type: str, data: dict):
+        """记录雷达数据 (radar_data.csv)"""
+        if not self.is_recording or 'radar' not in self.csv_writers:
+            return
+        try:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            writer = self.csv_writers['radar']
+            
+            # headers: [ts, type, obs_count, frame_id, ts_sec, proc_time, fps, pts_in, pts_out, running, connected, err]
+            row = [ts, msg_type] + [""] * 10 
+            
+            if msg_type == 'lidar_obstacles':
+                row[2] = data.get('obstacle_count', 0)
+                row[3] = data.get('frame_id', 0)
+                row[4] = f"{data.get('timestamp_sec', 0):.4f}"
+            elif msg_type == 'lidar_performance':
+                row[5] = f"{data.get('processing_time_ms', 0):.2f}"
+                row[6] = f"{data.get('frame_rate', 0):.2f}"
+                row[7] = data.get('input_points', 0)
+                row[8] = data.get('filtered_points', 0)
+            elif msg_type == 'lidar_status':
+                row[9] = 1 if data.get('is_running') else 0
+                row[10] = 1 if data.get('lidar_connected') else 0
+                row[11] = data.get('error_code', 0)
+
+            writer.writerow(row)
+            self.file_handles['radar'].flush()
+        except Exception as e:
+            logger.error(f"记录雷达数据失败: {e}")
+
     def record_decoded_packet(self, decoded_data: dict):
         """
         统一的UDP数据包记录入口
-        根据消息类型分发到对应的记录方法
-        
-        Args:
-            decoded_data: 解码后的UDP数据包字典
         """
         if not self.is_recording:
             return
         
         msg_type = decoded_data.get('type', 'unknown')
-        func_code = decoded_data.get('func_code', 0)
         data = decoded_data.get('data', {})
         
-        # 根据消息类型分发
+        # 1. 飞控遥测数据 (FCS Telemetry)
+        # 包括: pwms, states, datactrl, gncbus, avoiflag, futaba, esc, lines
+        if msg_type in ['fcs_pwms', 'fcs_states', 'fcs_datactrl', 'fcs_gncbus', 
+                       'avoiflag', 'fcs_datafutaba', 'fcs_esc', 'fcs_param',
+                       'fcs_line_aim2ab', 'fcs_line_ab', 'fcs_datagcs']:
+            self.record_fcs_telemetry(msg_type, data)
+        
+        # 2. 规划数据 (Planning)
+        elif msg_type == 'planning_telemetry':
+            self.record_planning_telemetry(data)
+            
+        # 3. 雷达数据 (Radar)
+        elif msg_type in ['lidar_obstacles', 'lidar_performance', 'lidar_status']:
+            self.record_radar_data(msg_type, data)
+        
+        # 2. (旧逻辑) 兼容旧文件记录 (可选保留或删除)
         if msg_type == 'fcs_states':
             self.record_flight_perf(data)
         elif msg_type in ['fcs_param', 'fcs_datactrl']:

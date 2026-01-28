@@ -68,10 +68,10 @@ const rmseHistory = ref([])
 
 // 当前指标值
 const metrics = computed(() => {
-  return props.dimensionData || {
+  return Object.assign({
     rmse: 0,
     score: 1.0
-  }
+  }, props.dimensionData)
 })
 
 // 实时评分

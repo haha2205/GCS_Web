@@ -1,54 +1,62 @@
 <template>
   <div class="bottom-bar">
-    <!-- 中间：后端链路状态 -->
-    <div class="link-console-section">
-      <div class="console-header">
-        <span class="console-title">LINK STATUS</span>
-        <div class="status-indicators">
-          <span class="indicator" :class="{ error: !droneStore.isConnected }">
-            <span class="indicator-dot"></span>
-            UDP: {{ udpConnected ? '已连接' : '未连接' }}
-          </span>
-          <span class="indicator" :class="{ error: !wsConnected }">
-            <span class="indicator-dot"></span>
-            WS: {{ wsConnected ? '已连接' : '未连接' }}
-          </span>
-          <span class="indicator">
-            <span class="indicator-dot success"></span>
-            延迟: {{ latency }}ms
-          </span>
+    <!-- 实时模式：显示链路状态和系统日志 -->
+    <div v-if="systemMode === 'REALTIME'" class="realtime-content">
+      <!-- 中间：后端链路状态 -->
+      <div class="link-console-section">
+        <div class="console-header">
+          <span class="console-title">LINK STATUS</span>
+          <div class="status-indicators">
+            <span class="indicator" :class="{ error: !droneStore.isConnected }">
+              <span class="indicator-dot"></span>
+              UDP: {{ udpConnected ? '已连接' : '未连接' }}
+            </span>
+            <span class="indicator" :class="{ error: !wsConnected }">
+              <span class="indicator-dot"></span>
+              WS: {{ wsConnected ? '已连接' : '未连接' }}
+            </span>
+            <span class="indicator">
+              <span class="indicator-dot success"></span>
+              延迟: {{ latency }}ms
+            </span>
+          </div>
+        </div>
+        <div class="console-content" ref="linkLogRef">
+          <div
+            v-for="(log, i) in linkLogs"
+            :key="i"
+            class="log-line"
+            :class="'log-' + log.level"
+          >
+            <span class="log-time">[{{ log.time }}]</span>
+            <span class="log-message">{{ log.message }}</span>
+          </div>
         </div>
       </div>
-      <div class="console-content" ref="linkLogRef">
-        <div
-          v-for="(log, i) in linkLogs"
-          :key="i"
-          class="log-line"
-          :class="'log-' + log.level"
-        >
-          <span class="log-time">[{{ log.time }}]</span>
-          <span class="log-message">{{ log.message }}</span>
+
+      <!-- 右侧：系统日志 -->
+      <div class="sys-console-section">
+        <div class="console-header">
+          <span class="console-title">SYSTEM LOG</span>
+          <button class="clear-btn" @click="clearSysLog" title="清空日志">清空</button>
+        </div>
+        <div class="console-content" ref="sysLogRef">
+          <div
+            v-for="(log, i) in sysLogs"
+            :key="i"
+            class="log-line"
+            :class="'log-' + log.level"
+          >
+            <span class="log-icon">{{ log.icon }}</span>
+            <span class="log-message">{{ log.message }}</span>
+          </div>
         </div>
       </div>
     </div>
 
-    <!-- 右侧：系统日志 -->
-    <div class="sys-console-section">
-      <div class="console-header">
-        <span class="console-title">SYSTEM LOG</span>
-        <button class="clear-btn" @click="clearSysLog" title="清空日志">清空</button>
-      </div>
-      <div class="console-content" ref="sysLogRef">
-        <div
-          v-for="(log, i) in sysLogs"
-          :key="i"
-          class="log-line"
-          :class="'log-' + log.level"
-        >
-          <span class="log-icon">{{ log.icon }}</span>
-          <span class="log-message">{{ log.message }}</span>
-        </div>
-      </div>
+    <!-- 回放模式：显示播放控制器 -->
+    <div v-else class="replay-content">
+      <ReplayController />
     </div>
   </div>
 </template>
@@ -56,8 +64,12 @@
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue'
 import { useDroneStore } from '@/store/drone'
+import ReplayController from './ReplayController.vue'
 
 const droneStore = useDroneStore()
+
+// 获取系统模式
+const systemMode = computed(() => droneStore.systemMode)
 const linkLogRef = ref(null)
 const sysLogRef = ref(null)
 
@@ -216,8 +228,8 @@ const clearSysLog = () => {
 
 <style scoped>
 .bottom-bar {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+  display: flex;
+  flex-direction: row;
   gap: 10px;
   padding: 8px 16px;
   background: #141414;
@@ -225,15 +237,39 @@ const clearSysLog = () => {
   height: 140px;
 }
 
-/* 控制台区域 */
-.link-console-section,
-.sys-console-section {
+/* 实时模式内容 - 左右排列 */
+.realtime-content {
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+}
+
+/* 回放模式内容 */
+.replay-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 100%;
+  padding: 0 20px;
+  width: 100%;
+  background: #141414;
+  border-top: 2px solid #3274F6;
+  user-select: none;
+}
+
+/* 控制台区域 - 实时模式下左右排列 */
+.realtime-content .link-console-section,
+.realtime-content .sys-console-section {
   background: #1e1e1e;
   border: 1px solid #333;
   border-radius: 4px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  flex: 1;
+  min-width: 0;
 }
 
 .console-header {

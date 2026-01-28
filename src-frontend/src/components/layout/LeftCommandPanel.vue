@@ -244,13 +244,16 @@ const positionAdjustments = [
 ]
 
 // 发送遥控指令（通过 REST API）
-const sendRemoteCommand = async (cmdId, cmdName) => {
+ const sendRemoteCommand = async (cmdId, cmdName) => {
   if (!connected.value) {
     droneStore.addLog('未连接到后端，无法发送指令', 'warning')
     return
   }
   
   try {
+    // 更新store中的CmdIdx，让规划面板可以获取到当前指令
+    droneStore.gcsData.Tele_GCS_CmdIdx = cmdId
+    
     const result = await droneStore.sendCommandREST('cmd_idx', {
       cmdId,
       name: cmdName

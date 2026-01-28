@@ -87,11 +87,11 @@ const safetyHistory = ref([])
 
 // 当前指标值
 const metrics = computed(() => {
-  return props.dimensionData || {
+  return Object.assign({
     progress: 0,
     safety_margin: 0,
     score: 1.0
-  }
+  }, props.dimensionData)
 })
 
 // 实时评分

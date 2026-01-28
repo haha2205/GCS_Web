@@ -26,6 +26,7 @@ class WebSocketManager:
         """接受新的WebSocket连接"""
         await websocket.accept()
         self.active_connections.add(websocket)
+        
         logger.info(f"WebSocket客户端已连接, 当前连接数: {len(self.active_connections)}")
         
         # 发送欢迎消息

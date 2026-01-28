@@ -191,9 +191,12 @@ export const useDroneStore = defineStore('drone', {
     
     // ========== 航迹数据 ==========
     trajectory: [],     // 历史轨迹点 [{x, y, z, timestamp}]
+    globalPath: [],  // 全局路径点 [{x, y, z}]
+    localTraj: [],  // 局部轨迹点 [{x, y, z}]
     
     // ========== 障碍物数据 ==========
-    obstacles: [],      // 障碍物列表
+    obstacles: [],      // 障碍物列表 (Planning Telemetry)
+    lidarObstacles: [], // 雷达感知障碍物列表 (ObstacleOutput_T)
     
     // ========== 日志数据 ==========
     logs: [],          // 系统日志列表
@@ -249,6 +252,36 @@ export const useDroneStore = defineStore('drone', {
       recordCount: 0,        // 记录的数据包数量
       recordFilePath: '',      // 记录文件路径
       lastRecordTime: null     // 最后记录时间
+    },
+    
+    // ========== 系统模式 ==========
+    systemMode: 'REALTIME',  // 系统模式: 'REALTIME' (实时模式) 或 'REPLAY' (回放模式)
+    
+    // ========== 回放状态 ==========
+    replayStatus: {
+      is_loaded: false,      // 是否已加载回放文件
+      is_playing: false,      // 是否正在播放
+      replay_active: false,   // 回放是否激活
+      current_file: null,     // 当前回放文件路径
+      current_idx: 0,        // 当前索引
+      total_rows: 0,        // 总行数
+      total_time: 0,         // 总时长（秒）
+      speed: 1.0,           // 播放速度
+      progress: 0,           // 进度百分比
+      current_time: 0        // 当前时间（秒）
+    },
+    
+    // ========== 回放分析数据 ==========
+    // 用于变量选择和分析面板的数据
+    replayAnalysis: {
+      categorizedVars: {},    // 分类变量
+      selectedVariables: [],  // 已选变量
+      loading: false,        // 加载状态
+      error: null,           // 错误信息
+      timeAxis: [],          // 时间轴数据
+      seriesData: {},        // 系列数据
+      allVariables: [],      // 所有变量
+      hasData: false         // 是否有数据
     },
     
     // ========== 配置数据 ==========
@@ -438,6 +471,11 @@ export const useDroneStore = defineStore('drone', {
               this.updateFCSParam(innerData)
               this.addLog('收到参数数据', 'info')
               break
+              
+            case 'lidar_obstacles':
+              this.updateLidarObstacles(innerData)
+              // this.addLog(`收到雷达障碍物 [${innerData.obstacle_count}个]`, 'info')
+              break
             
             default:
               console.warn('[Store] 未知UDP数据类型:', innerType)
@@ -509,6 +547,26 @@ export const useDroneStore = defineStore('drone', {
           
           case 'config_update':
             this.updateConfig(data.data)
+            break
+          
+          case 'system_mode_change':
+            this.updateSystemMode(data.mode)
+            break
+          
+          case 'replay_status':
+            this.updateReplayStatus(data.data)
+            // 同步回放进度到本地的 replayStatus
+            break
+          
+          case 'replay_response':
+            // 处理回放控制响应
+            if (data.action === 'play') {
+              this.replayStatus.is_playing = true
+            } else if (data.action === 'pause') {
+              this.replayStatus.is_playing = false
+            } else if (data.action === 'load') {
+              this.replayStatus.total_time = data.total_time || 0
+            }
             break
           
           default:
@@ -910,6 +968,16 @@ export const useDroneStore = defineStore('drone', {
       if (data.global_path_count !== undefined) this.planningTelemetry.globalPathCount = parseInt(data.global_path_count)
       if (data.local_traj_count !== undefined) this.planningTelemetry.localTrajCount = parseInt(data.local_traj_count)
       if (data.obstacle_count !== undefined) this.planningTelemetry.obstacleCount = parseInt(data.obstacle_count)
+      
+      // 更新轨迹数组（用于3D可视化）
+      if (data.global_path && Array.isArray(data.global_path)) {
+        this.globalPath = data.global_path
+        console.log('[Store] 更新全局路径:', this.globalPath.length, '个点')
+      }
+      if (data.local_traj && Array.isArray(data.local_traj)) {
+        this.localTraj = data.local_traj
+        console.log('[Store] 更新局部轨迹:', this.localTraj.length, '个点')
+      }
     },
     
     /**
@@ -917,6 +985,17 @@ export const useDroneStore = defineStore('drone', {
      */
     updateObstacles(data) {
       this.obstacles = data.obstacles || []
+    },
+
+    /**
+     * 更新雷达感知障碍物数据 (ObstacleOutput_T)
+     */
+    updateLidarObstacles(data) {
+      if (!data) return
+      
+      this.lidarObstacles = data.obstacles || []
+      // 可以在这里更新其他相关状态，如时间戳等
+      // console.log(`[Store] 更新雷达障碍物: ${this.lidarObstacles.length}个`)
     },
     
     /**
@@ -928,6 +1007,225 @@ export const useDroneStore = defineStore('drone', {
       }
       if (data.battery !== undefined) {
         this.systemStatus.battery = data.battery
+      }
+    },
+    
+    /**
+     * 更新系统模式（实时/回放）
+     */
+    updateSystemMode(mode) {
+      console.log('[Store] 系统模式切换:', mode)
+      this.systemMode = mode
+      this.addLog(`系统模式切换为: ${mode === 'REALTIME' ? '实时模式' : '回放模式'}`, 'info')
+    },
+    
+    /**
+     * 更新回放状态
+     */
+    updateReplayStatus(data) {
+      console.log('[Store] 回放状态更新:', data)
+      
+      if (data.is_loaded !== undefined) {
+        this.replayStatus.is_loaded = data.is_loaded
+      }
+      if (data.is_playing !== undefined) {
+        this.replayStatus.is_playing = data.is_playing
+      }
+      if (data.replay_active !== undefined) {
+        this.replayStatus.replay_active = data.replay_active
+      }
+      if (data.current_file !== undefined) {
+        this.replayStatus.current_file = data.current_file
+      }
+      if (data.current_idx !== undefined) {
+        this.replayStatus.current_idx = data.current_idx
+      }
+      if (data.total_rows !== undefined) {
+        this.replayStatus.total_rows = data.total_rows
+      }
+      if (data.total_time !== undefined) {
+        this.replayStatus.total_time = data.total_time
+      }
+      if (data.speed !== undefined) {
+        this.replayStatus.speed = data.speed
+      }
+      if (data.progress !== undefined) {
+        this.replayStatus.progress = data.progress
+      }
+      if (data.current_time !== undefined) {
+        this.replayStatus.current_time = data.current_time
+      }
+    },
+    
+    /**
+     * 回放分析 - 获取变量列表
+     */
+    async fetchHeaders() {
+      try {
+        this.replayAnalysis.loading = true
+        this.replayAnalysis.error = null
+        
+        const response = await fetch('http://localhost:8000/api/replay/headers')
+        const data = await response.json()
+        
+        if (data.type === 'replay_headers' && data.headers) {
+          this.replayAnalysis.allVariables = data.headers
+          // 对变量进行分类
+          this.categorizeVariables(data.headers)
+          console.log('[Store] 回放变量列表:', this.replayAnalysis.allVariables)
+        }
+      } catch (error) {
+        console.error('获取回放变量失败:', error)
+        this.replayAnalysis.error = error.message
+      } finally {
+        this.replayAnalysis.loading = false
+      }
+    },
+    
+    /**
+     * 回放分析 - 对变量进行分类
+     */
+    categorizeVariables(variables) {
+      const categories = {
+        'PWMS': [],
+        'STATES': [],
+        'DATACTRL': [],
+        'GNCBUS': [],
+        'AVOIFLAG': [],
+        'DATAFUTABA': [],
+        'DATAGCS': [],
+        'PARAM': [],
+        'ESC': []
+      }
+      
+      for (const variable of variables) {
+        const upperVar = variable.toUpperCase()
+        
+        if (upperVar.includes('PWM') || upperVar.startsWith('PWM')) {
+          categories['PWMS'].push(variable)
+        } else if (upperVar.includes('STATE') || upperVar.includes('LAT') || upperVar.includes('LON') || upperVar.includes('HEIGHT')) {
+          categories['STATES'].push(variable)
+        } else if (upperVar.includes('CTRL') || upperVar.includes('REF_') || upperVar.includes('EST_')) {
+          categories['DATACTRL'].push(variable)
+        } else if (upperVar.includes('GNC') || upperVar.includes('CMDVALUE')) {
+          categories['GNCBUS'].push(variable)
+        } else if (upperVar.includes('AVOI') || upperVar.includes('FLAG')) {
+          categories['AVOIFLAG'].push(variable)
+        } else if (upperVar.includes('FUTABA') || upperVar.includes('FTB')) {
+          categories['DATAFUTABA'].push(variable)
+        } else if (upperVar.includes('GCS') || upperVar.includes('TELE')) {
+          categories['DATAGCS'].push(variable)
+        } else if (upperVar.includes('PARAM')) {
+          categories['PARAM'].push(variable)
+        } else if (upperVar.includes('ESC') || upperVar.includes('RPM')) {
+          categories['ESC'].push(variable)
+        }
+      }
+      
+      this.replayAnalysis.categorizedVars = categories
+    },
+    
+    /**
+     * 回放分析 - 切换变量选择
+     */
+    toggleVariable(variable, isSelected) {
+      const index = this.replayAnalysis.selectedVariables.indexOf(variable)
+      if (isSelected && index === -1) {
+        this.replayAnalysis.selectedVariables.push(variable)
+      } else if (!isSelected && index !== -1) {
+        this.replayAnalysis.selectedVariables.splice(index, 1)
+      }
+    },
+    
+    /**
+     * 回放分析 - 获取图表数据
+     */
+    async fetchChartSeries(variables) {
+      try {
+        this.replayAnalysis.loading = true
+        this.replayAnalysis.error = null
+        
+        const response = await fetch('http://localhost:8000/api/replay/chart', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ variables })
+        })
+        
+        const data = await response.json()
+        
+        if (data.type === 'replay_chart_data' && data.data) {
+          this.replayAnalysis.timeAxis = data.data.timeAxis || []
+          this.replayAnalysis.seriesData = data.data.seriesData || {}
+          this.replayAnalysis.hasData = true
+          console.log('[Store] 回放图表数据加载成功')
+        }
+      } catch (error) {
+        console.error('获取回放图表数据失败:', error)
+        this.replayAnalysis.error = error.message
+      } finally {
+        this.replayAnalysis.loading = false
+      }
+    },
+    
+    /**
+     * 添加回放状态数据监听
+     * 处理来自后端的 replay_analysis_data 消息
+     */
+    handleReplayAnalysisData(data) {
+      if (data.timeAxis) {
+        this.replayAnalysis.timeAxis = data.timeAxis
+      }
+      if (data.seriesData) {
+        this.replayAnalysis.seriesData = data.seriesData
+      }
+      if (data.headers) {
+        this.replayAnalysis.allVariables = data.headers
+        this.categorizeVariables(data.headers)
+      }
+      this.replayAnalysis.hasData = true
+    },
+    
+    /**
+     * 发送WebSocket消息
+     * 用于发送回放控制命令等
+     */
+    sendWebSocketMessage(message) {
+      if (!wsInstance) {
+        console.error('[Store] WebSocket未连接，无法发送消息')
+        return false
+      }
+      
+      try {
+        const messageString = typeof message === 'string'
+          ? message
+          : JSON.stringify(message)
+        
+        const success = wsInstance.send(messageString)
+        
+        if (success) {
+          console.log('[Store] WebSocket消息已发送:', message)
+        } else {
+          console.error('[Store] 发送WebSocket消息失败')
+        }
+        
+        return success
+      } catch (error) {
+        console.error('[Store] 发送WebSocket消息异常:', error)
+        return false
+      }
+    },
+    
+    
+    /**
+     * 发送 WebSocket 消息
+     */
+    sendWebSocketMessage(message) {
+      if (wsInstance && this.connected) {
+        wsInstance.send(message)
+      } else {
+        console.warn('[Store] WebSocket 未连接，无法发送消息:', message)
       }
     },
     
@@ -1171,46 +1469,67 @@ export const useDroneStore = defineStore('drone', {
     },
     
     /**
-     * 启动数据记录
+     * 启动DSM数据记录 (发送指令到后端)
      */
-    startRecording() {
-      if (this.dataRecording.enabled) {
-        console.warn('[Store] 数据记录已在进行中')
-        return
+    startDSMRecording() {
+      if (!this.connected || !wsInstance) {
+        console.warn('未连接，无法启动录制')
+        return false
       }
       
-      this.dataRecording.enabled = true
-      this.dataRecording.recordingStartTime = Date.now()
-      this.dataRecording.recordCount = 0
-      this.dataRecording.lastRecordTime = Date.now()
+      const message = {
+        type: 'recording',
+        action: 'start'
+      }
       
-      const date = new Date()
-      const dateStr = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`
-      const timeStr = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}${String(date.getSeconds()).padStart(2, '0')}`
-      this.dataRecording.recordFilePath = `drone_log_${dateStr}_${timeStr}.csv`
-      
-      this.addLog('数据记录已启动', 'info')
-      console.log('[Store] 数据记录已启动，文件:', this.dataRecording.recordFilePath)
+      try {
+        wsInstance.send(JSON.stringify(message))
+        this.dataRecording.enabled = true
+        this.addLog('发送开始录制指令', 'info')
+        return true
+      } catch (error) {
+        console.error('发送录制指令失败:', error)
+        return false
+      }
     },
     
     /**
-     * 停止数据记录
+     * 停止DSM数据记录 (发送指令到后端)
      */
-    stopRecording() {
-      if (!this.dataRecording.enabled) {
-        console.warn('[Store] 数据记录未启动')
-        return
+    stopDSMRecording() {
+      if (!this.connected || !wsInstance) {
+        return false
       }
       
-      this.dataRecording.enabled = false
-      const duration = Math.floor((Date.now() - this.dataRecording.recordingStartTime) / 1000)
+      const message = {
+        type: 'recording',
+        action: 'stop'
+      }
       
-      this.addLog(`数据记录已停止，共记录 ${this.dataRecording.recordCount} 个数据包，时长 ${duration}秒`, 'info')
-      console.log('[Store] 数据记录已停止，统计:', {
-        recordCount: this.dataRecording.recordCount,
-        duration: duration,
-        filePath: this.dataRecording.recordFilePath
-      })
+      try {
+        wsInstance.send(JSON.stringify(message))
+        this.dataRecording.enabled = false
+        this.addLog('发送停止录制指令', 'info')
+        return true
+      } catch (error) {
+        console.error('发送停止指令失败:', error)
+        return false
+      }
+    },
+
+    /**
+     * 启动数据记录 (本地模拟 - 已弃用，保留兼容但建议使用startDSMRecording)
+     */
+    startRecording() {
+      // 代理到新的DSM录制
+      return this.startDSMRecording()
+    },
+    
+    /**
+     * 停止数据记录 (本地模拟 - 已弃用)
+     */
+    stopRecording() {
+      return this.stopDSMRecording()
     },
     
     /**

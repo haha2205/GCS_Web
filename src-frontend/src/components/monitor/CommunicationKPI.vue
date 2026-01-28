@@ -85,11 +85,11 @@ const plrHistory = ref([])
 
 // 当前指标值
 const metrics = computed(() => {
-  return props.dimensionData || {
+  return Object.assign({
     jitter_ms: 0,
     plr_percent: 0,
     score: 1.0
-  }
+  }, props.dimensionData)
 })
 
 // 实时评分

@@ -40,8 +40,9 @@ class Config:
         # 默认监听端口（地面站使用的监听端口）
         # - 30509: 接收飞控遥测数据
         # - 18507: 接收LiDAR数据
-        # - 18511: 接收规划遥测数据
-        self.udp_config.listen_ports = [30509, 18507, 18511]
+        # - 18511: 接收规划模块遥测数据
+        self.udp_config.listen_ports = [30509, 18507, 18511]  # ✅ 修复：包含三个端口
+        self.udp_config.listen_host = "0.0.0.0"
         self.udp_config.listen_port = 30509
         
         # 默认发送目标（飞控IP和端口）
@@ -101,6 +102,7 @@ class Config:
         print("地面站配置信息")
         print("=" * 60)
         print(f"接收配置: {self.udp_config.listen_host}:{self.udp_config.listen_port}")
+        print(f"监听端口列表: {self.udp_config.listen_ports}")
         print(f"发送目标: {self.udp_config.target_ip}:{self.udp_config.target_port}")
         print("=" * 60)
 
