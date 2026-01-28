@@ -78,12 +78,12 @@ class ObstacleInfo_T:
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ObstacleInfo_T':
         """从字节数据解析"""
-        # 总共 13个float32 + 1个int32 = 56字节
-        fmt = '<fffffffffffff f'  # 13 floats + 1 int
-        if len(data) < 56:
+        # 总共 11个float32 + 1个int32 + 1个float32 = 52字节
+        fmt = '<fffffffffff i f'  # 11 floats + 1 int + 1 float
+        if len(data) < 52:
             return cls()
         
-        values = struct.unpack(fmt, data[:56])
+        values = struct.unpack(fmt, data[:52])
         return cls(
             position_x=values[0],
             position_y=values[1],
@@ -96,7 +96,7 @@ class ObstacleInfo_T:
             distance=values[8],
             azimuth=values[9],
             confidence=values[10],
-            point_count=int(values[11]),
+            point_count=values[11],
             density=values[12]
         )
     
@@ -140,8 +140,9 @@ class ObstacleOutput_T:
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ObstacleOutput_T':
         """从字节数据解析"""
-        # 结构: obstacle_count(4) + obstacles数组(56*N) + frame_info(8+4+4+4)
-        if len(data) < 20:  # 最小长度
+        # 结构: obstacle_count(4) + obstacles数组(52*50=2600) + frame_info 等
+        # 只有当数据长度足够时才进行完整解析
+        if len(data) < 20:  # 最小安全长度
             return cls()
         
         offset = 0
@@ -150,30 +151,52 @@ class ObstacleOutput_T:
         obstacle_count = struct.unpack('<i', data[offset:offset+4])[0]
         offset += 4
         
-        # 解析时间戳
-        timestamp_sec = struct.unpack('<d', data[offset:offset+8])[0]
-        offset += 8
-        timestamp_us = struct.unpack('<Q', data[offset:offset+8])[0]
-        offset += 8
+        # 障碍物数组位于偏移 4 处，固定大小 50 * 52 = 2600 字节
+        obstacles_start = 4
+        obstacles_size = 50 * 52 # MAX_OBSTACLES = 50, sizeof(ObstacleInfo_T) = 52
         
-        # 解析帧信息
-        frame_id = struct.unpack('<i', data[offset:offset+4])[0]
-        offset += 4
-        input_point_count = struct.unpack('<i', data[offset:offset+4])[0]
-        offset += 4
-        filtered_point_count = struct.unpack('<i', data[offset:offset+4])[0]
-        offset += 4
+        # 时间戳和帧信息位于数组之后
+        # 4 + 2600 = 2604
+        info_offset = obstacles_start + obstacles_size
         
-        # 解析障碍物数组
+        # 检查数据长度是否足够包含尾部信息 (2604 + 8+8+4+4+4 = 2632)
+        if len(data) < info_offset + 28:
+            # 如果数据不够长（可能是变长包？），尝试假设紧凑排列
+            # 但既然C结构体是定长的，这里应该假设标准结构。
+            # 不过为了健壮性，如果数据不够，就只解析头部
+             pass
+
+        # 解析障碍物
         obstacles = []
-        max_obstacles = min(obstacle_count, 50)  # MAX_OBSTACLES = 50
+        max_valid = min(obstacle_count, 50)
         
-        for i in range(max_obstacles):
-            if offset + 56 <= len(data):
-                obs = ObstacleInfo_T.from_bytes(data[offset:offset+56])
+        curr_obs_offset = obstacles_start
+        for i in range(max_valid):
+            if curr_obs_offset + 52 <= len(data):
+                obs = ObstacleInfo_T.from_bytes(data[curr_obs_offset : curr_obs_offset+52])
                 obstacles.append(obs)
-                offset += 56
-        
+            curr_obs_offset += 52
+            
+        # 解析尾部信息 (时间戳等)
+        timestamp_sec = 0.0
+        timestamp_us = 0
+        frame_id = 0
+        input_point_count = 0
+        filtered_point_count = 0
+
+        if len(data) >= info_offset + 28:
+             off = info_offset
+             timestamp_sec = struct.unpack('<d', data[off:off+8])[0]
+             off += 8
+             timestamp_us = struct.unpack('<Q', data[off:off+8])[0]
+             off += 8
+             frame_id = struct.unpack('<i', data[off:off+4])[0]
+             off += 4
+             input_point_count = struct.unpack('<i', data[off:off+4])[0]
+             off += 4
+             filtered_point_count = struct.unpack('<i', data[off:off+4])[0]
+             off += 4
+
         return cls(
             obstacle_count=obstacle_count,
             obstacles=obstacles,

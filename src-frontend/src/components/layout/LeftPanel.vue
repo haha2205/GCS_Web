@@ -48,6 +48,12 @@
           :style="panelFlexStyle"
           :closePanel="() => closePanel('modules')"
         />
+        <ReplayModule
+          v-if="activeModes.includes('replay')"
+          key="replay"
+          :style="panelFlexStyle"
+          :closePanel="() => closePanel('replay')"
+        />
       </TransitionGroup>
     </div>
   </div>
@@ -60,13 +66,15 @@ import CommandModule from './LeftCommandPanel.vue'
 import MissionModule from './LeftMissionPanel.vue'
 import ParamsModule from './LeftParamsPanel.vue'
 import ModulesModule from './LeftModulesPanel.vue'
+import ReplayModule from './LeftReplayPanel.vue'
 
 const modes = [
   { id: 'config', icon: '⚙️', label: '配置' },
   { id: 'command', icon: '🚀', label: '飞控指令' },
   { id: 'mission', icon: '📍', label: '任务' },
   { id: 'params', icon: '🔧', label: '参数配置' },
-  { id: 'modules', icon: '📦', label: '模块' }
+  { id: 'modules', icon: '📦', label: '模块' },
+  { id: 'replay', icon: '🎬', label: '回放日志' }
 ]
 
 // 改为数组以支持多个面板同时打开，最多3个

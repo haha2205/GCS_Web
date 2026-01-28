@@ -60,10 +60,10 @@ const historyData = ref([])
 
 // 当前指标值
 const metrics = computed(() => {
-  return props.dimensionData || {
+  return Object.assign({
     cpu_load_realtime: 0,
     score: 1.0
-  }
+  }, props.dimensionData)
 })
 
 // 实时评分

@@ -354,53 +354,58 @@
 
           <!-- 算力资源 -->
           <ComputingKPI
-            :dimensionData="kpiData.dimensions.computing"
+            :dimensionData="droneStore.kpiHistory.computing[0] || {}"
           />
           
           <!-- 通信资源 -->
           <CommunicationKPI
-            :dimensionData="kpiData.dimensions.communication"
+            :dimensionData="droneStore.kpiHistory.communication[0] || {}"
           />
           
           <!-- 能耗指标 -->
           <EnergyKPI
-            :dimensionData="kpiData.dimensions.energy"
+            :dimensionData="droneStore.kpiHistory.energy[0] || {}"
           />
           
           <!-- 任务效能 -->
           <MissionKPI
-            :dimensionData="kpiData.dimensions.mission"
+            :dimensionData="droneStore.kpiHistory.mission[0] || {}"
           />
           
           <!-- 飞行性能 -->
           <PerformanceKPI
-            :dimensionData="kpiData.dimensions.performance"
+            :dimensionData="droneStore.kpiHistory.performance[0] || {}"
           />
         </div>
       </div>
-  </div>
+
+      <!-- 分析标签页（变量曲线分析）-->
+      <div class="content-scroll analysis-tab" v-show="activeTab === 'analysis'">
+        <AnalysisPanel />
+      </div>
+   </div>
 </template>
 
 <script setup>
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useDroneStore } from '@/store/drone'
-import { useWebSocket } from '@/composables/useWebSocket'
 import EChartWrapper from '@/components/monitor/EChartWrapper.vue'
 import ComputingKPI from '@/components/monitor/ComputingKPI.vue'
 import CommunicationKPI from '@/components/monitor/CommunicationKPI.vue'
 import EnergyKPI from '@/components/monitor/EnergyKPI.vue'
 import MissionKPI from '@/components/monitor/MissionKPI.vue'
 import PerformanceKPI from '@/components/monitor/PerformanceKPI.vue'
+import AnalysisPanel from '@/components/AnalysisPanel.vue'
 
 const droneStore = useDroneStore()
-const wsUrl = import.meta.env.VITE_WS_URL || 'ws://localhost:8000/ws/drone'
-const { connected: wsConnected, kpiData, startRecording, stopRecording } = useWebSocket(wsUrl)
+const wsConnected = computed(() => droneStore.connected)
 
 // 标签页配置
 const tabs = [
   { id: 'control', label: '控制', icon: '🎮' },
   { id: 'navigation', label: '导航', icon: '🧭' },
-  { id: 'system', label: '系统性能', icon: '📊' }
+  { id: 'system', label: '系统性能', icon: '📊' },
+  { id: 'analysis', label: '分析', icon: '📈' }
 ]
 
 const activeTab = ref('control')
@@ -412,8 +417,8 @@ const toggleMaximize = () => {
   isMaximized.value = !isMaximized.value
 }
 
-// DSM录制状态
-const isRecording = ref(false)
+// DSM录制状态 (使用Store中的状态)
+const isRecording = computed(() => droneStore.dataRecording.enabled)
 const currentSessionId = ref('')
 
 // 录制状态显示
@@ -434,18 +439,16 @@ const handleStartRecording = () => {
     return
   }
   
-  const success = startRecording()
+  const success = droneStore.startDSMRecording()
   if (success) {
-    isRecording.value = true
     currentSessionId.value = generateSessionId()
   }
 }
 
 // 处理停止录制
 const handleStopRecording = () => {
-  const success = stopRecording()
+  const success = droneStore.stopDSMRecording()
   if (success) {
-    isRecording.value = false
     console.log('录制已停止，会话ID:', currentSessionId.value)
   }
 }

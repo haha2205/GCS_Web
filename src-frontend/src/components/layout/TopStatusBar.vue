@@ -20,7 +20,15 @@
         <span class="status-text">{{ latency }}ms</span>
       </div>
     </div>
-   
+    
+    <!-- 系统模式 -->
+    <div class="status-section mode-section">
+      <div class="status-item mode-item">
+        <span class="status-label">模式:</span>
+        <span :class="systemModeClass">{{ systemModeText }}</span>
+      </div>
+    </div>
+    
     <!-- 当前时间 -->
     <div class="status-section time-section">
       <div class="time-text">{{ currentTime }}</div>
@@ -103,6 +111,22 @@ const wsClass = computed(() => ({
 const wsStatusText = computed(() => {
   return droneStore.isConnected ? '已连接' : '未连接'
 })
+
+// 系统模式
+const systemMode = computed(() => {
+  return droneStore.systemMode || 'REALTIME'
+})
+
+const systemModeText = computed(() => {
+  return systemMode.value === 'REALTIME' ? '实时' : '回放'
+})
+
+const systemModeClass = computed(() => {
+  return {
+    'mode-realtime': systemMode.value === 'REALTIME',
+    'mode-replay': systemMode.value === 'REPLAY'
+  }
+})
 </script>
 
 <style scoped>
@@ -180,6 +204,29 @@ const wsStatusText = computed(() => {
 
 .ws-status.disconnected {
   color: #FF5252;
+}
+
+/* 系统模式样式 */
+.mode-section {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.mode-item .mode-realtime {
+  color: #00C853;
+  font-weight: 600;
+}
+
+.mode-item .mode-replay {
+  color: #FFC107;
+  font-weight: 600;
+  animation: pulse-replay 2s ease-in-out infinite;
+}
+
+@keyframes pulse-replay {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
 }
 
 .time-section {

@@ -1,64 +1,105 @@
 <template>
   <div class="mission-panel">
-    <h3 class="panel-title">任务规划</h3>
+    <h3 class="panel-title">规划指令</h3>
     
     <div class="content-scroll">
       <div class="mission-content">
-      <!-- 航点管理 -->
+      <!-- 目标位置设置 -->
       <div class="mission-section">
-        <h4 class="section-title">航点管理</h4>
-        <div class="waypoint-list">
-          <div v-for="(wp, index) in waypoints" :key="index" class="waypoint-item">
-            <span class="wp-index">{{ index + 1 }}</span>
-            <div class="wp-coords">
-              <span class="wp-label">Lat:</span>
-              <input v-model="wp.lat" type="number" class="wp-input" step="0.000001" placeholder="39.123456" />
-              <span class="wp-label">Lon:</span>
-              <input v-model="wp.lon" type="number" class="wp-input" step="0.000001" placeholder="117.123456" />
-              <span class="wp-label">Alt:</span>
-              <input v-model="wp.alt" type="number" class="wp-input" placeholder="50" />
-            </div>
-            <div class="wp-actions">
-              <button class="icon-btn" @click="moveWaypoint(index, -1)" :disabled="index === 0" title="上移">↑</button>
-              <button class="icon-btn" @click="moveWaypoint(index, 1)" :disabled="index === waypoints.length - 1" title="下移">↓</button>
-              <button class="icon-btn edit" @click="editWaypoint(index)" title="编辑">✎</button>
-              <button class="icon-btn delete" @click="removeWaypoint(index)" title="删除">✕</button>
-            </div>
+        <h4 class="section-title">目标位置 (ENU坐标系)</h4>
+        <div class="target-inputs">
+          <div class="input-group">
+            <label class="input-label">X (东向 m)</label>
+            <input
+              v-model.number="targetPos.x"
+              type="number"
+              class="coord-input"
+              step="1"
+              placeholder="0"
+            />
           </div>
-          
-          <div v-if="waypoints.length === 0" class="waypoint-empty">
-            <span class="empty-icon">📍</span>
-            <span class="empty-text">暂无航点</span>
-            <button class="add-sample-btn" @click="addSampleWaypoint">添加示例航点</button>
+          <div class="input-group">
+            <label class="input-label">Y (北向 m)</label>
+            <input
+              v-model.number="targetPos.y"
+              type="number"
+              class="coord-input"
+              step="1"
+              placeholder="0"
+            />
+          </div>
+          <div class="input-group">
+            <label class="input-label">Z (高度 m)</label>
+            <input
+              v-model.number="targetPos.z"
+              type="number"
+              class="coord-input"
+              step="1"
+              placeholder="100"
+              :min="0"
+            />
           </div>
         </div>
-        
-        <div class="mission-actions">
-          <button class="action-btn add" @click="addWaypoint" :disabled="!connected">
-            <span>+</span> 添加航点
-          </button>
-          <button class="action-btn calculate" @click="calculateMission" :disabled="!connected || waypoints.length < 2">
-            <span>📐</span> 计算航程
-          </button>
-          <button class="action-btn clear" @click="clearWaypoints" :disabled="waypoints.length === 0">
-            <span>🗑</span> 清空
-          </button>
-          <span class="mission-summary">
-            <span class="summary-label">总计:</span>
-            <span class="summary-value">{{ totalDistance.toFixed(2) }} m</span>
-            <span class="summary-divider">|</span>
-            <span class="waypoints-count">{{ waypoints.length }} 个航点</span>
-          </span>
+      </div>
+      
+      <!-- 速度设置 -->
+      <div class="mission-section">
+        <h4 class="section-title">速度设置</h4>
+        <div class="input-group">
+          <label class="input-label">巡航速度 (m/s)</label>
+          <input
+            v-model.number="cruiseSpeed"
+            type="number"
+            class="speed-input"
+            step="0.5"
+            placeholder="10.0"
+            :min="0"
+            :max="30"
+          />
         </div>
-        
-        <div class="mission-actions secondary">
-          <button class="action-btn upload" @click="uploadMission" :disabled="!connected || waypoints.length === 0">
-            <span>↑</span> 上传任务
-          </button>
-          <button class="action-btn download" @click="downloadMission">
-            <span>↓</span> 导出任务
-          </button>
+      </div>
+      
+      <!-- 飞控指令关联 -->
+      <div class="mission-section">
+        <h4 class="section-title">飞控指令</h4>
+        <div class="cmd-idx-info">
+          <span class="info-label">当前指令:</span>
+          <span class="info-value">{{ currentCmdIdxInfo }}</span>
         </div>
+        <div class="info-hint">
+          💡 请从"飞控指令"面板点击指令按钮，系统会自动关联
+        </div>
+      </div>
+      
+      <!-- 任务使能 -->
+      <div class="mission-section">
+        <div class="enable-control">
+          <label class="checkbox-label">
+            <input
+              type="checkbox"
+              v-model="enableMission"
+              class="checkbox-input"
+            />
+            <span>使能任务执行</span>
+          </label>
+        </div>
+      </div>
+      
+      <!-- 发送按钮 -->
+      <div class="mission-actions">
+        <button
+          class="action-btn send-planning"
+          @click="sendPlanningCommand"
+          :disabled="!connected"
+        >
+          <span>🚀</span> 发送规划指令
+        </button>
+        <button
+          class="action-btn clear"
+          @click="resetInputs"
+        >
+          <span>🔄</span> 重置
+        </button>
       </div>
       
       <!-- 当前航点信息 -->
@@ -82,14 +123,156 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useDroneStore } from '@/store/drone'
 
 const droneStore = useDroneStore()
 const connected = computed(() => droneStore.connected)
 
-const waypoints = ref([])
+// API基础URL
+const API_BASE_URL = 'http://localhost:8000'
 
+/**
+ * 发送POST请求到后端
+ */
+async function sendPostRequest(endpoint, data) {
+  try {
+    const url = `${API_BASE_URL}${endpoint}`
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(data)
+    })
+    
+    if (!response.ok) {
+      const errorText = await response.text()
+      throw new Error(`API 请求失败: ${response.status} - ${errorText}`)
+    }
+    
+    return await response.json()
+  } catch (error) {
+    console.error('API请求错误:', error)
+    throw error
+  }
+}
+
+// 目标位置（ENU坐标系）
+const targetPos = ref({
+  x: 0,
+  y: 0,
+  z: 100
+})
+
+// 巡航速度
+const cruiseSpeed = ref(10.0)
+
+// 任务使能标志
+const enableMission = ref(false)
+
+// 当前指令序号（从飞控指令面板获取）
+const currentCmdIdx = computed(() => droneStore.gcsData.Tele_GCS_CmdIdx)
+
+// 当前指令信息显示
+const currentCmdIdxInfo = computed(() => {
+  if (currentCmdIdx.value === 0) return '无指令'
+  
+  // 指令名称映射
+  const cmdMap = {
+    1: '外交控制',
+    2: '混合控制',
+    3: '程序控制',
+    4: '爬升',
+    5: '定高/平飞',
+    6: '下滑',
+    7: '断开定高',
+    8: '定向/直飞',
+    9: '左盘旋',
+    10: '右盘旋',
+    11: '航向保持',
+    12: '开车准备',
+    13: '停车',
+    14: '自动起飞',
+    15: '自动着陆',
+    16: '悬停',
+    17: '一键返航',
+    18: '预控',
+    19: '地速飞行',
+    20: '空速飞行',
+    21: '起飞准备',
+    22: '人工起飞',
+    23: '人工着陆',
+    24: '避障开',
+    25: '避障关'
+  }
+  
+  return `ID:${currentCmdIdx.value} ${cmdMap[currentCmdIdx.value] || '未知'}`
+})
+
+// 序号计数器
+const seqIdCounter = ref(0)
+
+// 发送规划指令到规划模块
+const sendPlanningCommand = async () => {
+  if (!connected.value) {
+    droneStore.addLog('未连接到后端，无法发送规划指令', 'warning')
+    return
+  }
+  
+  try {
+    // 递增序号
+    seqIdCounter.value = (seqIdCounter.value + 1) % 1000000
+    const seqId = seqIdCounter.value
+    
+    const planningData = {
+      seqId: seqId,
+      targetX: targetPos.value.x,
+      targetY: targetPos.value.y,
+      targetZ: targetPos.value.z,
+      cruiseSpeed: cruiseSpeed.value,
+      enable: enableMission.value ? 1 : 0,
+      cmdId: currentCmdIdx.value
+    }
+    
+    // 使用后端 API 发送指令
+    const response = await sendPostRequest('/api/command', {
+      type: 'gcs_command',
+      params: planningData
+    })
+    
+    if (response && response.status === 'success') {
+      droneStore.addLog(
+        `发送规划指令到规划模块: 目标(${targetPos.value.x}, ${targetPos.value.y}, ${targetPos.value.z}), 速度=${cruiseSpeed.value}m/s, CmdIdx=${currentCmdIdx.value}`,
+        'info'
+      )
+      console.log('规划指令发送成功:', planningData)
+    } else {
+      throw new Error(response?.message || '发送失败')
+    }
+  } catch (error) {
+    console.error('发送规划指令失败:', error)
+    droneStore.addLog(`发送规划指令失败: ${error.message || error}`, 'error')
+  }
+}
+
+// 重置输入
+const resetInputs = () => {
+  targetPos.value = { x: 0, y: 0, z: 100 }
+  cruiseSpeed.value = 10.0
+  enableMission.value = false
+  droneStore.addLog('规划指令已重置', 'info')
+}
+
+// 监听飞控指令变化
+watch(() => currentCmdIdx.value, (newVal, oldVal) => {
+  if (newVal !== oldVal && newVal !== 0) {
+    droneStore.addLog(`收到飞控指令: CmdIdx=${newVal}`, 'info')
+  }
+})
+
+// 保留旧的航点相关变量以避免错误
+const waypoints = ref([])
 const currentWaypointIndex = ref(-1)
 const missionProgress = ref(0)
 
@@ -148,15 +331,6 @@ const editWaypoint = (index) => {
 }
 
 const clearWaypoints = () => {
-  if (confirm('确定要清空所有航点吗？')) {
-    waypoints.value = []
-    currentWaypointIndex.value = -1
-    missionProgress.value = 0
-    droneStore.addLog('航点列表已清空', 'warning')
-  }
-}
-
-const calculateMission = () => {
   if (waypoints.value.length < 2) {
     return
   }
@@ -267,7 +441,7 @@ const downloadMission = () => {
   font-weight: 600;
   margin: 0 0 15px 0;
   padding-bottom: 10px;
-  border-bottom: 2px solid #4caf50;
+  border-bottom: 2px solid #9c27b0;
 }
 
 .mission-section {
@@ -286,7 +460,7 @@ const downloadMission = () => {
 }
 
 .section-title {
-  color: #4caf50;
+  color: #9c27b0;
   font-size: 13px;
   font-weight: 600;
   margin: 0;
@@ -299,9 +473,120 @@ const downloadMission = () => {
   font-size: 14px;
 }
 
-.waypoint-list {
-  max-height: 280px;
-  overflow-y: auto;
+/* 目标位置输入区域 */
+.target-inputs {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.input-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.input-label {
+  color: #b39ddb;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.coord-input {
+  background: rgba(20, 20, 20, 0.8);
+  border: 1px solid #7b1fa2;
+  border-radius: 4px;
+  color: #ffffff;
+  padding: 8px 12px;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.coord-input:focus {
+  outline: none;
+  border-color: #9c27b0;
+  box-shadow: 0 0 0 2px rgba(156, 39, 176, 0.2);
+}
+
+.speed-input {
+  background: rgba(20, 20, 20, 0.8);
+  border: 1px solid #7b1fa2;
+  border-radius: 4px;
+  color: #ffffff;
+  padding: 8px 12px;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.speed-input:focus {
+  outline: none;
+  border-color: #9c27b0;
+  box-shadow: 0 0 0 2px rgba(156, 39, 176, 0.2);
+}
+
+/* 指令信息显示 */
+.cmd-idx-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  background: rgba(20, 20, 20, 0.5);
+  border-radius: 4px;
+  border-left: 3px solid #7b1fa2;
+}
+
+.info-label {
+  color: #999;
+  font-size: 12px;
+}
+
+.info-value {
+  color: #ce93d8;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: 'Consolas', 'Monaco', monospace;
+}
+
+.info-hint {
+  color: #7b1fa2;
+  font-size: 11px;
+  padding: 8px;
+  background: rgba(123, 31, 162, 0.1);
+  border-radius: 4px;
+  margin-top: 8px;
+}
+
+/* 使能控制 */
+.enable-control {
+  display: flex;
+  align-items: center;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkbox-input {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #9c27b0;
+}
+
+/* 发送按钮样式 */
+.action-btn.send-planning {
+  background: linear-gradient(135deg, #9c27b0, #7b1fa2);
+  flex: 2;
+}
+
+.action-btn.send-planning:hover:not(:disabled) {
+  background: linear-gradient(135deg, #7b1fa2, #6a1b9a);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(156, 39, 176, 0.3);
 }
 
 .waypoint-item {

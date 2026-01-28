@@ -12,19 +12,19 @@ from datetime import datetime
 # ==================== 列数常量 ====================
 
 # 总列数（重新核对）
-TOTAL_COLUMNS = 225
+TOTAL_COLUMNS = 230  # 225 -AIM(1) -AB(1) +GCS(7) = 230
 
 # 各数据段的列数（根据interface.h严格计数）
 COL_TIMESTAMP = 1
 COL_PWMS = 8
 COL_STATES = 12
 COL_DATACTRL = 53
-COL_GNCBUS = 75  # TokenMode(19)+FtbOpt(10)+SrcValue(2)+MixValue(10)+CmdValue(7)+VarValue(4)+TrimValue(3)+ParamsLMT(10)+AcValue(4)+HoverValue(3)+HomeValue(2) = 75
+COL_GNCBUS = 75
 COL_AVOIFLAG = 3
 COL_FUTABA = 6
-COL_GCS = 4
-COL_AC_AIM2AB = 22
-COL_AC_AB = 22
+COL_GCS = 11
+COL_AC_AIM2AB = 21  # Corrected from 22
+COL_AC_AB = 21      # Corrected from 22
 COL_PARAM = 1
 COL_ESC = 18
 
@@ -377,11 +377,11 @@ def get_data_for_type(data_type: str, data: Dict[str, Any]) -> str:
             return _format_voiflag_row(timestamp, telemetry_data)
         elif data_type == 'fcs_datafutaba':
             return _format_futaba_row(timestamp, telemetry_data)
-        elif data_type == 'fcs_datagcs':
+        elif data_type == 'planning_telemetry':  # Updated from fcs_datagcs
             return _format_gcs_row(timestamp, telemetry_data)
-        elif data_type == 'fcs_ac_aim2ab':
+        elif data_type == 'fcs_line_aim2ab':  # Updated from fcs_ac_aim2ab
             return _format_aim2ab_row(timestamp, telemetry_data)
-        elif data_type == 'fcs_ac_ab':
+        elif data_type == 'fcs_line_ab':  # Updated from fcs_ac_ab
             return _format_acab_row(timestamp, telemetry_data)
         elif data_type == 'fcs_param':
             return _format_param_row(timestamp, telemetry_data)
@@ -700,17 +700,24 @@ def _format_futaba_row(timestamp: str, futaba_data: Dict[str, Any]) -> str:
 
 
 def _format_gcs_row(timestamp: str, gcs_data: Dict[str, Any]) -> str:
-    """格式化GCS数据行"""
+    """格式化GCS数据行 (GCSTelemetry_T)"""
     row = [timestamp]
     
-    # 前面为空 (156列)
+    # 前面为空
     row.extend([""] * OFFSET_GCS)
     
-    # GCS数据 (4列)
-    row.append(_safe_str(gcs_data.get('Tele_GCS_CmdIdx', 0)))
-    row.append(_safe_str(gcs_data.get('Tele_GCS_Mission', 0)))
-    row.append(f"{_safe_float(gcs_data.get('Tele_GCS_Val')):.4f}")
-    row.append(_safe_str(gcs_data.get('Tele_GCS_com_GCS_fail', 0)))
+    # GCS数据 (11列)
+    row.append(str(gcs_data.get('seq_id', 0)))
+    row.append(str(gcs_data.get('timestamp', 0)))
+    row.append(f"{_safe_float(gcs_data.get('pos_x')):.4f}")
+    row.append(f"{_safe_float(gcs_data.get('pos_y')):.4f}")
+    row.append(f"{_safe_float(gcs_data.get('pos_z')):.4f}")
+    row.append(f"{_safe_float(gcs_data.get('vel')):.4f}")
+    row.append(str(gcs_data.get('update_flags', 0)))
+    row.append(str(gcs_data.get('status', 0)))
+    row.append(str(gcs_data.get('global_path_count', 0)))
+    row.append(str(gcs_data.get('local_traj_count', 0)))
+    row.append(str(gcs_data.get('obstacle_count', 0)))
     
     # 其他全部为空
     fill_count = TOTAL_COLUMNS - len(row)

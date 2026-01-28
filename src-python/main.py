@@ -15,21 +15,16 @@ import asyncio
 import logging
 from datetime import datetime
 from pydantic import BaseModel
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from typing import Dict, Any, Optional
 import json
 import time
+import math
 
 from protocol.protocol_parser import UDPHandler, NCLinkUDPServerProtocol
 from protocol.nclink_protocol import (
-    encode_takeoff_command, encode_land_command,
-    encode_hover_command, encode_rtl_command,
-    encode_lidar_avoidance_command, encode_command_packet,
-    NCLINK_SEND_EXTU_FCS, NCLINK_GCS_COMMAND, CmdIdx,
-    encode_gcs_command, encode_waypoints_upload,
-    encode_extu_fcs_from_dict,
     PortType
 )
 from config import config, Config
@@ -41,6 +36,7 @@ from dsm import DSMGenerator
 from recorder.csv_helper_full import (
     get_full_header, get_data_for_type
 )
+from replayer import Replayer
 
 # ================================================================
 # 数据模型
@@ -60,7 +56,6 @@ class ConnectionConfig(BaseModel):
 
 class LogConfig(BaseModel):
     """数据记录配置"""
-    logDirectory: str = ""
     autoRecord: bool = False
     logFormat: str = "csv"
     logLevel: str = "1"
@@ -83,6 +78,13 @@ class DSMReportRequest(BaseModel):
     start_time: Optional[float] = None
     end_time: Optional[float] = None
     output_format: str = "json"  # json or csv_matrix
+
+class ReplayControlRequest(BaseModel):
+    """回放控制请求"""
+    action: str  # load, play, pause, seek, set_speed, stop
+    file_path: Optional[str] = None
+    progress_percent: Optional[float] = None
+    speed: Optional[float] = None
 
 # ================================================================
 # 全局配置和日志管理
@@ -129,6 +131,7 @@ app.add_middleware(
 # 全局变量
 # ================================================================
 
+
 # 使用统一的WebSocket管理器
 manager = WebSocketManager()
 udp_handler = None
@@ -155,6 +158,23 @@ recorder = None  # RawDataRecorder实例
 calculator = RealTimeCalculator()  # 实时计算引擎
 mapping_config = MappingConfig()  # 映射配置
 dsm_generator = DSMGenerator(mapping_config)  # DSM生成器
+replayer = None  # Replayer实例（数据回放引擎）
+
+# 回放数据缓存（用于变量分析功能）
+replay_df_cache = None
+
+# 变量分类映射（基于 ExtY_FCS_T 结构）
+VARIABLE_CATEGORIES = {
+    'PWMS': ['pwm_'],
+    'STATES': ['states_'],
+    'DATACTRL': ['ctrl_', 'est_', 'ref_'],
+    'GNCBUS': ['GNCBus_', 'pos_', 'vel_', 'euler_'],
+    'AVOIFLAG': ['AvoiFlag_'],
+    'DATAFUTABA': ['Tele_ftb_'],
+    'DATAGCS': ['Tele_GCS_'],
+    'PARAM': ['param'],
+    'ESC': ['esc']
+}
 
 # 初始化指令发送锁
 command_send_lock = asyncio.Lock()
@@ -162,6 +182,10 @@ command_send_lock = asyncio.Lock()
 # 录制状态
 recording_active = False
 current_session_id = None
+
+# 回放状态
+replay_active = False
+current_replay_file = None
 
 # ================================================================
 # 全面的数据记录功能
@@ -184,7 +208,7 @@ def save_data_to_log(category: str, message: dict):
     """
     global log_file_handles
     
-    if not log_config.autoRecord or not log_config.logDirectory:
+    if not log_config.autoRecord:
         return
     
     if 'telemetry' not in log_file_handles:
@@ -218,6 +242,22 @@ def save_data_to_log(category: str, message: dict):
 
 
 # ================================================================
+# 辅助函数
+# ================================================================
+
+def sample_trajectory_points(points: list, step: int = 1) -> list:
+    """轨迹点采样函数
+    :param points: 轨迹点列表 [Point, Point, ...]
+    :param step: 采样步长
+    """
+    if not points:
+        return []
+    if step < 1:
+        step = 1
+    return points[::step]
+
+
+# ================================================================
 # UDP数据处理回调
 # ================================================================
 
@@ -234,6 +274,9 @@ def on_udp_message_received(message: dict):
     msg_type = message.get('type', 'unknown')
     func_code = message.get('func_code', 0)
     
+    # 添加调试日志：显示收到的所有消息类型
+    logger.info(f"[调试] 收到UDP消息: type='{msg_type}', func_code={func_code}")
+    
     # 分支1: 实时计算KPI
     kpi_result = calculator.process_packet(message)
     
@@ -245,22 +288,95 @@ def on_udp_message_received(message: dict):
     }
     asyncio.create_task(manager.broadcast(kpi_message))
     
-    # 分支2: 录制数据（冷流）
+    # 分支2: 录制数据（冷流）- 统一使用RawDataRecorder
+    # 检查全局录制状态
+    global recorder, recording_active
+    
+    # 支持左侧面板"配置自动录制" -> 如果启用，尝试确保recorder已启动
+    if log_config.autoRecord:
+         # 如果尚未激活录制，且没有手动录制正在进行
+         if not recording_active and recorder is None:
+             # 初始化自动录制会话
+             auto_session_id = f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+             project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+             base_directory = os.path.join(project_root, 'Log', 'AutoDSM')
+             
+             try:
+                 recorder = RawDataRecorder(auto_session_id, base_directory)
+                 recorder.start_recording()
+                 recording_active = True
+                 current_session_id = auto_session_id
+                 logger.info(f"自动录制已启动: {auto_session_id}")
+                 
+                 # 广播状态
+                 asyncio.create_task(manager.broadcast({
+                    "type": "recording_status",
+                    "is_active": True,
+                    "session_id": current_session_id,
+                    "timestamp": int(time.time() * 1000)
+                }))
+             except Exception as e:
+                 logger.error(f"无法启动自动录制: {e}")
+
+    # 只要recorder处于活动状态，就记录
     if recording_active and recorder:
         recorder.record_decoded_packet(message)
     
-    # 分支3: 广播原始数据到前端
+    # 分支3: 广播原始数据到前端（默认广播）
+    # 对于planning_telemetry类型，会在下面单独处理并广播包含轨迹的数据
     ws_message = {
         'type': 'udp_data',
         'timestamp': message.get('timestamp', int(time.time() * 1000)),
         'data': message
     }
-    asyncio.create_task(manager.broadcast(ws_message))
     
-    # 根据消息类型记录日志
+    # 分支4: 根据消息类型处理
     if msg_type == 'fcs_states':
         data = message.get('data', {})
         logger.info(f"[UDP] 飞行状态: 位置({data.get('latitude', 0):.6f}, {data.get('longitude', 0):.6f}), 高度{data.get('altitude', 0):.1f}m")
+    elif msg_type == 'planning_telemetry':
+        data = message.get('data', {})
+        logger.info(f"[UDP] ===== 规划遥测(0x71) =====")
+        logger.info(f"[UDP] 遥测序号: {data.get('seq_id', 0)}")
+        logger.info(f"[UDP] 时间戳: {data.get('timestamp', 0)}")
+        logger.info(f"[UDP] 当前位置: ({data.get('current_pos_x', 0):.2f}, {data.get('current_pos_y', 0):.2f}, {data.get('current_pos_z', 0):.2f}) m")
+        logger.info(f"[UDP] 当前速度: {data.get('current_vel', 0):.2f} m/s")
+        logger.info(f"[UDP] 更新标志: {data.get('update_flags', 0):02X} (全局路径={bool(data.get('update_flags', 0) & 0x01)}, 局部轨迹={bool(data.get('update_flags', 0) & 0x02)}, 障碍物={bool(data.get('update_flags', 0) & 0x04)})")
+        logger.info(f"[UDP] 系统状态: {data.get('status', 0)}")
+        logger.info(f"[UDP] 全局路径点数: {data.get('global_path_count', 0)}")
+        logger.info(f"[UDP] 局部轨迹点数: {data.get('local_traj_count', 0)}")
+        logger.info(f"[UDP] 障碍物数量: {data.get('obstacle_count', 0)}")
+        logger.info(f"[UDP] =======================")
+        
+        # 检查是否包含真实轨迹数据
+        global_path_data = data.get('global_path', [])
+        local_traj_data = data.get('local_path', [])
+        
+        if global_path_data and len(global_path_data) > 0:
+            # 调试模式：不采样，发送全部点
+            sampled_global_path = global_path_data
+            logger.info(f"[轨迹处理] 全局路径: 原始{len(global_path_data)}点 -> 发送{len(sampled_global_path)}点")
+        else:
+            sampled_global_path = []
+            logger.info(f"[轨迹处理] 全局路径: 无数据")
+        
+        if local_traj_data and len(local_traj_data) > 0:
+            # 调试模式：不采样，发送全部点
+            sampled_local_traj = local_traj_data
+            logger.info(f"[轨迹处理] 局部轨迹: 原始{len(local_traj_data)}点 -> 发送{len(sampled_local_traj)}点")
+        else:
+            sampled_local_traj = []
+            logger.info(f"[轨迹处理] 局部轨迹: 无数据")
+        
+        # 更新ws_message，添加采样后的轨迹信息
+        ws_message['type'] = 'planning_telemetry'
+        ws_message['data'] = {
+            **message.get('data', {}),
+            'global_path': sampled_global_path,
+            'local_traj': sampled_local_traj
+        }
+        
+        logger.info(f"[WebSocket] 准备发送规划遥测，包含global_path: {len(sampled_global_path)}点, local_traj: {len(sampled_local_traj)}点")
     elif msg_type == 'fcs_pwms':
         logger.info(f"[UDP] PWM数据: 功能码0x{func_code:02X}")
     elif msg_type == 'fcs_datactrl':
@@ -274,13 +390,21 @@ def on_udp_message_received(message: dict):
         logger.info(f"[UDP] 电机ESC数据")
     elif msg_type == 'fcs_param':
         logger.info(f"[UDP] 飞控参数: 功能码0x{func_code:02X}")
+    elif msg_type == 'lidar_obstacles':
+        count = message.get('obstacle_count', 0)
+        logger.info(f"[UDP] 雷达障碍物: {count}个")
+        if count == 0:
+            logger.debug(f"[UDP] 收到空障碍物包: {message}")
     elif msg_type == 'unknown':
         logger.warning(f"[UDP] 未知数据包: 功能码=0x{func_code:02X}")
     else:
         logger.info(f"[UDP] {msg_type} (功能码: 0x{func_code:02X})")
     
-    # 记录数据到日志文件（旧方式，保持兼容性）
-    save_data_to_log(msg_type, message)
+    # 广播消息到前端
+    asyncio.create_task(manager.broadcast(ws_message))
+    
+    # 记录数据到日志文件（旧方式已弃用，统一使用 RawDataRecorder）
+    # save_data_to_log(msg_type, message)
 
 
 # ================================================================
@@ -625,13 +749,17 @@ async def update_log_config(config: LogConfig):
     
     log_config = config
     
-    # 创建新日志文件
-    if config.autoRecord and config.logDirectory:
-        os.makedirs(config.logDirectory, exist_ok=True)
+    # 创建 Log 目录并创建新日志文件
+    if config.autoRecord:
+        # 获取项目根目录 (Apollo-GCS-Web)
+        # __file__ 是 src-python/main.py -> dirname 是 src-python -> dirname 是 Apollo-GCS-Web
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        log_dir = os.path.join(project_root, 'Log')
+        os.makedirs(log_dir, exist_ok=True)
         
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         log_filename = f"drone_log_{timestamp_str}.{config.logFormat}"
-        log_path = os.path.join(config.logDirectory, log_filename)
+        log_path = os.path.join(log_dir, log_filename)
         
         try:
             if config.logFormat == "csv":
@@ -660,7 +788,7 @@ async def update_log_config(config: LogConfig):
 @app.post("/api/log/save")
 async def save_log_entry(data: dict):
     """保存单条日志记录（前端调用）"""
-    if not log_config.autoRecord or not log_config.logDirectory:
+    if not log_config.autoRecord:
         return {"status": "skipped", "message": "自动记录未启用"}
     
     try:
@@ -842,8 +970,6 @@ Returns:
     global cached_pid_params
     
     try:
-        from protocol.nclink_protocol import NCLINK_SEND_EXTU_FCS, encode_extu_fcs_from_dict
-        
         logger.info(f"收到set_pids指令，参数数量: {len(pids_data)}")
         
         # 更新全局PID参数缓存
@@ -900,6 +1026,8 @@ Returns:
 
 async def handle_client_message(message: dict, websocket: WebSocket):
     """处理WebSocket客户端消息"""
+    global recording_active, current_session_id, recorder, cached_pid_params, replayer, replay_active, current_replay_file, replay_df_cache
+    
     msg_type = message.get('type')
     
     if msg_type == 'command':
@@ -913,7 +1041,6 @@ async def handle_client_message(message: dict, websocket: WebSocket):
         # 处理set_pids指令（通过WebSocket发送）
         if command == 'set_pids':
             # 更新全局PID参数缓存
-            global cached_pid_params
             cached_pid_params.update(params)
             logger.info(f"PID参数已更新（通过WebSocket）: {len(params)}个")
             
@@ -930,9 +1057,57 @@ async def handle_client_message(message: dict, websocket: WebSocket):
                 "message": "指令确认",
                 "timestamp": int(time.time() * 1000)
             })
+
+    elif msg_type == 'recording':
+        # 处理录制控制消息 (Start/Stop)
+        action = message.get('action')
+        
+        try:
+            if action == 'start':
+                if not recording_active:
+                    session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    
+                    # 确定日志目录: Apollo-GCS-Web/Log/DSM
+                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    base_directory = os.path.join(project_root, 'Log', 'DSM')
+                    
+                    recorder = RawDataRecorder(session_id, base_directory)
+                    recorder.start_recording()
+                    
+                    recording_active = True
+                    current_session_id = session_id
+                    
+                    await manager.broadcast({
+                        "type": "recording_status",
+                        "is_active": True,
+                        "session_id": current_session_id,
+                        "timestamp": int(time.time() * 1000)
+                    })
+                    logger.info(f"WebSocket启动录制: {current_session_id}")
+                    
+            elif action == 'stop':
+                if recording_active and recorder:
+                    session_info = recorder.get_session_info()
+                    recorder.stop_recording()
+                    
+                    last_session_id = current_session_id
+                    recording_active = False
+                    current_session_id = None
+                    
+                    await manager.broadcast({
+                        "type": "recording_status",
+                        "is_active": False,
+                        "session_id": last_session_id,
+                        "session_info": session_info,
+                        "timestamp": int(time.time() * 1000)
+                    })
+                    logger.info(f"WebSocket停止录制: {last_session_id}")
+            
+        except Exception as e:
+            logger.error(f"WebSocket录制控制失败: {e}")
     
     elif msg_type == 'get_config':
-        config_type = data.get('config_type', 'all')
+        config_type = message.get('data', {}).get('config_type', 'all')
         
         if config_type in ['connection', 'all']:
             await websocket.send_json({
@@ -950,9 +1125,355 @@ async def handle_client_message(message: dict, websocket: WebSocket):
                 "timestamp": int(time.time() * 1000)
             })
 
+
+    elif msg_type == 'replay':
+        # 处理回放控制消息
+        action = message.get('action', '')
+        params = message.get('params', {})
+        
+        global replayer, replay_active, current_replay_file, replay_df_cache
+        
+        try:
+            if action == 'load':
+                # 加载回放文件
+                file_path = params.get('file_path')
+                if replayer is None:
+                    replayer = Replayer(manager.broadcast)
+                
+                total_time = replayer.load_file(file_path)
+                current_replay_file = file_path
+                replay_active = True
+                
+                # 缓存 DataFrame 供变量分析使用
+                replay_df_cache = replayer.df
+                
+                # 发送系统模式切换通知
+                await manager.broadcast({
+                    "type": "system_mode_change",
+                    "mode": "REPLAY",
+                    "timestamp": int(time.time() * 1000)
+                })
+                
+                await websocket.send_json({
+                    "type": "replay_response",
+                    "action": "load",
+                    "status": "success",
+                    "total_time": total_time,
+                    "timestamp": int(time.time() * 1000)
+                })
+            
+            elif action == 'play':
+                # 开始播放
+                if replayer:
+                    replayer.play()
+                    await replayer.start()
+                    
+                    await websocket.send_json({
+                        "type": "replay_response",
+                        "action": "play",
+                        "status": "success",
+                        "timestamp": int(time.time() * 1000)
+                    })
+            
+            elif action == 'pause':
+                # 暂停播放
+                if replayer:
+                    replayer.pause()
+                    
+                    await websocket.send_json({
+                        "type": "replay_response",
+                        "action": "pause",
+                        "status": "success",
+                        "timestamp": int(time.time() * 1000)
+                    })
+            
+            elif action == 'seek':
+                # 跳转
+                progress_percent = params.get('progress_percent', 0)
+                if replayer:
+                    replayer.seek(progress_percent)
+                    
+                    await websocket.send_json({
+                        "type": "replay_response",
+                        "action": "seek",
+                        "status": "success",
+                        "progress": progress_percent,
+                        "timestamp": int(time.time() * 1000)
+                    })
+            
+            elif action == 'set_speed':
+                # 设置播放速度
+                speed = params.get('speed', 1.0)
+                if replayer:
+                    replayer.set_speed(speed)
+                    
+                    await websocket.send_json({
+                        "type": "replay_response",
+                        "action": "set_speed",
+                        "status": "success",
+                        "speed": speed,
+                        "timestamp": int(time.time() * 1000)
+                    })
+            
+            elif action == 'stop':
+                # 停止回放
+                if replayer:
+                    await replayer.stop()
+                    replay_active = False
+                    current_replay_file = None
+                    
+                    # 发送系统模式切换通知
+                    await manager.broadcast({
+                        "type": "system_mode_change",
+                        "mode": "REALTIME",
+                        "timestamp": int(time.time() * 1000)
+                    })
+                    
+                    await websocket.send_json({
+                        "type": "replay_response",
+                        "action": "stop",
+                        "status": "success",
+                        "timestamp": int(time.time() * 1000)
+                    })
+            
+            else:
+                await websocket.send_json({
+                    "type": "replay_response",
+                    "action": action,
+                    "status": "error",
+                    "message": f"未知回放操作: {action}",
+                    "timestamp": int(time.time() * 1000)
+                })
+        
+        except Exception as e:
+            logger.error(f"处理回放请求失败: {e}")
+            await websocket.send_json({
+                "type": "replay_response",
+                "action": action,
+                "status": "error",
+                "message": str(e),
+                "timestamp": int(time.time() * 1000)
+            })
+
 # ================================================================
 # 录制控制 API
 # ================================================================
+
+# ================================================================
+# 回放控制 API
+# ================================================================
+
+@app.get("/api/replay/files")
+async def get_replay_files():
+    """获取所有可用的回放文件列表"""
+    global replayer
+    
+    if replayer is None:
+        replayer = Replayer(manager.broadcast)
+    
+    files = replayer.get_data_list()
+    
+    # 格式化文件信息
+    file_list = []
+    for file_info in files:
+        file_list.append({
+            "name": file_info['name'],
+            "path": file_info['path'],
+            "size": file_info['size'],
+            "date": datetime.fromtimestamp(file_info['date']).strftime("%Y-%m-%d %H:%M:%S")
+        })
+    
+    return {
+        "type": "replay_files",
+        "files": file_list,
+        "count": len(file_list),
+        "timestamp": int(time.time() * 1000)
+    }
+
+@app.post("/api/replay/upload")
+async def upload_replay_file(file: UploadFile = File(...)):
+    """上传回放文件"""
+    global replayer, replay_df_cache, replay_active, current_replay_file
+    
+    try:
+        # 确保 Log 目录存在
+        log_dir = 'Log'
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # 保存上传的文件
+        file_path = os.path.join(log_dir, file.filename)
+        
+        # 写入文件
+        with open(file_path, 'wb') as f:
+            content = await file.read()
+            f.write(content)
+        
+        logger.info(f"回放文件已上传: {file_path}")
+        
+        return {
+            "status": "success",
+            "message": "文件上传成功",
+            "file_path": file_path,
+            "timestamp": int(time.time() * 1000)
+        }
+    except Exception as e:
+        logger.error(f"上传回放文件失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/replay/status")
+async def get_replay_status():
+    """获取当前回放状态"""
+    global replayer, replay_active, current_replay_file
+    
+    if replayer:
+        status = replayer.get_status()
+        status['replay_active'] = replay_active
+        status['current_file'] = current_replay_file
+    else:
+        status = {
+            'is_loaded': False,
+            'is_playing': False,
+            'replay_active': False,
+            'current_file': None,
+            'current_idx': 0,
+            'total_rows': 0,
+            'total_time': 0.0,
+            'speed': 1.0,
+            'progress': 0.0,
+            'current_time': 0.0
+        }
+    
+    return {
+        "type": "replay_status",
+        "status": status,
+        "timestamp": int(time.time() * 1000)
+    }
+
+@app.post("/api/replay/control")
+async def replay_control(request: ReplayControlRequest):
+    """回放控制接口"""
+    global replayer, replay_df_cache, replay_active, current_replay_file
+    
+    try:
+        action = request.action
+        
+        if action == 'load':
+            # 加载回放文件
+            if not request.file_path:
+                raise HTTPException(status_code=400, detail="未指定文件路径")
+            
+            if replayer is None:
+                replayer = Replayer(manager.broadcast)
+            
+            total_time = replayer.load_file(request.file_path)
+            current_replay_file = request.file_path
+            replay_active = True
+            
+            # 重要：缓存 DataFrame 供变量分析使用
+            replay_df_cache = replayer.df
+            logger.info(f"[REST API] 回放数据已缓存: {len(replayer.df)} 行数据")
+            
+            # 广播系统模式切换
+            await manager.broadcast({
+                "type": "system_mode_change",
+                "mode": "REPLAY",
+                "timestamp": int(time.time() * 1000)
+            })
+            
+            return {
+                "type": "replay_response",
+                "action": "load",
+                "status": "success",
+                "total_time": total_time,
+                "timestamp": int(time.time() * 1000)
+            }
+        
+        elif action == 'play':
+            # 开始播放
+            if replayer:
+                replayer.play()
+                await replayer.start()
+                
+                return {
+                    "type": "replay_response",
+                    "action": "play",
+                    "status": "success",
+                    "timestamp": int(time.time() * 1000)
+                }
+        
+        elif action == 'pause':
+            # 暂停播放
+            if replayer:
+                replayer.pause()
+                
+                return {
+                    "type": "replay_response",
+                    "action": "pause",
+                    "status": "success",
+                    "timestamp": int(time.time() * 1000)
+                }
+        
+        elif action == 'seek':
+            # 跳转
+            if request.progress_percent is None:
+                raise HTTPException(status_code=400, detail="未指定进度百分比")
+            
+            if replayer:
+                replayer.seek(request.progress_percent)
+                
+                return {
+                    "type": "replay_response",
+                    "action": "seek",
+                    "status": "success",
+                    "progress": request.progress_percent,
+                    "timestamp": int(time.time() * 1000)
+                }
+        
+        elif action == 'set_speed':
+            # 设置播放速度
+            if request.speed is None:
+                raise HTTPException(status_code=400, detail="未指定播放速度")
+            
+            if replayer:
+                replayer.set_speed(request.speed)
+                
+                return {
+                    "type": "replay_response",
+                    "action": "set_speed",
+                    "status": "success",
+                    "speed": request.speed,
+                    "timestamp": int(time.time() * 1000)
+                }
+        
+        elif action == 'stop':
+            # 停止回放
+            if replayer:
+                await replayer.stop()
+                replay_active = False
+                current_replay_file = None
+                
+                # 广播系统模式切换
+                await manager.broadcast({
+                    "type": "system_mode_change",
+                    "mode": "REALTIME",
+                    "timestamp": int(time.time() * 1000)
+                })
+                
+                return {
+                    "type": "replay_response",
+                    "action": "stop",
+                    "status": "success",
+                    "timestamp": int(time.time() * 1000)
+                }
+        
+        else:
+            raise HTTPException(status_code=400, detail=f"未知操作: {action}")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"回放控制失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/recording/status")
 async def get_recording_status():
@@ -1204,22 +1725,158 @@ async def download_dsm_report(session_id: str, format: str = "json"):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ================================================================
+# 回放变量分析 API
+# ================================================================
+
+@app.get("/api/replay/headers")
+async def get_replay_headers():
+    """获取回放数据的所有列名（变量列表）"""
+    import pandas as pd
+    global replay_df_cache, replay_active, current_replay_file
+    
+    if replay_df_cache is None:
+        raise HTTPException(status_code=400, detail="未加载回放文件，先加载 CSV 文件")
+    
+    try:
+        # 获取所有列名
+        columns = list(replay_df_cache.columns)
+        
+        # 按照变量分类组织
+        categorized_vars = {}
+        for category, prefixes in VARIABLE_CATEGORIES.items():
+            vars_in_category = []
+            for prefix in prefixes:
+                vars_in_category.extend([col for col in columns if col.startswith(prefix)])
+            if vars_in_category:
+                categorized_vars[category] = vars_in_category
+        
+        return {
+            "status": "success",
+            "file": current_replay_file,
+            "total_variables": len(columns),
+            "categories": categorized_vars,
+            "all_variables": columns,
+            "timestamp": int(time.time() * 1000)
+        }
+    except Exception as e:
+        logger.error(f"获取回放变量列表失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/replay/series")
+async def get_replay_series_data(request: dict):
+    """获取选定变量的数据序列（用于图表绘制）"""
+    import pandas as pd
+    import numpy as np
+    global replay_df_cache
+    
+    if replay_df_cache is None:
+        raise HTTPException(status_code=400, detail="未加载回放文件")
+    
+    try:
+        variables = request.get('variables', [])  # 选定的变量列表
+        max_points = request.get('max_points', 2000)  # 最大数据点数（降采样）
+        
+        if not variables:
+            raise HTTPException(status_code=400, detail="未选择任何变量")
+        
+        logger.info(f"请求变量数据: {len(variables)} 个变量，最大点数: {max_points}")
+        
+        # 获取时间轴
+        if 'rel_time' in replay_df_cache.columns:
+            time_axis = replay_df_cache['rel_time'].values.astype(float)
+        elif 'timestamp' in replay_df_cache.columns:
+            time_axis = replay_df_cache['timestamp'].values
+        else:
+            time_axis = np.arange(len(replay_df_cache))
+        
+        # 获取每个变量的数据
+        series_data = {}
+        for var in variables:
+            if var in replay_df_cache.columns:
+                # 处理 NaN 值
+                data = replay_df_cache[var].values
+                # 将 NaN 替换为 0
+                data = np.nan_to_num(data, nan=0.0)
+                series_data[var] = data.tolist()
+        
+        # 数据降采样（如果数据点太多）
+        total_points = len(time_axis)
+        if total_points > max_points:
+            # 计算采样步长
+            step = total_points // max_points
+            indices = np.arange(0, total_points, step)
+            
+            # 降采样
+            time_axis_sampled = time_axis[indices].tolist()
+            
+            for var in series_data:
+                series_data[var] = [series_data[var][i] for i in indices]
+        else:
+            time_axis_sampled = time_axis.tolist()
+        
+        logger.info(f"返回数据: 时间轴 {len(time_axis_sampled)} 点, 变量 {len(variables)} 个")
+        
+        return {
+            "status": "success",
+            "time_axis": time_axis_sampled,
+            "series_data": series_data,
+            "total_points": total_points,
+            "sampled_points": len(time_axis_sampled),
+            "timestamp": int(time.time() * 1000)
+        }
+    except Exception as e:
+        logger.error(f"获取变量序列数据失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ================================================================
 # 应用启动和关闭事件
 # ================================================================
 
 @app.on_event("startup")
 async def startup_event():
     """应用启动"""
+    global command_send_lock, udp_handler, udp_server_started
+    
     logger.info("=" * 60)
     logger.info("Apollo GCS Web 后端启动")
     logger.info("=" * 60)
     
     # 初始化指令发送状态
-    global command_send_lock
     command_send_lock = asyncio.Lock()
     logger.info("指令发送锁已初始化（支持6次连续发送机制）")
-    
     logger.info("=" * 60)
+    
+    # 自动启动UDP服务器
+    try:
+        logger.info("正在自动启动UDP服务器...")
+        
+        # 初始化UDP处理器（如果尚未初始化）
+        if udp_handler is None:
+            udp_handler = UDPHandler(on_udp_message_received)
+            logger.info("UDP处理器已初始化")
+        
+        # 启动UDP服务器，监听三个端口
+        ports = [
+            connection_config.hostPort,
+            connection_config.lidarSendPort,
+            connection_config.planningRecvPort
+        ]
+        
+        await udp_handler.start_server(host=connection_config.listenAddress, ports=ports)
+        udp_server_started = True
+        
+        logger.info("✓ UDP服务器已自动启动")
+        logger.info(f"  监听地址: {connection_config.listenAddress}")
+        logger.info(f"  监听端口: {ports}")
+        logger.info(f"  发送目标: {connection_config.remoteIp}:{connection_config.commandRecvPort}")
+        logger.info("=" * 60)
+        
+    except Exception as e:
+        logger.error(f"✗ UDP服务器自动启动失败: {e}")
+        logger.warning("UDP服务器未启动，请手动调用 POST /api/udp/start 启动")
+        logger.info("=" * 60)
 
 @app.on_event("shutdown")
 async def shutdown_event():
