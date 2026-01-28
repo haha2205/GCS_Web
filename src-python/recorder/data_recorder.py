@@ -63,22 +63,23 @@ class RawDataRecorder:
         self.is_recording = True
         self.start_time = time.time()
         
-        # 初始化各种数据类型的文件
-        self._init_flight_perf_file()
-        self._init_resources_file()
-        self._init_bus_traffic_file()
-        self._init_obstacles_file()
-        self._init_lidar_perf_file()
-        self._init_lidar_status_file()
-        self._init_futaba_file()
-        self._init_gncbus_file()
-        self._init_esc_file()
-        self._init_datafutaba_file()
-        
-        # 新增的三大类分类文件
+        # 仅初始化三大核心数据类型文件
+        # FcsTelemetry, PlanningTelemetry, RadarData
         self._init_full_record_file() # fcs_telemetry
         self._init_planning_file()    # planning
         self._init_radar_file()       # radar
+        
+        # 遗留/辅助文件不再默认生成，避免文件碎片化
+        # self._init_flight_perf_file()
+        # self._init_resources_file()
+        # self._init_bus_traffic_file()
+        # self._init_obstacles_file()
+        # self._init_lidar_perf_file()
+        # self._init_lidar_status_file()
+        # self._init_futaba_file()
+        # self._init_gncbus_file()
+        # self._init_esc_file()
+        # self._init_datafutaba_file()
 
         logger.info(f"开始录制: {self.session_id}")
     
