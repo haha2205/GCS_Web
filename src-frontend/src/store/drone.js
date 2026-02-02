@@ -1337,6 +1337,33 @@ export const useDroneStore = defineStore('drone', {
     },
     
     /**
+     * 格式化指令详情
+     */
+    _formatCommandDetails(type, params) {
+      if (!params) return ''
+      try {
+        if (type === 'cmd_idx') {
+          // 显示 [ID: 名称]
+          return `[${params.cmdId}: ${params.name || ''}]`
+        }
+        if (type === 'cmd_mission') {
+          // 显示 [ID: 值]
+          return `[${params.cmd_mission}: ${params.value}]`
+        }
+        if (type === 'set_pids') {
+           const keys = Object.keys(params);
+           return `[${keys.length}个参数]`
+        }
+        if (type === 'scan_lidar') {
+           return `[范围:${params.ip_start}-${params.ip_end}]`
+        }
+      } catch (e) {
+        return ''
+      }
+      return ''
+    },
+
+    /**
      * 发送指令到后端（REST API）
      */
     async sendCommandREST(type, payload) {
@@ -1353,7 +1380,8 @@ export const useDroneStore = defineStore('drone', {
         })
         
         const result = await response.json()
-        this.addLog(`指令发送: ${type} - ${result.status || 'unknown'}`, 'info')
+        const details = this._formatCommandDetails(type, payload)
+        this.addLog(`指令发送: ${type} ${details} - ${result.status || 'unknown'}`, 'info')
         return result
       } catch (error) {
         console.error('发送REST指令失败:', error)
@@ -1381,6 +1409,9 @@ export const useDroneStore = defineStore('drone', {
       
       try {
         wsInstance.send(JSON.stringify(message))
+        // 增加WebSocket发送日志
+        const details = this._formatCommandDetails(type, payload)
+        this.addLog(`指令发送: ${type} ${details}`, 'info')
         console.log('发送指令:', message)
         return true
       } catch (error) {

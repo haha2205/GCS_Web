@@ -17,9 +17,17 @@
         
         <div v-show="expandedSections.pid" class="params-content">
           <div class="pid-groups">
-            <!-- 横向控制 - 位置 -->
+            <!-- 滚转控制 -->
             <div class="pid-group">
-              <h5 class="pid-group-title">横向位置控制 (Lateral Position)</h5>
+              <h5 class="pid-group-title">滚转控制 (Roll Control)</h5>
+              <div class="pid-row">
+                <label>F_KaPHI (滚转角P)</label>
+                <input v-model.number="pid.fKaPHI" type="number" class="pid-input" step="0.001" placeholder="0.5" />
+              </div>
+              <div class="pid-row">
+                <label>F_KaP (滚转角D)</label>
+                <input v-model.number="pid.fKaP" type="number" class="pid-input" step="0.001" placeholder="0.2" />
+              </div>
               <div class="pid-row">
                 <label>F_KaY (横向位置P)</label>
                 <input v-model.number="pid.fKaY" type="number" class="pid-input" step="0.001" placeholder="0.143" />
@@ -28,11 +36,6 @@
                 <label>F_IaY (横向位置I)</label>
                 <input v-model.number="pid.fIaY" type="number" class="pid-input" step="0.001" placeholder="0.005" />
               </div>
-            </div>
-            
-            <!-- 横向控制 - 速度 -->
-            <div class="pid-group">
-              <h5 class="pid-group-title">横向速度控制 (Lateral Velocity)</h5>
               <div class="pid-row">
                 <label>F_KaVy (横向速度P)</label>
                 <input v-model.number="pid.fKaVy" type="number" class="pid-input" step="0.001" placeholder="2.0" />
@@ -47,9 +50,9 @@
               </div>
             </div>
             
-            <!-- 俯仰控制 - 姿态 -->
+            <!-- 俯仰控制 -->
             <div class="pid-group">
-              <h5 class="pid-group-title">俯仰姿态控制 (Pitch Attitude)</h5>
+              <h5 class="pid-group-title">俯仰控制 (Pitch Control)</h5>
               <div class="pid-row">
                 <label>F_KeTHETA (俯仰角P)</label>
                 <input v-model.number="pid.fKeTHETA" type="number" class="pid-input" step="0.001" placeholder="0.5" />
@@ -58,11 +61,6 @@
                 <label>F_KeQ (俯仰角D)</label>
                 <input v-model.number="pid.fKeQ" type="number" class="pid-input" step="0.001" placeholder="0.2" />
               </div>
-            </div>
-            
-            <!-- 纵向控制 - 位置 -->
-            <div class="pid-group">
-              <h5 class="pid-group-title">纵向位置控制 (Longitudinal Position)</h5>
               <div class="pid-row">
                 <label>F_KeX (纵向位置P)</label>
                 <input v-model.number="pid.fKeX" type="number" class="pid-input" step="0.001" placeholder="0.201" />
@@ -71,11 +69,6 @@
                 <label>F_IeX (纵向位置I)</label>
                 <input v-model.number="pid.fIeX" type="number" class="pid-input" step="0.001" placeholder="0.01" />
               </div>
-            </div>
-            
-            <!-- 纵向控制 - 速度 -->
-            <div class="pid-group">
-              <h5 class="pid-group-title">纵向速度控制 (Longitudinal Velocity)</h5>
               <div class="pid-row">
                 <label>F_KeVx (纵向速度P)</label>
                 <input v-model.number="pid.fKeVx" type="number" class="pid-input" step="0.001" placeholder="2.0" />
@@ -89,18 +82,10 @@
                 <input v-model.number="pid.fKeAx" type="number" class="pid-input" step="0.001" placeholder="0.55" />
               </div>
             </div>
-            
-            <!-- 滚转控制 -->
+
+            <!-- 偏航控制 -->
             <div class="pid-group">
-              <h5 class="pid-group-title">滚转控制 (Roll Control)</h5>
-              <div class="pid-row">
-                <label>F_KaPHI (滚转角P)</label>
-                <input v-model.number="pid.fKaPHI" type="number" class="pid-input" step="0.001" placeholder="0.5" />
-              </div>
-              <div class="pid-row">
-                <label>F_KaP (滚转角D)</label>
-                <input v-model.number="pid.fKaP" type="number" class="pid-input" step="0.001" placeholder="0.2" />
-              </div>
+              <h5 class="pid-group-title">偏航控制 (Yaw Control)</h5>
               <div class="pid-row">
                 <label>F_KrR (偏航角速度P)</label>
                 <input v-model.number="pid.fKrR" type="number" class="pid-input" step="0.001" placeholder="0.2" />
@@ -113,21 +98,21 @@
                 <label>F_KrAy (偏航加速度P)</label>
                 <input v-model.number="pid.fKrAy" type="number" class="pid-input" step="0.001" placeholder="0.1" />
               </div>
-            </div>
-            
-            <!-- 偏航和高度控制 -->
-            <div class="pid-group">
-              <h5 class="pid-group-title">偏航和高度控制 (Yaw & Altitude)</h5>
               <div class="pid-row">
                 <label>F_KrPSI (偏航角P)</label>
                 <input v-model.number="pid.fKrPSI" type="number" class="pid-input" step="0.001" placeholder="1.0" />
               </div>
+            </div>
+
+            <!-- 高度控制 -->
+            <div class="pid-group">
+              <h5 class="pid-group-title">高度控制 (Altitude Control)</h5>
               <div class="pid-row">
                 <label>F_KcH (高度P)</label>
                 <input v-model.number="pid.fKcH" type="number" class="pid-input" step="0.001" placeholder="0.36" />
               </div>
               <div class="pid-row">
-                <label>F_IcH (高度I) [新增]</label>
+                <label>F_IcH (高度I)</label>
                 <input v-model.number="pid.fIcH" type="number" class="pid-input" step="0.001" placeholder="0.015" />
               </div>
               <div class="pid-row">
@@ -135,7 +120,7 @@
                 <input v-model.number="pid.fKcHdot" type="number" class="pid-input" step="0.001" placeholder="0.5" />
               </div>
               <div class="pid-row">
-                <label>F_IcHdot (垂向速度I) [新增]</label>
+                <label>F_IcHdot (垂向速度I)</label>
                 <input v-model.number="pid.fIcHdot" type="number" class="pid-input" step="0.001" placeholder="0.05" />
               </div>
               <div class="pid-row">
@@ -143,7 +128,7 @@
                 <input v-model.number="pid.fKcAz" type="number" class="pid-input" step="0.001" placeholder="0.15" />
               </div>
             </div>
-            
+
             <!-- 动力系统 -->
             <div class="pid-group">
               <h5 class="pid-group-title">动力系统 (Power System)</h5>
@@ -158,6 +143,27 @@
               <div class="pid-row">
                 <label>F_Scale_factor (缩放因子)</label>
                 <input v-model.number="pid.fScale_factor" type="number" class="pid-input" step="0.001" placeholder="1.0" />
+              </div>
+            </div>
+
+            <!-- 自动控制参数 -->
+            <div class="pid-group">
+              <h5 class="pid-group-title">自动控制参数 (Auto Control)</h5>
+              <div class="pid-row">
+                <label>XaccLMT (X轴加限)</label>
+                <input v-model.number="pid.XaccLMT" type="number" class="pid-input" step="0.1" placeholder="0.0" />
+              </div>
+              <div class="pid-row">
+                <label>YaccLMT (Y轴加限)</label>
+                <input v-model.number="pid.YaccLMT" type="number" class="pid-input" step="0.1" placeholder="0.0" />
+              </div>
+              <div class="pid-row">
+                <label>Hground (地面高度)</label>
+                <input v-model.number="pid.Hground" type="number" class="pid-input" step="0.1" placeholder="0.0" />
+              </div>
+              <div class="pid-row">
+                <label>AutoTakeoffHcmd</label>
+                <input v-model.number="pid.AutoTakeoffHcmd" type="number" class="pid-input" step="0.1" placeholder="0.0" />
               </div>
             </div>
           </div>
@@ -337,42 +343,51 @@ const toggleSection = (section) => {
   expandedSections.value[section] = !expandedSections.value[section]
 }
 
-// PID参数（完整26个参数，根据interface.h定义）
+// PID参数（完整30个参数，根据interface.h定义）
 const pid = ref({
-  // 横向控制-位置（2个）
+  // 1. Ail (7)
+  fKaPHI: 0.5,        // 滚转姿态P系数
+  fKaP: 0.2,         // 滚转姿态D系数
   fKaY: 0.143,       // 横向位置P系数
   fIaY: 0.005,       // 横向位置I系数
-  // 横向控制-速度（3个）
   fKaVy: 2.0,        // 横向速度P系数
   fIaVy: 0.4,        // 横向速度I系数
   fKaAy: 0.28,       // 横向加速度D系数
-  // 俯仰控制-姿态（2个）
+
+  // 2. Ele (7)
   fKeTHETA: 0.5,      // 俯仰姿态P系数
   fKeQ: 0.2,         // 俯仰姿态D系数
-  // 纵向控制-位置（2个）
   fKeX: 0.201,        // 纵向位置P系数
   fIeX: 0.01,         // 纵向位置I系数
-  // 纵向控制-速度（3个）
   fKeVx: 2.0,         // 纵向速度P系数
   fIeVx: 0.4,        // 纵向速度I系数
   fKeAx: 0.55,        // 纵向加速度D系数
-  // 滚转控制（5个）
-  fKaPHI: 0.5,        // 滚转姿态P系数
-  fKaP: 0.2,         // 滚转姿态D系数
+
+  // 3. Rud (4)
   fKrR: 0.2,         // 偏航角速度P系数
   fIrR: 0.01,         // 偏航角速度I系数
   fKrAy: 0.1,        // 偏航加速度P系数
-  // 偏航和高度控制（6个）
   fKrPSI: 1.0,        // 偏航角P系数
+
+  // 4. H (5)
   fKcH: 0.36,         // 高度P系数
-  fIcH: 0.015,        // 高度I系数 [新增]
+  fIcH: 0.015,        // 高度I系数
   fKcHdot: 0.5,       // 垂向速度P系数
-  fIcHdot: 0.05,      // 垂向速度I系数 [新增]
+  fIcHdot: 0.05,      // 垂向速度I系数
   fKcAz: 0.15,        // 垂向加速度D系数
-  // 动力系统参数（3个）
+
+  // 5. RPM (2)
   fIgRPM: 0.0,        // 电机转速I系数
   fKgRPM: 0.01,       // 电机转速P系数
-  fScale_factor: 1.0    // 缩放因子
+
+  // 6. Scale (1)
+  fScale_factor: 1.0,    // 缩放因子
+
+  // 7. New Params (4)
+  XaccLMT: 1.0,       // X轴加速度限制
+  YaccLMT: 1.0,       // Y轴加速度限制
+  Hground: 0.4,       // 地面高度
+  AutoTakeoffHcmd: 10.0 // 自动起飞高度指令
 })
 
 // LiDAR网络配置

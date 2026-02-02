@@ -1,3 +1,0 @@
-timestamp,frame_id,processing_time_ms,frame_rate,voxel_filter_time_ms,ground_segment_time_ms,clustering_time_ms,motion_comp_time_ms,coord_transform_time_ms,input_points,filtered_points,filter_ratio,obstacle_count
-1769581166.780901,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0,0,0.0,0
-1769581186.8662019,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0,0,0.0,0

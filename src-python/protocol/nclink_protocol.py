@@ -934,33 +934,70 @@ class ExtY_FCS_GNCBUS_T:
 
 @dataclass
 class ExtY_FCS_PARAM_T:
-    """飞控参数
+    """飞控回传参数 (ExtY_FCS_PARAM)
     
-    根据C++ interface.h V2.0定义（第330-332行）：
-    只包含 TimeStamp 字段（int32_t），4字节
+    包含26个飞控内部PID参数
     """
-    TimeStamp: int32_T = 0
+    ParamAil_F_KaPHI: real32_T = 0.0
+    ParamAil_F_KaP: real32_T = 0.0
+    ParamAil_F_KaY: real32_T = 0.0
+    ParamAil_F_IaY: real32_T = 0.0
+    ParamAil_F_KaVy: real32_T = 0.0
+    ParamAil_F_IaVy: real32_T = 0.0
+    ParamAil_F_KaAy: real32_T = 0.0
+    
+    ParamEle_F_KeTHETA: real32_T = 0.0
+    ParamEle_F_KeQ: real32_T = 0.0
+    ParamEle_F_KeX: real32_T = 0.0
+    ParamEle_F_IeX: real32_T = 0.0
+    ParamEle_F_KeVx: real32_T = 0.0
+    ParamEle_F_IeVx: real32_T = 0.0
+    ParamEle_F_KeAx: real32_T = 0.0
+    
+    ParamRud_F_KrR: real32_T = 0.0
+    ParamRud_F_IrR: real32_T = 0.0
+    ParamRud_F_KrAy: real32_T = 0.0
+    ParamRud_F_KrPSI: real32_T = 0.0
+    
+    ParamH_F_KcH: real32_T = 0.0
+    ParamH_F_IcH: real32_T = 0.0
+    ParamH_F_KcHdot: real32_T = 0.0
+    ParamH_F_IcHdot: real32_T = 0.0
+    ParamH_F_KcAz: real32_T = 0.0
+    
+    ParamRPM_F_KgRPM: real32_T = 0.0
+    ParamRPM_F_IgRPM: real32_T = 0.0
+    
+    ParamScale_F_scale_factor: real32_T = 0.0
     
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ExtY_FCS_PARAM_T':
-        # 根据V2.0定义，只包含Time Stamp，4字节
-        # C++飞控使用小端序发送
-        fmt = '<i'  # 小端序：1个int32 = 4 bytes
-        if len(data) < 4:
-            print(f"[ExtY_FCS_PARAM_T] Payload长度不足: {len(data)} < 4")
+        # 26个float32 = 104字节
+        if len(data) < 104:
+            print(f"[ExtY_FCS_PARAM_T] Payload长度不足: {len(data)} < 104")
             return cls()
-        values = struct.unpack(fmt, data[:4])
-        return cls(TimeStamp=values[0])
+        
+        fmt = '<26f'  # 小端序
+        values = struct.unpack(fmt, data[:104])
+        
+        return cls(*values)
     
     def to_bytes(self) -> bytes:
         """编码为字节数据"""
-        fmt = '<i'  # 小端序：1个int32 = 4 bytes
-        return struct.pack(fmt, self.TimeStamp)
+        fmt = '<26f'
+        return struct.pack(fmt,
+            self.ParamAil_F_KaPHI, self.ParamAil_F_KaP, self.ParamAil_F_KaY, self.ParamAil_F_IaY,
+            self.ParamAil_F_KaVy, self.ParamAil_F_IaVy, self.ParamAil_F_KaAy,
+            self.ParamEle_F_KeTHETA, self.ParamEle_F_KeQ, self.ParamEle_F_KeX, self.ParamEle_F_IeX,
+            self.ParamEle_F_KeVx, self.ParamEle_F_IeVx, self.ParamEle_F_KeAx,
+            self.ParamRud_F_KrR, self.ParamRud_F_IrR, self.ParamRud_F_KrAy, self.ParamRud_F_KrPSI,
+            self.ParamH_F_KcH, self.ParamH_F_IcH, self.ParamH_F_KcHdot, self.ParamH_F_IcHdot, self.ParamH_F_KcAz,
+            self.ParamRPM_F_KgRPM, self.ParamRPM_F_IgRPM,
+            self.ParamScale_F_scale_factor
+        )
     
     def to_json(self) -> dict:
-        return {
-            'timestamp': self.TimeStamp
-        }
+        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
 
 
 @dataclass
@@ -1534,8 +1571,8 @@ class CmdIdx(IntEnum):
 # 地面站发送到飞控的数据结构
 @dataclass
 class ExtU_FCS_T:
-    """地面站发送ExtU_FCS_T数据"""
-    # PID参数
+    """地面站发送ExtU_FCS_T数据 (30个参数 + 3个指令字段)"""
+    # 1. Ail (7)
     F_KaPHI: real32_T = 0.0
     F_KaP: real32_T = 0.0
     F_KaY: real32_T = 0.0
@@ -1543,6 +1580,8 @@ class ExtU_FCS_T:
     F_KaVy: real32_T = 0.0
     F_IaVy: real32_T = 0.0
     F_KaAy: real32_T = 0.0
+    
+    # 2. Ele (7)
     F_KeTHETA: real32_T = 0.0
     F_KeQ: real32_T = 0.0
     F_KeX: real32_T = 0.0
@@ -1550,22 +1589,64 @@ class ExtU_FCS_T:
     F_KeVx: real32_T = 0.0
     F_IeVx: real32_T = 0.0
     F_KeAx: real32_T = 0.0
+    
+    # 3. Rud (4)
     F_KrR: real32_T = 0.0
     F_IrR: real32_T = 0.0
     F_KrAy: real32_T = 0.0
     F_KrPSI: real32_T = 0.0
+    
+    # 4. H (5)
     F_KcH: real32_T = 0.0
     F_IcH: real32_T = 0.0
     F_KcHdot: real32_T = 0.0
     F_IcHdot: real32_T = 0.0
     F_KcAz: real32_T = 0.0
+    
+    # 5. RPM (2)
     F_IgRPM: real32_T = 0.0
     F_KgRPM: real32_T = 0.0
+    
+    # 6. Scale (1)
     F_Scale_factor: real32_T = 0.0
-    # 指令信息
+    
+    # 7. New Params (4)
+    XaccLMT: real32_T = 0.0
+    YaccLMT: real32_T = 0.0
+    Hground: real32_T = 0.0
+    AutoTakeoffHcmd: real32_T = 0.0
+    
+    # 指令信息 (保持在最后)
     CmdIdx: int32_T = 0
     CmdMission: int32_T = 0
     CmdMissionVal: real32_T = 0.0
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> 'ExtU_FCS_T':
+        # 30个float + 2个int + 1个float = 120 + 8 + 4 = 132 bytes
+        if len(data) < 132:
+             print(f"[ExtU_FCS_T] Payload长度不足: {len(data)} < 132")
+             return cls()
+        
+        fmt = '<30fiif'
+        values = struct.unpack(fmt, data[:132])
+        return cls(*values)
+        
+    def to_bytes(self) -> bytes:
+        fmt = '<30fiif'
+        return struct.pack(fmt,
+            self.F_KaPHI, self.F_KaP, self.F_KaY, self.F_IaY, self.F_KaVy, self.F_IaVy, self.F_KaAy,
+            self.F_KeTHETA, self.F_KeQ, self.F_KeX, self.F_IeX, self.F_KeVx, self.F_IeVx, self.F_KeAx,
+            self.F_KrR, self.F_IrR, self.F_KrAy, self.F_KrPSI,
+            self.F_KcH, self.F_IcH, self.F_KcHdot, self.F_IcHdot, self.F_KcAz,
+            self.F_IgRPM, self.F_KgRPM,
+            self.F_Scale_factor,
+            self.XaccLMT, self.YaccLMT, self.Hground, self.AutoTakeoffHcmd,
+            self.CmdIdx, self.CmdMission, self.CmdMissionVal
+        )
+        
+    def to_json(self) -> dict:
+        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
 
 
 # ================================================================
@@ -2529,37 +2610,38 @@ def encode_waypoints_upload(waypoints: List[dict], cruise_speed: real_T = 10.0) 
 def encode_extu_fcs_from_dict(pids_data: dict, cmd_idx: int = 0, cmd_mission: int = 0, cmd_mission_val: float = 0.0) -> bytes:
     """从字典编码ExtU_FCS_T结构体为字节数据
     
-    根据interface.h第370-404行完整定义：
-    - 26个real32_T PID参数 = 104字节
+    更新后的定义：
+    - 30个real32_T 参数 (包含26个PID + 4个新增) = 120字节
     - 1个int32_T CmdIdx = 4字节
     - 1个int32_T CmdMission = 4字节
     - 1个real32_T CmdMissionVal = 4字节
-    - 总计：104 + 12 = 116字节
+    - 总计：120 + 12 = 132字节
     
     Args:
-        pids_data: dict, 包含26个PID参数的字典（来自前端set_pids指令）
+        pids_data: dict, 包含30个参数的字典（来自前端set_pids指令）
         cmd_idx: int, 指令索引（来自前端cmd_idx指令）
         cmd_mission: int, 任务指令（可选）
         cmd_mission_val: float, 任务指令值（可选）
     
     Returns:
-        bytes: 116字节的编码数据
+        bytes: 132字节的编码数据
     """
-    # 使用小端序打包26个float + 2个int32 + 1个float
-    fmt = '<' + 'f'*26 + 'iif'
+    # 使用小端序打包30个float + 2个int32 + 1个float
+    fmt = '<' + 'f'*30 + 'iif'
     
     # 按照interface.h中的字段顺序打包
-    # 从pids_data字典中获取26个PID参数值，如果没有则使用默认值
+    # 从pids_data字典中获取30个PID参数值，如果没有则使用默认值
     pid_values = [
-        # 姿态控制（8个）
+        # 1. Ail (7)
         float(pids_data.get('fKaPHI', 0.5)),      # F_KaPHI
         float(pids_data.get('fKaP', 0.2)),        # F_KaP
         float(pids_data.get('fKaY', 0.143)),      # F_KaY
         float(pids_data.get('fIaY', 0.005)),      # F_IaY
         float(pids_data.get('fKaVy', 2.0)),       # F_KaVy
         float(pids_data.get('fIaVy', 0.4)),       # F_IaVy
-        float(pids_data.get('fKaAy', 0.28)),       # F_KaAy
-        # 俯仰控制（3个）
+        float(pids_data.get('fKaAy', 0.28)),      # F_KaAy
+        
+        # 2. Ele (7)
         float(pids_data.get('fKeTHETA', 0.5)),    # F_KeTHETA
         float(pids_data.get('fKeQ', 0.2)),         # F_KeQ
         float(pids_data.get('fKeX', 0.201)),       # F_KeX
@@ -2567,23 +2649,49 @@ def encode_extu_fcs_from_dict(pids_data: dict, cmd_idx: int = 0, cmd_mission: in
         float(pids_data.get('fKeVx', 2.0)),       # F_KeVx
         float(pids_data.get('fIeVx', 0.4)),       # F_IeVx
         float(pids_data.get('fKeAx', 0.55)),       # F_KeAx
-        # 滚转控制（4个）
+        
+        # 3. Rud (4)
         float(pids_data.get('fKrR', 0.2)),        # F_KrR
         float(pids_data.get('fIrR', 0.01)),       # F_IrR
         float(pids_data.get('fKrAy', 0.1)),       # F_KrAy
         float(pids_data.get('fKrPSI', 1.0)),      # F_KrPSI
-        # 偏航和高度控制（5个）
+        
+        # 4. H (5)
         float(pids_data.get('fKcH', 0.36)),        # F_KcH
         float(pids_data.get('fIcH', 0.015)),       # F_IcH
         float(pids_data.get('fKcHdot', 0.5)),      # F_KcHdot
         float(pids_data.get('fIcHdot', 0.05)),      # F_IcHdot
         float(pids_data.get('fKcAz', 0.15)),       # F_KcAz
-        # 动力系统（3个）
+        
+        # 5. RPM (2)
         float(pids_data.get('fIgRPM', 0.0)),        # F_IgRPM
         float(pids_data.get('fKgRPM', 0.01)),       # F_KgRPM
+        
+        # 6. Scale (1)
         float(pids_data.get('fScale_factor', 1.0)),  # F_Scale_factor
+        
+        # 7. New Params (4)
+        float(pids_data.get('XaccLMT', 1.0)),       # XaccLMT
+        float(pids_data.get('YaccLMT', 1.0)),       # YaccLMT
+        float(pids_data.get('Hground', 0.4)),       # Hground
+        float(pids_data.get('AutoTakeoffHcmd', 10.0)), # AutoTakeoffHcmd
     ]
     
+    logger.info("-" * 50)
+    logger.info(f"正在发送PID参数 (共{len(pid_values)}个):")
+    param_names = [
+        "F_KaPHI", "F_KaP", "F_KaY", "F_IaY", "F_KaVy", "F_IaVy", "F_KaAy",
+        "F_KeTHETA", "F_KeQ", "F_KeX", "F_IeX", "F_KeVx", "F_IeVx", "F_KeAx",
+        "F_KrR", "F_IrR", "F_KrAy", "F_KrPSI",
+        "F_KcH", "F_IcH", "F_KcHdot", "F_IcHdot", "F_KcAz",
+        "F_IgRPM", "F_KgRPM",
+        "F_Scale_factor",
+        "XaccLMT", "YaccLMT", "Hground", "AutoTakeoffHcmd"
+    ]
+    for i, (name, val) in enumerate(zip(param_names, pid_values)):
+        logger.info(f"  [{i+1:02d}] {name:<18}: {val}")
+    logger.info("-" * 50)
+
     # 添加3个指令字段
     values = pid_values + [cmd_idx, cmd_mission, cmd_mission_val]
     
@@ -2604,16 +2712,18 @@ def encode_command_packet(func_code: int, payload: bytes = b'') -> bytes:
     
     # 如果是发送ExtU_FCS命令，需要构建完整的ExtU_FCS_T结构体
     if func_code == NCLINK_SEND_EXTU_FCS:
-        # 解析payload中的CmdIdx（如果payload是4字节的int32）
-        if len(payload) == 4:
+        if len(payload) == 132:
+            # 如果已经是完整的payload (132字节)，直接使用
+            complete_payload = payload
+        elif len(payload) == 4:
+            # 解析payload中的CmdIdx（如果payload是4字节的int32）
             cmd_idx = struct.unpack('<i', payload)[0]  # 小端序解析
             
-            # 根据完整的interface.h定义构建ExtU_FCS_T结构体（104字节）
-            # 包含23个real32_T + 2个int32_t + 1个real32_T = 23*4 + 2*4 + 1*4 = 104字节
+            # 根据完整的interface.h定义构建ExtU_FCS_T结构体（132字节）
+            # 30个real32_T + 2个int32_t + 1个real32_T
             
-            # 构建26个PID参数（每个real32_T 4字节）
-            # 根据interface.h第374-399行完整定义
-            pid_payload = struct.pack('<' + 'f'*26,  # 26 floats
+            # 构建30个PID参数（每个real32_T 4字节）
+            pid_payload = struct.pack('<' + 'f'*30,  # 30 floats
                 0.5,    # F_KaPHI (滚转姿态P系数)
                 0.2,    # F_KaP (滚转姿态D系数)
                 0.143,  # F_KaY (横向位置P系数)
@@ -2639,7 +2749,11 @@ def encode_command_packet(func_code: int, payload: bytes = b'') -> bytes:
                 0.15,   # F_KcAz (垂向加速度D系数)
                 0.0,    # F_IgRPM (电机积分系数)
                 0.01,   # F_KgRPM (电机比例系数)
-                1.0     # F_Scale_factor (缩放因子)
+                1.0,    # F_Scale_factor (缩放因子)
+                1.0,    # XaccLMT
+                1.0,    # YaccLMT
+                0.4,    # Hground
+                10.0    # AutoTakeoffHcmd
             )
             
             # 构建3个指令字段（12字节）
@@ -2649,12 +2763,12 @@ def encode_command_packet(func_code: int, payload: bytes = b'') -> bytes:
                 0.0            # CmdMissionVal (real32_T)
             )
             
-            # 合并完整payload（116字节=26*4+12字节）
+            # 合并完整payload（132字节=30*4+12字节）
             complete_payload = pid_payload + cmd_payload
-            logger.info(f"构建完整ExtU_FCS_T结构体：116字节（26个PID参数 + 3个指令字段）")
+            logger.info(f"构建默认ExtU_FCS_T结构体：132字节（30个PID参数 + 3个指令字段）")
         else:
             # 如果payload长度不对，使用原始数据
-            logger.warning(f"Payload长度异常: {len(payload)}，使用原始数据")
+            logger.warning(f"ExtU_FCS_T Payload长度非标: {len(payload)} (预期132或4)，使用原始数据")
             complete_payload = payload
     else:
         # 其他命令直接使用payload

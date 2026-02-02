@@ -1,5 +1,0 @@
-timestamp,is_running,lidar_connected,imu_data_valid,motion_comp_active,error_code,error_message,total_frames,total_obstacles,avg_processing_time_ms
-1769581166.775993,False,False,False,False,0,,0,0,0.0
-1769581176.813605,False,False,False,False,0,,0,0,0.0
-1769581186.8610368,False,False,False,False,0,,0,0,0.0
-1769581196.91387,False,False,False,False,0,,0,0,0.0
