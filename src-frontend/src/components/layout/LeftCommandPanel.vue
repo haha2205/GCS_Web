@@ -88,27 +88,21 @@
           <h4 class="group-title">姿态遥调</h4>
           <div class="telemetry-grid" :class="{ 'btn-disabled': !connected }">
             <div class="telemetry-item" v-for="item in attitudeAdjustments" :key="item.id">
-              <label class="telemetry-label">{{ item.name }}</label>
-              <div class="telemetry-control">
-                <input 
-                    type="range" 
-                    :min="item.min" 
-                    :max="item.max" 
-                    :step="item.step"
-                    v-model.number="item.value"
-                    class="telemetry-input range"
-                    @change="sendTelemetryCommand(item.id, item.value, item.name)"
-                  >
+              <div class="item-header">
+                <label class="telemetry-label">{{ item.name }}</label>
+                <span class="range-hint">[{{ item.min }}, {{ item.max }}]</span>
+              </div>
+              <div class="telemetry-control-row">
                 <input 
                     type="number" 
                     :min="item.min" 
                     :max="item.max" 
                     :step="item.step"
                     v-model.number="item.value"
-                    class="telemetry-input number"
-                    @change="sendTelemetryCommand(item.id, item.value, item.name)"
+                    class="telemetry-input number-box"
                   >
                 <span class="telemetry-unit">{{ item.unit }}</span>
+                <button class="send-btn" @click="sendTelemetryCommand(item.id, item.value, item.name)">发送</button>
               </div>
             </div>
           </div>
@@ -119,27 +113,21 @@
           <h4 class="group-title">速度遥调</h4>
           <div class="telemetry-grid" :class="{ 'btn-disabled': !connected }">
             <div class="telemetry-item" v-for="item in velocityAdjustments" :key="item.id">
-              <label class="telemetry-label">{{ item.name }}</label>
-              <div class="telemetry-control">
-                <input 
-                    type="range" 
-                    :min="item.min" 
-                    :max="item.max" 
-                    :step="item.step"
-                    v-model.number="item.value"
-                    class="telemetry-input range"
-                    @change="sendTelemetryCommand(item.id, item.value, item.name)"
-                  >
+              <div class="item-header">
+                <label class="telemetry-label">{{ item.name }}</label>
+                <span class="range-hint">[{{ item.min }}, {{ item.max }}]</span>
+              </div>
+              <div class="telemetry-control-row">
                 <input 
                     type="number" 
                     :min="item.min" 
                     :max="item.max" 
                     :step="item.step"
                     v-model.number="item.value"
-                    class="telemetry-input number"
-                    @change="sendTelemetryCommand(item.id, item.value, item.name)"
+                    class="telemetry-input number-box"
                   >
                 <span class="telemetry-unit">{{ item.unit }}</span>
+                <button class="send-btn" @click="sendTelemetryCommand(item.id, item.value, item.name)">发送</button>
               </div>
             </div>
           </div>
@@ -150,27 +138,21 @@
           <h4 class="group-title">位置遥调</h4>
           <div class="telemetry-grid" :class="{ 'btn-disabled': !connected }">
             <div class="telemetry-item" v-for="item in positionAdjustments" :key="item.id">
-              <label class="telemetry-label">{{ item.name }}</label>
-              <div class="telemetry-control">
-                <input 
-                    type="range" 
-                    :min="item.min" 
-                    :max="item.max" 
-                    :step="item.step"
-                    v-model.number="item.value"
-                    class="telemetry-input range"
-                    @change="sendTelemetryCommand(item.id, item.value, item.name)"
-                  >
+              <div class="item-header">
+                <label class="telemetry-label">{{ item.name }}</label>
+                <span class="range-hint">[{{ item.min }}, {{ item.max }}]</span>
+              </div>
+              <div class="telemetry-control-row">
                 <input 
                     type="number" 
                     :min="item.min" 
                     :max="item.max" 
                     :step="item.step"
                     v-model.number="item.value"
-                    class="telemetry-input number"
-                    @change="sendTelemetryCommand(item.id, item.value, item.name)"
+                    class="telemetry-input number-box"
                   >
                 <span class="telemetry-unit">{{ item.unit }}</span>
+                <button class="send-btn" @click="sendTelemetryCommand(item.id, item.value, item.name)">发送</button>
               </div>
             </div>
           </div>
@@ -224,22 +206,22 @@ const takeoffCommands = [
 
 // 遥调指令（CmdMission）- 姿态
 const attitudeAdjustments = [
-  { id: 10111, name: '俯仰角', min: -45, max: 45, step: 1, value: 0, unit: '°' },
-  { id: 10112, name: '滚转角', min: -45, max: 45, step: 1, value: 0, unit: '°' },
+  { id: 10111, name: '俯仰角', min: -12, max: 12, step: 0.1, value: 0, unit: '°' },
+  { id: 10112, name: '滚转角', min: -12, max: 12, step: 0.1, value: 0, unit: '°' },
   { id: 10113, name: '航向角', min: 0, max: 360, step: 1, value: 0, unit: '°' }
 ]
 
 // 遥调指令（CmdMission）- 速度
 const velocityAdjustments = [
-  { id: 9531, name: '纵向速度', min: -20, max: 20, step: 0.5, value: 0, unit: 'm/s' },
-  { id: 9532, name: '横向速度', min: -20, max: 20, step: 0.5, value: 0, unit: 'm/s' },
-  { id: 9533, name: '升降速度', min: -10, max: 10, step: 0.5, value: 0, unit: 'm/s' }
+  { id: 9531, name: '纵向速度', min: -12, max: 50, step: 0.1, value: 0, unit: 'm/s' },
+  { id: 9532, name: '横向速度', min: -12, max: 12, step: 0.1, value: 0, unit: 'm/s' },
+  { id: 9533, name: '升降速度', min: -3000, max: 3000, step: 1, value: 0, unit: 'm/s' }
 ]
 
 // 遥调指令（CmdMission）- 位置
 const positionAdjustments = [
-  { id: 9023, name: '纵向位置', min: -500, max: 500, step: 1, value: 0, unit: 'm' },
-  { id: 9024, name: '横向位置', min: -500, max: 500, step: 1, value: 0, unit: 'm' },
+  { id: 9023, name: '纵向位置', min: -1000, max: 1000, step: 1, value: 0, unit: 'm' },
+  { id: 9024, name: '横向位置', min: 20, max: 500, step: 1, value: 0, unit: 'm' },
   { id: 1021, name: '高度', min: 0, max: 200, step: 1, value: 0, unit: 'm' }
 ]
 
@@ -540,5 +522,47 @@ const sendTelemetryCommand = async (cmdId, value, name) => {
   color: #ffffff;
   font-size: 12px;
   font-weight: 500;
+}
+
+/* New telemetry styles */
+.item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+.range-hint {
+  color: #666;
+  font-size: 11px;
+}
+
+.telemetry-control-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.telemetry-input.number-box {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+  text-align: left;
+}
+
+.send-btn {
+  background: rgba(50, 136, 250, 0.2);
+  border: 1px solid rgba(50, 136, 250, 0.4);
+  color: #409eff;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.send-btn:hover {
+  background: rgba(50, 136, 250, 0.4);
+  color: #fff;
 }
 </style>

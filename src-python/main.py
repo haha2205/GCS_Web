@@ -51,9 +51,9 @@ from replayer import Replayer
 class ConnectionConfig(BaseModel):
     """UDP连接配置"""
     protocol: str = "udp"
-    listenAddress: str = "0.0.0.0"  # 监听地址（地面站本地IP）
+    listenAddress: str = "192.168.16.13"  # 监听地址（地面站本地IP）
     hostPort: int = 30509
-    remoteIp: str = "127.0.0.1"      # 目标地址（飞控IP）
+    remoteIp: str = "192.168.16.116"      # 目标地址（飞控IP）
     commandRecvPort: int = 18504
     sendOnlyPort: int = 18506
     lidarSendPort: int = 18507

@@ -69,10 +69,12 @@ class RawDataRecorder:
         self._init_planning_file()    # planning
         self._init_radar_file()       # radar
         
+        # 必须开启总线流量记录，用于DSM的通信负载分析
+        self._init_bus_traffic_file()
+
         # 遗留/辅助文件不再默认生成，避免文件碎片化
         # self._init_flight_perf_file()
         # self._init_resources_file()
-        # self._init_bus_traffic_file()
         # self._init_obstacles_file()
         # self._init_lidar_perf_file()
         # self._init_lidar_status_file()
@@ -746,19 +748,23 @@ class RawDataRecorder:
             self.record_flight_perf(data)
         elif msg_type in ['fcs_param', 'fcs_datactrl']:
             # 记录为资源数据（模拟CPU负载）
+            # [Fix] 获取 func_code，若不存在则默认为0
+            f_code = decoded_data.get('func_code', 0)
             resource_data = {
-                'node_id': func_code,
+                'node_id': f_code,
                 'cpu_load': 25.0 + (time.time() % 20) * 3,  # 模拟值
                 'memory_usage': 512.0,
                 'exec_time_us': int(time.time() * 1000000) % 10000,
-                'task_id': func_code
+                'task_id': f_code
             }
             self.record_resources(resource_data)
         elif msg_type in ['fcs_gncbus', 'fcs_pwms']:
             # 记录为总线通信数据
+            # [Fix] 获取 func_code，若不存在则默认为0
+            f_code = decoded_data.get('func_code', 0)
             bus_data = {
-                'msg_id': func_code,
-                'msg_size': len(str(data).encode('utf-8')),
+                'msg_id': f_code,
+                'msg_size': len(str(data).encode('utf-8')), # 近似Payload大小
                 'source_node': 1,  # 飞控
                 'target_node': 2,  # 地面站
                 'frequency': 50.0,  # 假设50Hz

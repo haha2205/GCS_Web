@@ -48,7 +48,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, watch, toRaw } from 'vue'
+import { ref, onMounted, onBeforeUnmount, watch, toRaw, computed } from 'vue'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { useDroneStore } from '@/store/drone'
@@ -113,6 +113,47 @@ const motorPwmData = ref([1100, 1150, 1200, 1180, 1120, 1160])
 const formatAngle = (angle) => {
   return (angle * 180 / Math.PI).toFixed(1)
 }
+
+// 统一的障碍物数据源 (Planning优于Lidar)
+const activeObstacles = computed(() => {
+  // 1. 优先检查规划遥测中的障碍物 (Object3d_T)
+  // center: {x,y,z}, size: {x,y,z}, velocity: {x,y,z}
+  // 或者直接是对象数组: [{cx, cy, cz, sx, sy, sz, ...}]
+  if (droneStore.obstacles && droneStore.obstacles.length > 0) {
+    return droneStore.obstacles.map(o => ({
+      x: o.cx || o.center?.x || 0,
+      y: o.cy || o.center?.y || 0,
+      z: o.cz || o.center?.z || 0,
+      sx: o.sx || o.size?.x || 1.0,
+      sy: o.sy || o.size?.y || 1.0,
+      sz: o.sz || o.size?.z || 1.0,
+      type: 'planning'
+    }))
+  } 
+  
+  // 2. 其次检查雷达接口数据
+  if (droneStore.lidarObstacles && droneStore.lidarObstacles.length > 0) {
+    return droneStore.lidarObstacles.map(o => ({
+       x: Number(o.position_x) || 0,
+       y: Number(o.position_y) || 0,
+       z: Number(o.position_z) || 0,
+       sx: Number(o.size_x) || 1.0,
+       sy: Number(o.size_y) || 1.0,
+       sz: Number(o.size_z) || 1.0,
+       type: 'lidar'
+    }))
+  }
+  
+  return []
+})
+
+// 监听电机数据
+watch(() => droneStore.pwms, (newPwms) => {
+  if (newPwms && newPwms.length >= 6) {
+    // 获取前6个电机数据并更新
+    motorPwmData.value = newPwms.slice(0, 6)
+  }
+}, { deep: true })
 
 // 切换视图模式
 const switchViewMode = (mode) => {
@@ -399,29 +440,36 @@ const createThrustPillars = () => {
 const updateThrustPillars = () => {
   const pwmData = motorPwmData.value
   
-  pwmData.forEach((pwm, index) => {
-    if (!thrustPillars[index]) return
+  // 确保有6个柱子
+  if (thrustPillars.length < 6) return;
+
+  for (let i = 0; i < 6; i++) {
+    const pwm = pwmData[i] || 1000;
+    const pillar = thrustPillars[i];
     
-    // 1. 归一化 (0.0 ~ 1.0)
+    // 1. 归一化 (0.0 ~ 1.0)，假设PWM范围1000-2000
     const ratio = Math.max(0, Math.min(1, (pwm - 1000) / 1000))
     
     // 2. 调整长度
     const scale = Math.max(0.1, ratio * 3)  // 最长3米
-    thrustPillars[index].scale.set(1, scale, 1)
+    pillar.scale.set(1, scale, 1)
     
     // 3. 调整颜色（蓝 -> 绿 -> 红）
     const color = new THREE.Color()
     if (ratio < 0.33) {
+      // 低转速：蓝->绿
       color.lerpColors(new THREE.Color(0x2196f3), new THREE.Color(0x4caf50), ratio * 3)
     } else if (ratio < 0.66) {
+      // 中转速：绿->黄
       color.lerpColors(new THREE.Color(0x4caf50), new THREE.Color(0xffeb3b), (ratio - 0.33) * 3)
     } else {
+      // 高转速：黄->红
       color.lerpColors(new THREE.Color(0xffeb3b), new THREE.Color(0xf44336), (ratio - 0.66) * 3)
     }
     
-    thrustPillars[index].material.color = color
-    thrustPillars[index].material.opacity = 0.3 + ratio * 0.3
-  })
+    pillar.material.color = color
+    pillar.material.opacity = 0.3 + ratio * 0.3
+  }
 }
 
 // 创建垂直投影线
@@ -656,14 +704,14 @@ const updateLidarVisualization = (obstacles) => {
   const rawObstacles = toRaw(obstacles)
   
   rawObstacles.forEach(obs => {
-     // 提取ENU坐标和尺寸
-     const px = Number(obs.position_x) || 0;
-     const py = Number(obs.position_y) || 0;
-     const pz = Number(obs.position_z) || 0;
+     // 统一后的格式: x, y, z, sx, sy, sz
+     const px = Number(obs.x) || 0;
+     const py = Number(obs.y) || 0;
+     const pz = Number(obs.z) || 0;
      
-     const sx = Number(obs.size_x) || 1.0;
-     const sy = Number(obs.size_y) || 1.0;
-     const sz = Number(obs.size_z) || 1.0;
+     const sx = Number(obs.sx) || 1.0;
+     const sy = Number(obs.sy) || 1.0;
+     const sz = Number(obs.sz) || 1.0;
      
      // BoxGeometry(width, height, depth) -> ThreeJS (x, y, z)
      // ENU Size: x(East), y(North), z(Up)
@@ -671,7 +719,7 @@ const updateLidarVisualization = (obstacles) => {
      const geometry = new THREE.BoxGeometry(sx, sz, sy); 
      
      const material = new THREE.MeshStandardMaterial({
-       color: 0xff3300,  // 橙红色
+       color: obs.type === 'planning' ? 0xff00ff : 0xff3300,  // 规划障碍物为紫色，雷达为橙红
        transparent: true,
        opacity: 0.6,
        roughness: 0.4,
@@ -684,9 +732,7 @@ const updateLidarVisualization = (obstacles) => {
      // x -> x
      // y -> -z (North is negative Z)
      // z -> y (Up is Y)
-     // 注意：ENU的Z坐标通常是底部或中心，根据BoxGeometry，坐标是中心点
-     // 如果协议中的position_z是底部坐标，需要加上sz/2
-     // 暂时假设position_z是中心点
+     // 假设 position 是中心点
      mesh.position.set(px, pz, -py);
      
      scene.add(mesh);
@@ -750,7 +796,29 @@ const updateDropLine = () => {
 // 更新无人机姿态
 const updateDroneAttitude = () => {
   if (droneGroup) {
-    const euler = new THREE.Euler(props.pitch, props.yaw, props.roll, 'XYZ')
+    // 优先使用飞控实时回传的姿态数据
+    let pitch, roll, yaw;
+    
+    // 检查是否连接且状态有效
+    if (droneStore.connected && droneStore.fcsStates) {
+      // 注意：飞控数据通常是弧度，ThreeJS也需要弧度
+      // ExtY_FCS_STATES_T: states_theta(pitch), states_phi(roll), states_psi(yaw)
+      pitch = droneStore.fcsStates.states_theta || 0;
+      roll = droneStore.fcsStates.states_phi || 0;
+      yaw = droneStore.fcsStates.states_psi || 0;
+    } else {
+      // 未连接时使用传入的props（可能来自模拟或默认值）
+      pitch = props.pitch;
+      roll = props.roll;
+      yaw = props.yaw;
+    }
+
+    // 更新场景数据引用（用于可能的显示）
+    sceneData.value.pitch = pitch;
+    sceneData.value.roll = roll;
+    sceneData.value.yaw = yaw;
+
+    const euler = new THREE.Euler(pitch, yaw, roll, 'XYZ')
     droneGroup.setRotationFromEuler(euler)
     
     // 优先从 fcsStates 获取高度，如果没有则尝试从 planningTelemetry 获取
@@ -771,7 +839,7 @@ const updateDroneAttitude = () => {
     if (horizonRing) {
       horizonRing.position.copy(droneGroup.position)
       // 环保持水平，只跟随航向
-      horizonRing.rotation.y = -props.yaw
+      horizonRing.rotation.y = -yaw
     }
     
     // 自动跟随模式下，只更新controls.target，不强制相机位置
@@ -852,8 +920,8 @@ watch(() => droneStore.localTraj, (newTraj) => {
   }
 }, { deep: true })
 
-// 监听雷达障碍物数据
-watch(() => droneStore.lidarObstacles, (newObstacles) => {
+// 监听统一后的障碍物数据 (Planning优于Lidar)
+watch(activeObstacles, (newObstacles) => {
   updateLidarVisualization(newObstacles)
 }, { deep: true })
 

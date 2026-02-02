@@ -481,6 +481,9 @@ const avoidanceFlag = computed(() => droneStore.avoiFlag?.AvoiFlag_AvoidanceFlag
 const guideFlag = computed(() => droneStore.avoiFlag?.AvoiFlag_GuideFlag ?? false)
 
 // 飞行状态 (ExtY_FCS_STATES_T)
+// 注意：飞控数据通常为弧度，显示时转换为度
+const rad2deg = (rad) => rad * 180.0 / Math.PI
+
 const states_lat = computed(() => droneStore.fcsStates?.states_lat ?? 0)
 const states_lon = computed(() => droneStore.fcsStates?.states_lon ?? 0)
 const states_height = computed(() => droneStore.fcsStates?.states_height ?? 0)
@@ -490,9 +493,9 @@ const states_Vz_GS = computed(() => droneStore.fcsStates?.states_Vz_GS ?? 0)
 const states_p = computed(() => droneStore.fcsStates?.states_p ?? 0)
 const states_q = computed(() => droneStore.fcsStates?.states_q ?? 0)
 const states_r = computed(() => droneStore.fcsStates?.states_r ?? 0)
-const states_phi = computed(() => droneStore.fcsStates?.states_phi ?? 0)
-const states_theta = computed(() => droneStore.fcsStates?.states_theta ?? 0)
-const states_psi = computed(() => droneStore.fcsStates?.states_psi ?? 0)
+const states_phi = computed(() => rad2deg(droneStore.fcsStates?.states_phi ?? 0))
+const states_theta = computed(() => rad2deg(droneStore.fcsStates?.states_theta ?? 0))
+const states_psi = computed(() => rad2deg(droneStore.fcsStates?.states_psi ?? 0))
 
 // GNC数据 (ExtY_FCS_GNCBUS_T)
 const GNCBus_CmdValue_Vx_cmd = computed(() => droneStore.gncBus?.GNCBus_CmdValue_Vx_cmd ?? 0)

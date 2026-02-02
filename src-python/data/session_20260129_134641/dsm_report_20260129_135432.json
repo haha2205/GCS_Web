@@ -1,0 +1,190 @@
+{
+  "meta": {
+    "session_id": "session_20260129_134641",
+    "generated_at": "2026-01-29T13:54:32.271527",
+    "time_range": {
+      "start": null,
+      "end": null,
+      "duration": 0
+    },
+    "data_statistics": {
+      "fcs_records": 3743,
+      "planning_records": 24,
+      "radar_records": 58,
+      "bus_records": 0
+    }
+  },
+  "nodes": [
+    {
+      "index": 0,
+      "name": "LF_Perception",
+      "own_cost": 0.5,
+      "attributes": {
+        "description": "雷达/感知模块 (SoC)",
+        "data_type": "cpu_load",
+        "filter_id": 81,
+        "data_source": "radar_data.csv"
+      }
+    },
+    {
+      "index": 1,
+      "name": "LF_Path_Planning",
+      "own_cost": 0.8,
+      "attributes": {
+        "description": "路径规划模块 (SoC)",
+        "data_type": "planning_telemetry",
+        "filter_id": 113,
+        "data_source": "planning_telemetry.csv"
+      }
+    },
+    {
+      "index": 2,
+      "name": "LF_Communication",
+      "own_cost": 0.0,
+      "attributes": {
+        "description": "通信管理模块 (SoC)",
+        "data_type": "traffic_volume",
+        "filter_id": 70,
+        "data_source": "unknown"
+      }
+    },
+    {
+      "index": 3,
+      "name": "LF_RC_Parser",
+      "own_cost": 0.5,
+      "attributes": {
+        "description": "遥控器解析 (MCU GP4)",
+        "data_type": "control_input",
+        "filter_id": 67,
+        "data_source": "fcs_telemetry (datactrl)"
+      }
+    },
+    {
+      "index": 4,
+      "name": "LF_INS_Parser",
+      "own_cost": 0.8,
+      "attributes": {
+        "description": "惯导解析 (MCU GP4)",
+        "data_type": "gnc_state",
+        "filter_id": 66,
+        "data_source": "fcs_telemetry (states/gncbus)"
+      }
+    },
+    {
+      "index": 5,
+      "name": "LF_Flight_Control",
+      "own_cost": 1.0,
+      "attributes": {
+        "description": "飞行控制 (MCU GP2)",
+        "data_type": "gnc_command",
+        "filter_id": 68,
+        "data_source": "fcs_telemetry (states/gncbus)"
+      }
+    },
+    {
+      "index": 6,
+      "name": "LF_SoC_Adapter",
+      "own_cost": 0.0,
+      "attributes": {
+        "description": "SoC通信适配 (MCU GP2)",
+        "data_type": "bus_traffic",
+        "filter_id": 68,
+        "data_source": "unknown"
+      }
+    },
+    {
+      "index": 7,
+      "name": "LF_Motor_Driver",
+      "own_cost": 57.271,
+      "attributes": {
+        "description": "电机驱动 (MCU GP3)",
+        "data_type": "actuator_output",
+        "filter_id": 65,
+        "data_source": "fcs_telemetry (pwms)"
+      }
+    }
+  ],
+  "edges": [],
+  "matrix": [
+    [
+      0.5,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.8,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.5,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.8,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      57.271
+    ]
+  ]
+}

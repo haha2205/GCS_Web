@@ -12,8 +12,8 @@ from datetime import datetime
 # ==================== 列数常量 ====================
 
 # 总列数（重新核对）
-# 1 + 8 + 12 + 53 + 73 + 3 + 6 + 4 + 21 + 21 + 1 + 18 = 221
-TOTAL_COLUMNS = 221
+# 1 + 8 + 12 + 53 + 73 + 3 + 6 + 4 + 21 + 21 + 26 + 18 = 246
+TOTAL_COLUMNS = 246
 
 # 各数据段的列数（根据interface.h严格计数）
 COL_TIMESTAMP = 1
@@ -26,7 +26,7 @@ COL_FUTABA = 6
 COL_GCS = 4         # Was 11, fixed to match ExtY_FCS_DATAGCS_T
 COL_AC_AIM2AB = 21 
 COL_AC_AB = 21      
-COL_PARAM = 1
+COL_PARAM = 26
 COL_ESC = 18
 
 # 累计偏移量
@@ -331,8 +331,17 @@ def get_full_header() -> str:
         "acAB_turn_type", "acAB_Inv_type", "acAB_type_line"
     ])
     
-    # 11. PARAMS数据 (1字段)
-    header_fields.append("param_TimeStamp")
+    # 11. PARAMS数据 (26字段)
+    header_fields.extend([
+        "ParamAil_F_KaPHI", "ParamAil_F_KaP", "ParamAil_F_KaY", "ParamAil_F_IaY",
+        "ParamAil_F_KaVy", "ParamAil_F_IaVy", "ParamAil_F_KaAy",
+        "ParamEle_F_KeTHETA", "ParamEle_F_KeQ", "ParamEle_F_KeX", "ParamEle_F_IeX",
+        "ParamEle_F_KeVx", "ParamEle_F_IeVx", "ParamEle_F_KeAx",
+        "ParamRud_F_KrR", "ParamRud_F_IrR", "ParamRud_F_KrAy", "ParamRud_F_KrPSI",
+        "ParamH_F_KcH", "ParamH_F_IcH", "ParamH_F_KcHdot", "ParamH_F_IcHdot", "ParamH_F_KcAz",
+        "ParamRPM_F_KgRPM", "ParamRPM_F_IgRPM",
+        "ParamScale_F_scale_factor"
+    ])
     
     # 12. ESC数据 (18字段)
     for i in range(1, 7):
@@ -643,5 +652,72 @@ def _format_gncbus_row(timestamp: str, gncbus_data: Dict[str, Any]) -> str:
     fill_count = TOTAL_COLUMNS - len(row)
     row.extend([""] * fill_count)
     
+    return ",".join(row)
+
+
+def _format_voiflag_row(timestamp: str, data: Dict[str, Any]) -> str:
+    row = [timestamp]
+    row.extend([""] * (OFFSET_AVOIFLAG - 1))
+    row.extend(["0"] * COL_AVOIFLAG)
+    row.extend([""] * (TOTAL_COLUMNS - len(row)))
+    return ",".join(row)
+
+def _format_futaba_row(timestamp: str, data: Dict[str, Any]) -> str:
+    row = [timestamp]
+    row.extend([""] * (OFFSET_FUTABA - 1))
+    row.extend(["0"] * COL_FUTABA)
+    row.extend([""] * (TOTAL_COLUMNS - len(row)))
+    return ",".join(row)
+
+def _format_gcs_row(timestamp: str, data: Dict[str, Any]) -> str:
+    row = [timestamp]
+    row.extend([""] * (OFFSET_GCS - 1))
+    row.extend(["0"] * COL_GCS)
+    row.extend([""] * (TOTAL_COLUMNS - len(row)))
+    return ",".join(row)
+
+def _format_aim2ab_row(timestamp: str, data: Dict[str, Any]) -> str:
+    row = [timestamp]
+    row.extend([""] * (OFFSET_AC_AIM2AB - 1))
+    row.extend(["0"] * COL_AC_AIM2AB)
+    row.extend([""] * (TOTAL_COLUMNS - len(row)))
+    return ",".join(row)
+
+def _format_acab_row(timestamp: str, data: Dict[str, Any]) -> str:
+    row = [timestamp]
+    row.extend([""] * (OFFSET_AC_AB - 1))
+    row.extend(["0"] * COL_AC_AB)
+    row.extend([""] * (TOTAL_COLUMNS - len(row)))
+    return ",".join(row)
+
+def _format_param_row(timestamp: str, param_data: Dict[str, Any]) -> str:
+    """Format PARAM data row (26 columns)"""
+    row = [timestamp]
+    row.extend([""] * (OFFSET_PARAM - 1))
+    
+    keys = [
+        "ParamAil_F_KaPHI", "ParamAil_F_KaP", "ParamAil_F_KaY", "ParamAil_F_IaY",
+        "ParamAil_F_KaVy", "ParamAil_F_IaVy", "ParamAil_F_KaAy",
+        "ParamEle_F_KeTHETA", "ParamEle_F_KeQ", "ParamEle_F_KeX", "ParamEle_F_IeX",
+        "ParamEle_F_KeVx", "ParamEle_F_IeVx", "ParamEle_F_KeAx",
+        "ParamRud_F_KrR", "ParamRud_F_IrR", "ParamRud_F_KrAy", "ParamRud_F_KrPSI",
+        "ParamH_F_KcH", "ParamH_F_IcH", "ParamH_F_KcHdot", "ParamH_F_IcHdot", "ParamH_F_KcAz",
+        "ParamRPM_F_KgRPM", "ParamRPM_F_IgRPM",
+        "ParamScale_F_scale_factor"
+    ]
+    
+    for key in keys:
+        val = param_data.get(key, 0.0)
+        row.append(f"{_safe_float(val):.4f}")
+        
+    fill_count = TOTAL_COLUMNS - len(row)
+    row.extend([""] * fill_count)
+    return ",".join(row)
+
+def _format_esc_row(timestamp: str, data: Dict[str, Any]) -> str:
+    row = [timestamp]
+    row.extend([""] * (OFFSET_ESC - 1))
+    row.extend(["0"] * COL_ESC)
+    row.extend([""] * (TOTAL_COLUMNS - len(row)))
     return ",".join(row)
 
