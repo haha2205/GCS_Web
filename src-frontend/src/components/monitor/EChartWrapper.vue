@@ -12,11 +12,19 @@
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import * as echarts from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
-import { GridComponent, TooltipComponent } from 'echarts/components'
-import { LineChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent, LegendComponent, RadarComponent } from 'echarts/components'
+import { LineChart, BarChart, RadarChart } from 'echarts/charts'
 
-// 注册必要组件
-echarts.use([CanvasRenderer, GridComponent, TooltipComponent, LineChart])
+echarts.use([
+  CanvasRenderer,
+  GridComponent,
+  TooltipComponent,
+  LegendComponent,
+  RadarComponent,
+  LineChart,
+  BarChart,
+  RadarChart
+])
 
 const props = defineProps({
   title: {
@@ -32,77 +40,87 @@ const props = defineProps({
     type: String,
     default: ''
   },
+  chartType: {
+    type: String,
+    default: 'line'
+  },
+  categories: {
+    type: Array,
+    default: () => []
+  },
+  radarIndicator: {
+    type: Array,
+    default: () => []
+  },
+  height: {
+    type: Number,
+    default: 150
+  },
   yMin: Number,
-  yMax: Number
+  yMax: Number,
+  boundaryGap: {
+    type: Boolean,
+    default: undefined
+  },
+  showLegend: {
+    type: Boolean,
+    default: false
+  },
+  optionOverrides: {
+    type: Object,
+    default: () => ({})
+  }
 })
 
 const chartRef = ref(null)
 let chartInstance = null
+let resizeObserver = null
 
-const initChart = () => {
+function applyContainerSize() {
   if (!chartRef.value) {
-    console.warn('[EChartWrapper] 容器引用不存在')
     return
   }
-  
-  // 先销毁旧实例
-  if (chartInstance) {
-    chartInstance.dispose()
-    chartInstance = null
-  }
-  
-  // 强制设置容器尺寸（确保ECharts有渲染空间）
+
+  const chartHeight = `${props.height}px`
   chartRef.value.style.width = '100%'
-  chartRef.value.style.height = '150px'
+  chartRef.value.style.height = chartHeight
   chartRef.value.style.minWidth = '100px'
-  chartRef.value.style.minHeight = '150px'
-  chartRef.value.style.display = 'block'
-  chartRef.value.style.position = 'relative'
-  chartRef.value.style.visibility = 'visible'
-  
-  // 检查容器尺寸
-  const rect = chartRef.value.getBoundingClientRect()
-  console.log('[EChartWrapper] 容器尺寸（强制设置后）:', rect, '数据长度:', props.series.length)
-  
-  // 强制初始化ECharts，不管容器尺寸如何
-  try {
-    chartInstance = echarts.init(chartRef.value, {
-      renderer: 'canvas'
-    })
-    console.log('[EChartWrapper] ECharts实例创建成功')
-    // 延迟更新图表，等待DOM完成
-    setTimeout(() => {
-      updateChart()
-      // 设置图表尺寸
-      if (chartInstance && rect.width > 0 && rect.height > 0) {
-        chartInstance.resize()
-      }
-    }, 50)
-  } catch (error) {
-    console.error('[EChartWrapper] 初始化失败', error)
-  }
+  chartRef.value.style.minHeight = chartHeight
 }
 
-const updateChart = () => {
-  if (!chartInstance) {
-    console.warn('[EChartWrapper] chartInstance不存在，无法更新')
-    return
-  }
-  
-  if (!props.series || !Array.isArray(props.series) || props.series.length === 0) {
-    console.warn('[EChartWrapper] series为空，跳过更新')
-    return
-  }
-  
-  console.log('[EChartWrapper] 更新图表，series:', props.series.map(s => ({ name: s.name, dataLen: s.data?.length || 0 })))
-  
-  // 生成x轴数据：根据第一个series的数据长度生成索引
+function getXAxisData() {
   const firstSeriesData = props.series[0]?.data || []
-  const xAxisData = firstSeriesData.length > 0
-    ? firstSeriesData.map((_, i) => i)
-    : [0] // 确保至少有一个x轴点
-  
-  const option = {
+  if (props.categories.length > 0) {
+    return props.categories
+  }
+  if (firstSeriesData.length > 0) {
+    return firstSeriesData.map((_, index) => index)
+  }
+  return [0]
+}
+
+function getRadarIndicator() {
+  if (props.radarIndicator.length > 0) {
+    return props.radarIndicator
+  }
+  return getXAxisData().map((name) => ({ name, max: 100 }))
+}
+
+function isTimedPoint(point) {
+  return Array.isArray(point)
+    && point.length >= 2
+    && Number.isFinite(Number(point[0]))
+    && Number.isFinite(Number(point[1]))
+}
+
+function hasTimedSeries() {
+  return props.series.some((item) => Array.isArray(item?.data) && item.data.some(isTimedPoint))
+}
+
+function buildCartesianOption() {
+  const isBar = props.chartType === 'bar'
+  const useTimeAxis = props.chartType === 'line' && hasTimedSeries()
+  return {
     grid: {
       left: 40,
       right: 20,
@@ -111,24 +129,32 @@ const updateChart = () => {
     },
     tooltip: {
       trigger: 'axis',
-      backgroundColor: 'rgba(20, 20, 20, 0.9)',
-      borderColor: '#333',
+      backgroundColor: 'rgba(255, 255, 255, 0.96)',
+      borderColor: '#cbd5e1',
       borderWidth: 1,
       textStyle: {
-        color: '#fff'
+        color: '#0f172a'
+      }
+    },
+    legend: {
+      show: props.showLegend,
+      top: 0,
+      textStyle: {
+        color: '#475569',
+        fontSize: 11
       }
     },
     xAxis: {
-      type: 'category',
-      data: xAxisData,
-      boundaryGap: false,
+      type: useTimeAxis ? 'time' : 'category',
+      data: useTimeAxis ? undefined : getXAxisData(),
+      boundaryGap: props.boundaryGap ?? isBar,
       axisLine: {
         lineStyle: {
-          color: '#444'
+          color: '#94a3b8'
         }
       },
       axisLabel: {
-        color: '#888'
+        color: '#475569'
       }
     },
     yAxis: {
@@ -137,106 +163,158 @@ const updateChart = () => {
       max: props.yMax,
       axisLine: {
         lineStyle: {
-          color: '#444'
+          color: '#94a3b8'
         }
       },
       axisLabel: {
-        color: '#888'
+        color: '#475569'
       },
       splitLine: {
         lineStyle: {
-          color: '#333',
+          color: '#dbe4ef',
           type: 'dashed'
         }
       }
     },
-    series: props.series.map(s => ({
-      ...s,
-      type: 'line',
-      symbol: 'none',
-      lineStyle: {
-        width: 2
-      }
+    series: props.series.map((item) => ({
+      ...item,
+      type: props.chartType,
+      symbol: props.chartType === 'line' ? (item.symbol ?? 'none') : item.symbol,
+      lineStyle: props.chartType === 'line'
+        ? { width: 2, ...(item.lineStyle || {}) }
+        : item.lineStyle,
+      barMaxWidth: props.chartType === 'bar' ? (item.barMaxWidth || 28) : item.barMaxWidth
     }))
-  }
-  
-  try {
-    chartInstance.setOption(option, true)
-    console.log('[EChartWrapper] 图表更新成功')
-  } catch (error) {
-    console.error('[EChartWrapper] 图表更新失败', error)
   }
 }
 
-// 监听 series 变化
-watch(() => props.series, (newSeries) => {
-  if (newSeries && Array.isArray(newSeries) && newSeries.length > 0) {
-    console.log('[EChartWrapper] series变化，准备更新图表，系列数量:', newSeries.length)
-    nextTick(() => {
-      if (!chartInstance) {
-        console.log('[EChartWrapper] chartInstance不存在，尝试初始化')
-        initChart()
-      } else {
-        updateChart()
+function buildRadarOption() {
+  return {
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: 'rgba(255, 255, 255, 0.96)',
+      borderColor: '#cbd5e1',
+      borderWidth: 1,
+      textStyle: {
+        color: '#0f172a'
       }
-    })
+    },
+    legend: {
+      show: props.showLegend || props.series.length > 1,
+      top: 0,
+      textStyle: {
+        color: '#475569',
+        fontSize: 11
+      }
+    },
+    radar: {
+      radius: '64%',
+      indicator: getRadarIndicator(),
+      axisName: {
+        color: '#475569',
+        fontSize: 11
+      },
+      splitLine: {
+        lineStyle: {
+          color: '#dbe4ef'
+        }
+      },
+      splitArea: {
+        areaStyle: {
+          color: ['rgba(37, 99, 235, 0.03)', 'rgba(37, 99, 235, 0.06)']
+        }
+      },
+      axisLine: {
+        lineStyle: {
+          color: '#cbd5e1'
+        }
+      }
+    },
+    series: props.series.map((item) => ({
+      type: 'radar',
+      ...item,
+      data: [
+        {
+          value: item.data || [],
+          name: item.name,
+          areaStyle: item.areaStyle,
+          lineStyle: item.lineStyle,
+          itemStyle: item.itemStyle,
+          symbol: item.symbol
+        }
+      ]
+    }))
   }
-}, { deep: true })
+}
 
-let resizeObserver = null
+function getOption() {
+  const baseOption = props.chartType === 'radar'
+    ? buildRadarOption()
+    : buildCartesianOption()
+
+  return {
+    ...baseOption,
+    ...props.optionOverrides
+  }
+}
+
+function updateChart() {
+  if (!chartInstance || !Array.isArray(props.series) || props.series.length === 0) {
+    return
+  }
+
+  chartInstance.setOption(getOption(), true)
+}
+
+function initChart() {
+  if (!chartRef.value) {
+    return
+  }
+
+  if (chartInstance) {
+    chartInstance.dispose()
+  }
+
+  applyContainerSize()
+  chartInstance = echarts.init(chartRef.value, null, { renderer: 'canvas' })
+  updateChart()
+}
+
+function handleResize() {
+  if (chartInstance) {
+    chartInstance.resize()
+  }
+}
+
+watch(
+  () => [props.series, props.categories, props.radarIndicator, props.chartType, props.height, props.yMin, props.yMax, props.showLegend, props.optionOverrides],
+  () => {
+    nextTick(() => {
+      applyContainerSize()
+      if (!chartInstance) {
+        initChart()
+        return
+      }
+      chartInstance.resize()
+      updateChart()
+    })
+  },
+  { deep: true }
+)
 
 onMounted(() => {
-  console.log('[EChartWrapper] onMounted, props.series:', props.series?.map(s => ({ name: s.name, dataLen: s.data?.length || 0 })))
-  
-  // 使用 ResizeObserver 监听容器尺寸变化
-  resizeObserver = new ResizeObserver((entries) => {
-    for (let entry of entries) {
-      const { width, height } = entry.contentRect
-      console.log('[EChartWrapper] 容器尺寸变化:', { width, height })
-      if (width > 0 && height > 0 && !chartInstance) {
-        console.log('[EChartWrapper] 容器尺寸有效，初始化图表')
-        initChart()
-      } else if (chartInstance) {
-        chartInstance.resize()
-      } else {
-        // 如果图表未初始化且尺寸有效，尝试初始化
-        if (width > 0 && height > 0) {
-          console.log('[EChartWrapper] ResizeObserver检测到有效尺寸，初始化图表')
-          initChart()
-        }
-      }
-    }
-  })
-  
-  // 初始化时检查容器
   nextTick(() => {
+    applyContainerSize()
+    initChart()
+
     if (chartRef.value) {
+      resizeObserver = new ResizeObserver(() => {
+        handleResize()
+      })
       resizeObserver.observe(chartRef.value)
-      
-      // 强制设置容器高度（防止v-show导致尺寸为0）
-      chartRef.value.style.height = '150px'
-      chartRef.value.style.minHeight = '150px'
-      
-      // 激进的策略：不管容器尺寸如何，都尝试初始化
-      // ECharts可以处理尺寸为0的情况，会在尺寸有效时自动渲染
-      setTimeout(() => {
-        if (!chartInstance && chartRef.value) {
-          const rect = chartRef.value.getBoundingClientRect()
-          console.log('[EChartWrapper] 延迟后容器尺寸:', rect)
-          
-          if (rect.width > 0 && rect.height > 0) {
-            console.log('[EChartWrapper] 容器尺寸有效，初始化图表')
-            initChart()
-          } else {
-            console.warn('[EChartWrapper] 容器尺寸仍为0，但强制初始化（ECharts会自己处理）')
-            // 强制初始化，ECharts会等待容器尺寸有效
-            initChart()
-          }
-        }
-      }, 100)
     }
   })
-  
+
   window.addEventListener('resize', handleResize)
 })
 
@@ -251,45 +329,40 @@ onUnmounted(() => {
   }
   window.removeEventListener('resize', handleResize)
 })
-
-const handleResize = () => {
-  if (chartInstance) {
-    chartInstance.resize()
-  }
-}
 </script>
 
 <style scoped>
 .e-chart-wrapper {
   width: 100%;
   padding: 10px;
-  background: rgba(30, 30, 30, 0.5);
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--border-soft);
   border-radius: 6px;
   margin-bottom: 12px;
   flex-shrink: 0;
 }
- 
+
 .chart-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 10px;
   padding-bottom: 8px;
-  border-bottom: 1px solid #444;
+  border-bottom: 1px solid var(--border-soft);
   flex-shrink: 0;
 }
- 
+
 .chart-title {
-  color: #ffffff;
+  color: var(--text-primary);
   font-size: 13px;
   font-weight: 600;
 }
- 
+
 .chart-unit {
-  color: #888;
+  color: var(--text-secondary);
   font-size: 11px;
 }
- 
+
 .chart-container {
   width: 100%;
   height: 150px;

@@ -173,56 +173,6 @@
         </div>
       </div>
 
-      <!-- LiDAR网络配置 -->
-      <div class="params-group">
-        <div class="section-header">
-          <h4 class="section-title" @click="toggleSection('network')">
-            <span class="section-icon" :class="{ expanded: expandedSections.network }">▼</span>
-            LiDAR网络配置
-          </h4>
-          <button class="icon-btn refresh" @click="readLidarConfig" title="读取配置">↻</button>
-        </div>
-        
-        <div v-show="expandedSections.network" class="params-content">
-          <div class="config-grid">
-            <div class="config-row">
-              <label>目标IP (Host Address)</label>
-              <input v-model="lidarConfig.host_address" type="text" class="config-input" placeholder="192.168.1.100" />
-            </div>
-            <div class="config-row">
-              <label>组播地址 (Group Address)</label>
-              <input v-model="lidarConfig.group_address" type="text" class="config-input" placeholder="239.255.0.1" />
-            </div>
-            <div class="config-row">
-              <label>MSOP端口</label>
-              <input v-model.number="lidarConfig.msop_port" type="number" class="config-input" placeholder="2368" />
-            </div>
-            <div class="config-row">
-              <label>DIFOP端口</label>
-              <input v-model.number="lidarConfig.difop_port" type="number" class="config-input" placeholder="2369" />
-            </div>
-            <div class="config-row">
-              <label>LiDAR类型</label>
-              <select v-model.number="lidarConfig.lidar_type" class="config-input">
-                <option :value="32">LIVOX Mid-360</option>
-                <option :value="64">LIVOX Avia</option>
-                <option :value="128">LIVOX Mid-360 (双)</option>
-              </select>
-            </div>
-            <div class="config-row switch-row">
-              <label>使用LiDAR时钟</label>
-              <label class="toggle-switch">
-                <input type="checkbox" v-model="lidarConfig.use_lidar_clock" />
-                <span class="slider"></span>
-              </label>
-            </div>
-          </div>
-          <div class="section-actions">
-            <button class="action-btn apply" @click="writeLidarConfig">应用网络配置</button>
-          </div>
-        </div>
-      </div>
-
       <!-- 系统参数配置 -->
       <div class="params-group">
         <div class="section-header">
@@ -277,7 +227,7 @@
         <div class="section-header">
           <h4 class="section-title" @click="toggleSection('filter')">
             <span class="section-icon" :class="{ expanded: expandedSections.filter }">▼</span>
-            LiDAR滤波器配置
+            障碍过滤配置
           </h4>
           <button class="icon-btn refresh" @click="readFilterConfig" title="读取配置">↻</button>
         </div>
@@ -334,7 +284,6 @@ const connected = computed(() => droneStore.connected)
 
 const expandedSections = ref({
   pid: true,
-  network: true,
   system: true,
   filter: false
 })
@@ -346,27 +295,27 @@ const toggleSection = (section) => {
 // PID参数（完整30个参数，根据interface.h定义）
 const pid = ref({
   // 1. Ail (7)
-  fKaPHI: 0.5,        // 滚转姿态P系数
-  fKaP: 0.2,         // 滚转姿态D系数
-  fKaY: 0.143,       // 横向位置P系数
+  fKaPHI: 0.8,        // 滚转姿态P系数
+  fKaP: 0.3,         // 滚转姿态D系数
+  fKaY: 0.3,       // 横向位置P系数
   fIaY: 0.005,       // 横向位置I系数
   fKaVy: 2.0,        // 横向速度P系数
   fIaVy: 0.4,        // 横向速度I系数
   fKaAy: 0.28,       // 横向加速度D系数
 
   // 2. Ele (7)
-  fKeTHETA: 0.5,      // 俯仰姿态P系数
-  fKeQ: 0.2,         // 俯仰姿态D系数
-  fKeX: 0.201,        // 纵向位置P系数
+  fKeTHETA: 0.8,      // 俯仰姿态P系数
+  fKeQ: 0.3,         // 俯仰姿态D系数
+  fKeX: 0.3,        // 纵向位置P系数
   fIeX: 0.01,         // 纵向位置I系数
   fKeVx: 2.0,         // 纵向速度P系数
   fIeVx: 0.4,        // 纵向速度I系数
   fKeAx: 0.55,        // 纵向加速度D系数
 
   // 3. Rud (4)
-  fKrR: 0.2,         // 偏航角速度P系数
-  fIrR: 0.01,         // 偏航角速度I系数
-  fKrAy: 0.1,        // 偏航加速度P系数
+  fKrR: 1.0,         // 偏航角速度P系数
+  fIrR: 0.4,         // 偏航角速度I系数
+  fKrAy: 0.0,        // 偏航加速度P系数
   fKrPSI: 1.0,        // 偏航角P系数
 
   // 4. H (5)
@@ -374,30 +323,20 @@ const pid = ref({
   fIcH: 0.015,        // 高度I系数
   fKcHdot: 0.5,       // 垂向速度P系数
   fIcHdot: 0.05,      // 垂向速度I系数
-  fKcAz: 0.15,        // 垂向加速度D系数
+  fKcAz: 0.5,        // 垂向加速度D系数
 
   // 5. RPM (2)
   fIgRPM: 0.0,        // 电机转速I系数
-  fKgRPM: 0.01,       // 电机转速P系数
+  fKgRPM: 0.0,       // 电机转速P系数
 
   // 6. Scale (1)
-  fScale_factor: 1.0,    // 缩放因子
+  fScale_factor: 0.3,    // 缩放因子
 
   // 7. New Params (4)
   XaccLMT: 1.0,       // X轴加速度限制
   YaccLMT: 1.0,       // Y轴加速度限制
   Hground: 0.4,       // 地面高度
   AutoTakeoffHcmd: 10.0 // 自动起飞高度指令
-})
-
-// LiDAR网络配置
-const lidarConfig = ref({
-  host_address: '192.168.1.100',
-  group_address: '239.255.0.1',
-  msop_port: 2368,
-  difop_port: 2369,
-  lidar_type: 32,
-  use_lidar_clock: false
 })
 
 // 系统参数配置
@@ -432,18 +371,6 @@ const writePids = () => {
   droneStore.addLog('PID参数已更新', 'info')
 }
 
-// LiDAR网络配置操作
-const readLidarConfig = () => {
-  console.log('读取LiDAR网络配置')
-  droneStore.addLog('正在读取LiDAR网络配置...', 'warning')
-}
-
-const writeLidarConfig = () => {
-  console.log('写入LiDAR网络配置', lidarConfig.value)
-  droneStore.sendCommand('set_lidar_network', lidarConfig.value)
-  droneStore.addLog('LiDAR网络配置已更新', 'info')
-}
-
 // 系统参数配置操作
 const readSystemConfig = () => {
   console.log('读取系统参数配置')
@@ -470,7 +397,6 @@ const writeFilterConfig = () => {
 
 onMounted(() => {
   readPids()
-  readLidarConfig()
   readSystemConfig()
   readFilterConfig()
 })
@@ -483,6 +409,11 @@ onMounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  background: linear-gradient(180deg, #f8fbff 0%, #edf4fb 100%);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  color: var(--text-primary);
 }
 
 .content-scroll {
@@ -491,6 +422,7 @@ onMounted(() => {
   overflow-x: hidden;
   max-height: 100vh;
   min-height: 0;
+  padding-right: 6px;
 }
 
 .params-content {
@@ -506,19 +438,20 @@ onMounted(() => {
 }
 
 .panel-title {
-  color: #ffffff;
+  color: var(--text-primary);
   font-size: 16px;
   font-weight: 600;
   margin: 0 0 15px 0;
   padding-bottom: 10px;
-  border-bottom: 2px solid #e91e63;
+  border-bottom: 2px solid var(--accent-color);
 }
 
 .params-sections {
 }
 
 .params-group {
-  background: rgba(40, 40, 40, 0.5);
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--border-light);
   border-radius: 8px;
   margin-bottom: 12px;
 }
@@ -533,7 +466,7 @@ onMounted(() => {
 }
 
 .section-title {
-  color: #e91e63;
+  color: var(--accent-color);
   font-size: 13px;
   font-weight: 600;
   margin: 0;
@@ -553,12 +486,12 @@ onMounted(() => {
 
 .params-content {
   padding: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--border-light);
 }
 
 .config-header,
 .pid-group-title {
-  color: #e91e63;
+  color: var(--accent-color);
   font-size: 11px;
   font-weight: 600;
   margin: 12px 0 8px 0;
@@ -569,11 +502,12 @@ onMounted(() => {
 .pid-group-title {
   margin: 10px 0 6px 0;
   padding-bottom: 6px;
-  border-bottom: 1px solid rgba(233, 30, 99, 0.3);
+  border-bottom: 1px solid rgba(37, 99, 235, 0.18);
 }
 
 .pid-group {
-  background: rgba(20, 20, 20, 0.5);
+  background: var(--panel-muted);
+  border: 1px solid var(--border-light);
   border-radius: 6px;
   padding: 10px;
   margin-bottom: 10px;
@@ -592,18 +526,25 @@ onMounted(() => {
 }
 
 .pid-row label {
-  color: #cccccc;
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
 .pid-input {
-  background: rgba(20, 20, 20, 0.8);
-  border: 1px solid #444444;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  color: #ffffff;
+  color: var(--text-primary);
   padding: 4px 8px;
   font-size: 11px;
   width: 80px;
+}
+
+.pid-input:focus,
+.config-input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
 .config-grid {
@@ -624,15 +565,15 @@ onMounted(() => {
 }
 
 .config-row label {
-  color: #cccccc;
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
 .config-input {
-  background: rgba(20, 20, 20, 0.8);
-  border: 1px solid #444444;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  color: #ffffff;
+  color: var(--text-primary);
   padding: 6px 10px;
   font-size: 12px;
   width: 140px;
@@ -644,10 +585,10 @@ onMounted(() => {
 }
 
 .icon-btn.refresh {
-  background: transparent;
-  border: 1px solid #666;
+  background: var(--surface-elevated);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
-  color: #999;
+  color: var(--text-secondary);
   width: 28px;
   height: 28px;
   cursor: pointer;
@@ -656,22 +597,22 @@ onMounted(() => {
 }
 
 .icon-btn.refresh:hover {
-  background: #666;
-  color: #fff;
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--accent-color);
 }
 
 .section-actions {
   display: flex;
   padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-top: 1px solid var(--border-light);
 }
 
 .action-btn.apply {
   flex: 1;
-  background: #e91e63;
-  border: none;
+  background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
+  border: 1px solid rgba(59, 130, 246, 0.28);
   border-radius: 6px;
-  color: #ffffff;
+  color: var(--accent-color);
   padding: 10px 16px;
   cursor: pointer;
   font-size: 12px;
@@ -680,7 +621,7 @@ onMounted(() => {
 }
 
 .action-btn.apply:hover {
-  background: #c2185b;
+  background: linear-gradient(180deg, #dbeafe 0%, #bfdbfe 100%);
 }
 
 .action-btn.apply:disabled {
@@ -713,7 +654,7 @@ onMounted(() => {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: #555555;
+  background-color: #cbd5e1;
   transition: .3s;
   border-radius: 20px;
 }
@@ -731,7 +672,7 @@ onMounted(() => {
 }
 
 .toggle-switch input:checked + .slider {
-  background-color: #e91e63;
+  background-color: var(--accent-color);
 }
 
 .toggle-switch input:checked + .slider:before {

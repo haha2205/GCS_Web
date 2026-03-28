@@ -1,599 +1,335 @@
 <template>
-  <div class="monitor-tabs-panel" :class="{ collapsed: isCollapsed, maximized: isMaximized }">
-    <!-- 标签页头部 + 最大化/最小化按钮 -->
-    <div class="tabs-header">
-      <div class="tabs-wrapper">
-        <div 
-            v-for="tab in tabs" 
-            :key="tab.id"
-            class="tab-item"
-            :class="{ active: activeTab === tab.id }"
-            @click="activeTab = tab.id"
-        >
-          <span class="tab-icon">{{ tab.icon }}</span>
-          <span class="tab-label">{{ tab.label }}</span>
+  <div class="monitor-tabs-panel">
+    <div class="monitor-content" :class="monitorContentClass">
+      <section v-if="showControlPanel" class="monitor-column">
+        <div class="column-header">
+          <div class="column-title">控制状态</div>
         </div>
-      </div>
-      
-      <!-- 最大化/最小化按钮 -->
-      <div class="panel-controls">
-        <button
-          class="control-btn"
-          :class="{ 'active': isMaximized }"
-          @click="toggleMaximize"
-          title="最大化/还原"
-        >
-          <svg v-if="!isMaximized" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M4 4h16v16H4z"/>
-            <path d="M14 4h6v6"/>
-            <path d="M4 10h6v10"/>
-          </svg>
-          <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M8 8h8v8H8z"/>
-            <path d="M4 4h4v4h-4zM16 4h4v4h-4zM4 16h4v4h-4zM16 16h4v4h-4z"/>
-          </svg>
-        </button>
-        <button
-          class="control-btn collapse-btn"
-          @click="isCollapsed = !isCollapsed"
-          :title="isCollapsed ? '展开' : '收起'"
-        >
-          <svg v-if="!isCollapsed" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M4 12h16"/>
-            <path d="M12 4l-8 8h16z"/>
-          </svg>
-          <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M4 12h16"/>
-            <path d="M12 4l8 8H4z"/>
-          </svg>
-        </button>
-      </div>
-    </div>
 
-    <!-- 标签页内容 -->
-    <div class="tabs-content" :class="{ minimized: isCollapsed }">
-      <!-- 控制标签页 -->
-      <div class="content-scroll control-tab" v-show="activeTab === 'control'">
-          <!--电机输出曲线 -->
-          <div class="control-charts-section">
-            <EChartWrapper
-              key="pwm-chart"
-              title="PWM输出"
-              unit="μs"
-              :series="pwmSeries"
-              :yMin="1000"
-              :yMax="2000"
-            />
-          </div>
-          
-          <!-- PWM数值显示 -->
-          <div class="monitor-section">
-            <div class="section-title">电机PWM输出 (6旋翼)</div>
-            <div class="pwm-display">
-              <div class="pwm-item" v-for="(pwm, index) in selectedPwms" :key="index">
-                <div class="pwm-label">M{{ index + 1 }}</div>
-                <div class="pwm-value">{{ pwm.toFixed(0) }}</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 遥控输入 -->
-          <div class="monitor-section">
-            <div class="section-title">遥控输入</div>
-            <div class="remote-control-display">
-              <div class="control-item">
-                <span class="control-label">滚转 Roll</span>
-                <span class="control-value">{{ rcRoll }}</span>
-              </div>
-              <div class="control-item">
-                <span class="control-label">俯仰 Pitch</span>
-                <span class="control-value">{{ rcPitch }}</span>
-              </div>
-              <div class="control-item">
-                <span class="control-label">偏航 Yaw</span>
-                <span class="control-value">{{ rcYaw }}</span>
-              </div>
-              <div class="control-item">
-                <span class="control-label">油门 Col</span>
-                <span class="control-value">{{ rcCol }}</span>
-              </div>
-              <div class="control-item">
-                <span class="control-label">模式 Switch</span>
-                <span class="control-value status-badge" :class="rcSwitch ? 'active' : 'inactive'">
-                  {{ rcSwitch ? '开启' : '关闭' }}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 电机参数 (ExtY_FCS_ESC_T) -->
-          <div class="monitor-section">
-            <div class="section-title">电机参数 (ESC)</div>
-            <div class="esc-display">
-              <div class="esc-item" v-for="index in 6" :key="index">
-                <div class="esc-motor-label">M{{ index }}</div>
-                <div class="esc-data-grid">
-                  <div class="esc-data-item">
-                    <span class="esc-data-label">误差</span>
-                    <span class="esc-data-value error">{{ getEscErrorCount(index) }}</span>
-                  </div>
-                  <div class="esc-data-item">
-                    <span class="esc-data-label">转速</span>
-                    <span class="esc-data-value rpm">{{ getEscRPM(index) }}</span>
-                  </div>
-                  <div class="esc-data-item">
-                    <span class="esc-data-label">功率</span>
-                    <span class="esc-data-value power">{{ getEscPowerRating(index) }}%</span>
-                  </div>
+        <div class="column-scroll">
+          <div class="monitor-section state-section">
+            <div class="state-columns">
+              <div class="state-column" v-for="(column, columnIndex) in stateColumns" :key="columnIndex">
+                <div class="metric-card" v-for="item in column" :key="item.label">
+                  <div class="metric-label">{{ item.label }}</div>
+                  <div class="metric-value">{{ item.value }}</div>
+                  <div class="metric-unit">{{ item.unit }}</div>
                 </div>
               </div>
             </div>
           </div>
 
-          <!-- 避障标志 -->
-          <div class="monitor-section">
-            <div class="section-title">避障状态</div>
-            <div class="avoidance-display">
-              <div class="status-item">
-                <span class="status-label">雷达启用</span>
-                <span class="status-value" :class="laserRadarEnabled ? 'active' : 'inactive'">
-                  {{ laserRadarEnabled ? '启用' : '禁用' }}
-                </span>
-              </div>
-              <div class="status-item">
-                <span class="status-label">避障模式</span>
-                <span class="status-value" :class="avoidanceFlag ? 'active' : 'inactive'">
-                  {{ avoidanceFlag ? '开启' : '关闭' }}
-                </span>
-              </div>
-              <div class="status-item">
-                <span class="status-label">引导模式</span>
-                <span class="status-value" :class="guideFlag ? 'active' : 'inactive'">
-                  {{ guideFlag ? '引导中' : '未引导' }}
-                </span>
+          <div class="monitor-section gcs-section">
+            <div class="section-subtitle">GCS回传</div>
+            <div class="gcs-grid">
+              <div class="metric-card compact-card" v-for="item in gcsCards" :key="item.label">
+                <div class="metric-label">{{ item.label }}</div>
+                <div class="metric-value compact-value">{{ item.value }}</div>
+                <div class="metric-unit">{{ item.unit }}</div>
               </div>
             </div>
           </div>
-      </div>
 
-      <!-- 导航标签页 -->
-      <div class="content-scroll navigation-tab" v-show="activeTab === 'navigation'">
-          <!-- 位置曲线 -->
-          <div class="navigation-charts-section">
+          <div class="chart-shell pwm-shell">
             <EChartWrapper
-              key="attitude-chart"
-              title="姿态角"
-              unit="度"
-              :series="attitudeSeries"
-              :yMin="-45"
-              :yMax="45"
-            />
-            
-            <EChartWrapper
-              key="velocity-chart"
-              title="速度分量"
-              unit="m/s"
-              :series="velocitySeries"
-              :yMin="-20"
-              :yMax="20"
-            />
-            
-            <EChartWrapper
-              key="altitude-chart"
-              title="高度变化"
-              unit="m"
-              :series="altitudeSeries"
+              key="pwm-chart"
+              title="PWM输出"
+              unit="ratio"
+              :series="pwmSeries"
+              :showLegend="true"
               :yMin="0"
-              :yMax="100"
+              :yMax="1"
+              :optionOverrides="defaultTimeChartOverrides"
             />
           </div>
-
-          <!-- 基础导航信息 -->
-          <div class="monitor-section">
-            <div class="section-title">飞行状态</div>
-            <div class="attitude-display">
-              <div class="attitude-item">
-                <span class="attitude-label">滚转角 φ (Roll)</span>
-                <span class="attitude-value">{{ states_phi.toFixed(2) }}°</span>
-              </div>
-              <div class="attitude-item">
-                <span class="attitude-label">俯仰角 θ (Pitch)</span>
-                <span class="attitude-value">{{ states_theta.toFixed(2) }}°</span>
-              </div>
-              <div class="attitude-item">
-                <span class="attitude-label">偏航角 ψ (Yaw)</span>
-                <span class="attitude-value">{{ states_psi.toFixed(2) }}°</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 角速度信息 -->
-          <div class="monitor-section">
-            <div class="section-title">角速度</div>
-            <div class="angular-display">
-              <div class="angular-item">
-                <span class="angular-label">p (rad/s)</span>
-                <span class="angular-value">{{ states_p.toFixed(3) }}</span>
-              </div>
-              <div class="angular-item">
-                <span class="angular-label">q (rad/s)</span>
-                <span class="angular-value">{{ states_q.toFixed(3) }}</span>
-              </div>
-              <div class="angular-item">
-                <span class="angular-label">r (rad/s)</span>
-                <span class="angular-value">{{ states_r.toFixed(3) }}</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 位置信息 -->
-          <div class="monitor-section">
-            <div class="section-title">位置信息 (经纬度/高度)</div>
-            <div class="position-display">
-              <div class="position-item">
-                <span class="position-label">纬度 Latitude</span>
-                <span class="position-value">{{ states_lat.toFixed(6) }}°</span>
-              </div>
-              <div class="position-item">
-                <span class="position-label">经度 Longitude</span>
-                <span class="position-value">{{ states_lon.toFixed(6) }}°</span>
-              </div>
-              <div class="position-item">
-                <span class="position-label">高度 Height</span>
-                <span class="position-value">{{ states_height.toFixed(2) }} m</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- GCS指令数据 (ExtY_FCS_DATAGCS_T) -->
-          <div class="monitor-section">
-            <div class="section-title">地面站指令 (GCS)</div>
-            <div class="gcs-display">
-              <div class="gcs-item">
-                <span class="gcs-label">指令索引 CmdIdx</span>
-                <span class="gcs-value">{{ gcs_CmdIdx }}</span>
-              </div>
-              <div class="gcs-item">
-                <span class="gcs-label">任务编号 Mission</span>
-                <span class="gcs-value">{{ gcs_Mission }}</span>
-              </div>
-              <div class="gcs-item">
-                <span class="gcs-label">指令参数 Val</span>
-                <span class="gcs-value">{{ gcs_Val.toFixed(3) }}</span>
-              </div>
-              <div class="gcs-item">
-                <span class="gcs-label">通信状态 Status</span>
-                <span class="gcs-value" :class="gcsFail ? 'error' : 'ok'">
-                  {{ gcsFail ? '失败' : '正常' }}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 速度信息 -->
-          <div class="monitor-section">
-            <div class="section-title">速度信息 (机体坐标系)</div>
-            <div class="speed-display">
-              <div class="speed-item">
-                <span class="speed-label">Vx (纵向) m/s</span>
-                <span class="speed-value">{{ states_Vx_GS.toFixed(2) }}</span>
-              </div>
-              <div class="speed-item">
-                <span class="speed-label">Vy (横向) m/s</span>
-                <span class="speed-value">{{ states_Vy_GS.toFixed(2) }}</span>
-              </div>
-              <div class="speed-item">
-                <span class="speed-label">Vz (垂向) m/s</span>
-                <span class="speed-value">{{ states_Vz_GS.toFixed(2) }}</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- GNC参数 -->
-          <div class="monitor-section">
-            <div class="section-title">GNC控制参数</div>
-            <div class="gnc-display">
-              <div class="gnc-item">
-                <span class="gnc-label">Vx指令</span>
-                <span class="gnc-value">{{ GNCBus_CmdValue_Vx_cmd.toFixed(2) }}</span>
-              </div>
-              <div class="gnc-item">
-                <span class="gnc-label">Vy指令</span>
-                <span class="gnc-value">{{ GNCBus_CmdValue_Vy_cmd.toFixed(2) }}</span>
-              </div>
-              <div class="gnc-item">
-                <span class="gnc-label">高度指令</span>
-                <span class="gnc-value">{{ GNCBus_CmdValue_height_cmd.toFixed(2) }}</span>
-              </div>
-              <div class="gnc-item">
-                <span class="gnc-label">偏航指令</span>
-                <span class="gnc-value">{{ GNCBus_CmdValue_psi_cmd.toFixed(2) }}</span>
-              </div>
-            </div>
-          </div>
-      </div>
-
-      <!-- 系统性能标签页（5维KPI+DSM录制） -->
-      <div class="content-scroll system-tab" v-show="activeTab === 'system'">
-          <!-- DSM录制控制区 -->
-          <div class="dsm-recording-section">
-            <div class="section-title">DSM数据录制</div>
-            
-            <!-- 录制状态显示 -->
-            <div class="recording-status">
-              <div class="status-indicator" :class="recordingStatusClass"></div>
-              <span class="status-text">{{ recordingStatusText }}</span>
-            </div>
-            
-            <!-- 录制控制按钮 -->
-            <div class="recording-controls">
-              <button
-                class="control-btn start-btn"
-                @click="handleStartRecording"
-                :disabled="isRecording || !wsConnected"
-              >
-                <span class="btn-icon">●</span>
-                开始录制
-              </button>
-              <button
-                class="control-btn stop-btn"
-                @click="handleStopRecording"
-                :disabled="!isRecording"
-              >
-                <span class="btn-icon">■</span>
-                停止录制
-              </button>
-            </div>
-            
-            <!-- 当前会话信息 -->
-            <div v-if="currentSessionId" class="session-info">
-              <div class="session-label">当前会话</div>
-              <div class="session-id">{{ currentSessionId }}</div>
-            </div>
-          </div>
-
-          <!-- 算力资源 -->
-          <ComputingKPI
-            :dimensionData="droneStore.kpiHistory.computing[0] || {}"
-          />
-          
-          <!-- 通信资源 -->
-          <CommunicationKPI
-            :dimensionData="droneStore.kpiHistory.communication[0] || {}"
-          />
-          
-          <!-- 能耗指标 -->
-          <EnergyKPI
-            :dimensionData="droneStore.kpiHistory.energy[0] || {}"
-          />
-          
-          <!-- 任务效能 -->
-          <MissionKPI
-            :dimensionData="droneStore.kpiHistory.mission[0] || {}"
-          />
-          
-          <!-- 飞行性能 -->
-          <PerformanceKPI
-            :dimensionData="droneStore.kpiHistory.performance[0] || {}"
-          />
         </div>
-      </div>
+      </section>
 
-      <!-- 分析标签页（变量曲线分析）-->
-      <div class="content-scroll analysis-tab" v-show="activeTab === 'analysis'">
-        <AnalysisPanel />
+      <section v-if="showSystemPanel" class="monitor-column system-column">
+        <div class="column-header">
+          <div class="column-title">系统性能</div>
+        </div>
+
+        <div class="column-scroll">
+          <div class="monitor-section chart-grid-section">
+            <div class="section-subtitle">机载关键曲线</div>
+            <div class="chart-grid">
+              <div class="chart-cell">
+                <EChartWrapper title="地速分量" unit="m/s" :series="groundVelocitySeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
+              </div>
+              <div class="chart-cell">
+                <EChartWrapper title="角速度 p/q/r" unit="rad/s" :series="angularRateSeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
+              </div>
+              <div class="chart-cell">
+                <EChartWrapper title="控制令牌状态" :series="controlTokenSeries" :showLegend="true" :height="140" :yMin="0" :yMax="4" :optionOverrides="tokenTimeChartOverrides" />
+              </div>
+              <div class="chart-cell">
+                <EChartWrapper title="高度趋势" unit="m" :series="heightSeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
+              </div>
+              <div class="chart-cell chart-span-2">
+                <EChartWrapper title="遥控输入" :series="futabaSeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="trend-band">
+      <div class="trend-card">
+        <EChartWrapper key="attitude-trend-chart" title="姿态角趋势" unit="deg" :series="attitudeTrendSeries" :showLegend="true" :height="180" :optionOverrides="defaultTimeChartOverrides" />
       </div>
-   </div>
+      <div class="trend-card">
+        <EChartWrapper key="path-deviation-trend-chart" title="轨迹偏差趋势" unit="m" :series="pathDeviationSeries" :showLegend="true" :height="180" :optionOverrides="defaultTimeChartOverrides" />
+      </div>
+      <div class="trend-card">
+        <EChartWrapper
+          key="trajectory-track-chart"
+          title="航迹跟踪"
+          unit="m"
+          :series="trajectorySeries"
+          :showLegend="true"
+          :height="180"
+          :optionOverrides="trajectoryChartOverrides"
+        />
+      </div>
+    </section>
+  </div>
 </template>
 
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { computed } from 'vue'
 import { useDroneStore } from '@/store/drone'
 import EChartWrapper from '@/components/monitor/EChartWrapper.vue'
-import ComputingKPI from '@/components/monitor/ComputingKPI.vue'
-import CommunicationKPI from '@/components/monitor/CommunicationKPI.vue'
-import EnergyKPI from '@/components/monitor/EnergyKPI.vue'
-import MissionKPI from '@/components/monitor/MissionKPI.vue'
-import PerformanceKPI from '@/components/monitor/PerformanceKPI.vue'
-import AnalysisPanel from '@/components/AnalysisPanel.vue'
+
+const props = defineProps({
+  showControlPanel: {
+    type: Boolean,
+    default: true
+  },
+  showSystemPanel: {
+    type: Boolean,
+    default: false
+  }
+})
 
 const droneStore = useDroneStore()
-const wsConnected = computed(() => droneStore.connected)
+const showControlPanel = computed(() => props.showControlPanel)
+const showSystemPanel = computed(() => props.showSystemPanel)
+const monitorContentClass = computed(() => ({
+  'single-column': showControlPanel.value !== showSystemPanel.value,
+  'empty-panel': !showControlPanel.value && !showSystemPanel.value
+}))
 
-// 标签页配置
-const tabs = [
-  { id: 'control', label: '控制', icon: '🎮' },
-  { id: 'navigation', label: '导航', icon: '🧭' },
-  { id: 'system', label: '系统性能', icon: '📊' },
-  { id: 'analysis', label: '分析', icon: '📈' }
-]
+const trimSeries = (entries = [], limit = 120) => (entries || []).slice(-limit).map((item) => item.value)
+const trimTimedSeries = (entries = [], limit = 120) => (entries || []).slice(-limit).map((item) => [item.timestamp, item.value])
+const trimTrack = (entries = [], limit = 180) => (entries || []).slice(-limit)
 
-const activeTab = ref('control')
-const isMaximized = ref(false)
-const isCollapsed = ref(false)
-
-// 切换最大化/最小化
-const toggleMaximize = () => {
-  isMaximized.value = !isMaximized.value
+const padTime = (value) => String(value).padStart(2, '0')
+const formatTimeTick = (value) => {
+  const date = new Date(Number(value))
+  if (Number.isNaN(date.getTime())) {
+    return ''
+  }
+  return `${padTime(date.getMinutes())}:${padTime(date.getSeconds())}`
 }
 
-// DSM录制状态 (使用Store中的状态)
-const isRecording = computed(() => droneStore.dataRecording.enabled)
-const currentSessionId = ref('')
-
-// 录制状态显示
-const recordingStatusText = computed(() => {
-  if (!wsConnected.value) return '未连接'
-  return isRecording.value ? '录制中...' : '未录制'
-})
-
-const recordingStatusClass = computed(() => {
-  if (!wsConnected.value) return 'status-disconnected'
-  return isRecording.value ? 'status-recording' : 'status-idle'
-})
-
-// 处理开始录制
-const handleStartRecording = () => {
-  if (!wsConnected.value) {
-    alert('WebSocket未连接')
-    return
-  }
-  
-  const success = droneStore.startDSMRecording()
-  if (success) {
-    currentSessionId.value = generateSessionId()
+const defaultTimeChartOverrides = {
+  xAxis: {
+    type: 'time',
+    axisLine: {
+      lineStyle: {
+        color: '#94a3b8'
+      }
+    },
+    axisLabel: {
+      color: '#475569',
+      formatter: formatTimeTick
+    },
+    splitLine: {
+      lineStyle: {
+        color: '#dbe4ef',
+        type: 'dashed'
+      }
+    }
+  },
+  tooltip: {
+    trigger: 'axis'
   }
 }
 
-// 处理停止录制
-const handleStopRecording = () => {
-  const success = droneStore.stopDSMRecording()
-  if (success) {
-    console.log('录制已停止，会话ID:', currentSessionId.value)
+const tokenTimeChartOverrides = {
+  ...defaultTimeChartOverrides,
+  yAxis: {
+    type: 'value',
+    min: 0,
+    max: 4,
+    interval: 1,
+    axisLine: {
+      lineStyle: {
+        color: '#94a3b8'
+      }
+    },
+    axisLabel: {
+      color: '#475569'
+    },
+    splitLine: {
+      lineStyle: {
+        color: '#dbe4ef',
+        type: 'dashed'
+      }
+    }
   }
 }
 
-// 生成会话ID
-const generateSessionId = () => {
-  const now = new Date()
-  const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '')
-  const timeStr = now.toTimeString().slice(0, 8).replace(/:/g, '')
-  return `session_${dateStr}_${timeStr}`
+const formatValue = (value, digits = 2) => {
+  const num = Number(value)
+  return Number.isFinite(num) ? num.toFixed(digits) : (0).toFixed(digits)
 }
 
-// 从store获取真实数据（基于ExtY_FCS_T数据结构）
-const selectedPwms = computed(() => {
-  // 六旋翼使用前6个PWM，但显示所有8个
-  const allPwms = droneStore.pwms || []
-  return allPwms.slice(0, 8)
-})
+const statesLat = computed(() => droneStore.fcsStates?.states_lat ?? 0)
+const statesLon = computed(() => droneStore.fcsStates?.states_lon ?? 0)
+const statesHeight = computed(() => droneStore.fcsStates?.states_height ?? 0)
+const statesVx = computed(() => droneStore.fcsStates?.states_Vx_GS ?? 0)
+const statesVy = computed(() => droneStore.fcsStates?.states_Vy_GS ?? 0)
+const statesVz = computed(() => droneStore.fcsStates?.states_Vz_GS ?? 0)
+const statesP = computed(() => droneStore.fcsStates?.states_p ?? 0)
+const statesQ = computed(() => droneStore.fcsStates?.states_q ?? 0)
+const statesR = computed(() => droneStore.fcsStates?.states_r ?? 0)
+const statesPhi = computed(() => droneStore.realtimeViews?.flightState?.phi ?? droneStore.attitude?.roll ?? 0)
+const statesTheta = computed(() => droneStore.realtimeViews?.flightState?.theta ?? droneStore.attitude?.pitch ?? 0)
+const statesPsi = computed(() => droneStore.realtimeViews?.flightState?.psi ?? droneStore.attitude?.yaw ?? 0)
 
-// 遥控数据 (ExtY_FCS_DATAFUTABA_T)
-const rcRoll = computed(() => droneStore.fcsData?.Tele_ftb_Roll ?? 0)
-const rcPitch = computed(() => droneStore.fcsData?.Tele_ftb_Pitch ?? 0)
-const rcYaw = computed(() => droneStore.fcsData?.Tele_ftb_Yaw ?? 0)
-const rcCol = computed(() => droneStore.fcsData?.Tele_ftb_Col ?? 0)
-const rcSwitch = computed(() => droneStore.fcsData?.Tele_ftb_Switch ?? 0)
-
-// 避障标志 (ExtY_FCS_AVOIFLAG_T)
-const laserRadarEnabled = computed(() => droneStore.avoiFlag?.AvoiFlag_LaserRadar_Enabled ?? false)
-const avoidanceFlag = computed(() => droneStore.avoiFlag?.AvoiFlag_AvoidanceFlag ?? false)
-const guideFlag = computed(() => droneStore.avoiFlag?.AvoiFlag_GuideFlag ?? false)
-
-// 飞行状态 (ExtY_FCS_STATES_T)
-// 注意：飞控数据通常为弧度，显示时转换为度
-const rad2deg = (rad) => rad * 180.0 / Math.PI
-
-const states_lat = computed(() => droneStore.fcsStates?.states_lat ?? 0)
-const states_lon = computed(() => droneStore.fcsStates?.states_lon ?? 0)
-const states_height = computed(() => droneStore.fcsStates?.states_height ?? 0)
-const states_Vx_GS = computed(() => droneStore.fcsStates?.states_Vx_GS ?? 0)
-const states_Vy_GS = computed(() => droneStore.fcsStates?.states_Vy_GS ?? 0)
-const states_Vz_GS = computed(() => droneStore.fcsStates?.states_Vz_GS ?? 0)
-const states_p = computed(() => droneStore.fcsStates?.states_p ?? 0)
-const states_q = computed(() => droneStore.fcsStates?.states_q ?? 0)
-const states_r = computed(() => droneStore.fcsStates?.states_r ?? 0)
-const states_phi = computed(() => rad2deg(droneStore.fcsStates?.states_phi ?? 0))
-const states_theta = computed(() => rad2deg(droneStore.fcsStates?.states_theta ?? 0))
-const states_psi = computed(() => rad2deg(droneStore.fcsStates?.states_psi ?? 0))
-
-// GNC数据 (ExtY_FCS_GNCBUS_T)
-const GNCBus_CmdValue_Vx_cmd = computed(() => droneStore.gncBus?.GNCBus_CmdValue_Vx_cmd ?? 0)
-const GNCBus_CmdValue_Vy_cmd = computed(() => droneStore.gncBus?.GNCBus_CmdValue_Vy_cmd ?? 0)
-const GNCBus_CmdValue_height_cmd = computed(() => droneStore.gncBus?.GNCBus_CmdValue_height_cmd ?? 0)
-const GNCBus_CmdValue_psi_cmd = computed(() => droneStore.gncBus?.GNCBus_CmdValue_psi_cmd ?? 0)
-
-// GCS数据 (ExtY_FCS_DATAGCS_T)
-const gcs_CmdIdx = computed(() => droneStore.gcsData?.Tele_GCS_CmdIdx ?? 0)
-const gcs_Mission = computed(() => droneStore.gcsData?.Tele_GCS_Mission ?? 0)
-const gcs_Val = computed(() => droneStore.gcsData?.Tele_GCS_Val ?? 0)
-const gcsFail = computed(() => droneStore.gcsData?.Tele_GCS_com_GCS_fail ?? 0)
-
-// ESC数据辅助函数
-const getEscErrorCount = (index) => {
-  const escData = droneStore.escData
-  if (index === 1) return escData.esc1_error_count ?? 0
-  if (index === 2) return escData.esc2_error_count ?? 0
-  if (index === 3) return escData.esc3_error_count ?? 0
-  if (index === 4) return escData.esc4_error_count ?? 0
-  if (index === 5) return escData.esc5_error_count ?? 0
-  if (index === 6) return escData.esc6_error_count ?? 0
-  return 0
-}
-
-const getEscRPM = (index) => {
-  const escData = droneStore.escData
-  if (index === 1) return escData.esc1_rpm ?? 0
-  if (index === 2) return escData.esc2_rpm ?? 0
-  if (index === 3) return escData.esc3_rpm ?? 0
-  if (index === 4) return escData.esc4_rpm ?? 0
-  if (index === 5) return escData.esc5_rpm ?? 0
-  if (index === 6) return escData.esc6_rpm ?? 0
-  return 0
-}
-
-const getEscPowerRating = (index) => {
-  const escData = droneStore.escData
-  if (index === 1) return escData.esc1_power_rating_pct ?? 0
-  if (index === 2) return escData.esc2_power_rating_pct ?? 0
-  if (index === 3) return escData.esc3_power_rating_pct ?? 0
-  if (index === 4) return escData.esc4_power_rating_pct ?? 0
-  if (index === 5) return escData.esc5_power_rating_pct ?? 0
-  if (index === 6) return escData.esc6_power_rating_pct ?? 0
-  return 0
-}
-
-// 图表数据系列（必须在watch之前定义）
-const pwmSeries = computed(() => {
-  // 从store历史数据获取PWM数据
-  const pwm1Data = droneStore.history.pwm1?.map(item => item.value) || []
-  const pwm2Data = droneStore.history.pwm2?.map(item => item.value) || []
-  const pwm3Data = droneStore.history.pwm3?.map(item => item.value) || []
-  const pwm4Data = droneStore.history.pwm4?.map(item => item.value) || []
-  const pwm5Data = droneStore.history.pwm5?.map(item => item.value) || []
-  const pwm6Data = droneStore.history.pwm6?.map(item => item.value) || []
-  
+const gcsCards = computed(() => {
+  const gcs = droneStore.gcsData || {}
   return [
-    { name: 'M1', data: pwm1Data.slice(-100) || [1000], lineStyle: { color: '#ff6b6b' }, itemStyle: { color: '#ff6b6b' } },
-    { name: 'M2', data: pwm2Data.slice(-100) || [1000], lineStyle: { color: '#4ecdc4' }, itemStyle: { color: '#4ecdc4' } },
-    { name: 'M3', data: pwm3Data.slice(-100) || [1000], lineStyle: { color: '#45b7d1' }, itemStyle: { color: '#45b7d1' } },
-    { name: 'M4', data: pwm4Data.slice(-100) || [1000], lineStyle: { color: '#96ceb4' }, itemStyle: { color: '#96ceb4' } },
-    { name: 'M5', data: pwm5Data.slice(-100) || [1000], lineStyle: { color: '#ffa502' }, itemStyle: { color: '#ffa502' } },
-    { name: 'M6', data: pwm6Data.slice(-100) || [1000], lineStyle: { color: '#ff6348' }, itemStyle: { color: '#ff6348' } }
+    { label: 'CmdIdx', value: Number.isFinite(Number(gcs.Tele_GCS_CmdIdx)) ? String(gcs.Tele_GCS_CmdIdx) : '0', unit: 'idx' },
+    { label: 'Mission', value: Number.isFinite(Number(gcs.Tele_GCS_Mission)) ? String(gcs.Tele_GCS_Mission) : '0', unit: 'mission' },
+    { label: 'Val', value: formatValue(gcs.Tele_GCS_Val, 3), unit: 'value' },
+    { label: 'GCS Fail', value: Number(gcs.Tele_GCS_com_GCS_fail) ? 'FAIL' : 'OK', unit: 'link' }
   ]
 })
 
-const attitudeSeries = computed(() => {
-  const rollData = droneStore.history.rollActual?.map(item => item.value) || []
-  const pitchData = droneStore.history.pitchActual?.map(item => item.value) || []
-  const yawData = droneStore.history.yawActual?.map(item => item.value) || []
-  
+const stateColumns = computed(() => [
+  [
+    { label: '纬度', value: formatValue(statesLat.value, 6), unit: 'deg' },
+    { label: '经度', value: formatValue(statesLon.value, 6), unit: 'deg' },
+    { label: '高度', value: formatValue(statesHeight.value), unit: 'm' }
+  ],
+  [
+    { label: 'Vx', value: formatValue(statesVx.value), unit: 'm/s' },
+    { label: 'Vy', value: formatValue(statesVy.value), unit: 'm/s' },
+    { label: 'Vz', value: formatValue(statesVz.value), unit: 'm/s' }
+  ],
+  [
+    { label: 'p', value: formatValue(statesP.value, 3), unit: 'rad/s' },
+    { label: 'q', value: formatValue(statesQ.value, 3), unit: 'rad/s' },
+    { label: 'r', value: formatValue(statesR.value, 3), unit: 'rad/s' }
+  ],
+  [
+    { label: 'φ', value: formatValue(statesPhi.value), unit: 'deg' },
+    { label: 'θ', value: formatValue(statesTheta.value), unit: 'deg' },
+    { label: 'ψ', value: formatValue(statesPsi.value), unit: 'deg' }
+  ]
+])
+
+const pwmSeries = computed(() => [
+  { name: 'M1', data: trimTimedSeries(droneStore.history.pwm1, 100), lineStyle: { color: '#ef4444' }, itemStyle: { color: '#ef4444' } },
+  { name: 'M2', data: trimTimedSeries(droneStore.history.pwm2, 100), lineStyle: { color: '#14b8a6' }, itemStyle: { color: '#14b8a6' } },
+  { name: 'M3', data: trimTimedSeries(droneStore.history.pwm3, 100), lineStyle: { color: '#0ea5e9' }, itemStyle: { color: '#0ea5e9' } },
+  { name: 'M4', data: trimTimedSeries(droneStore.history.pwm4, 100), lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' } },
+  { name: 'M5', data: trimTimedSeries(droneStore.history.pwm5, 100), lineStyle: { color: '#f59e0b' }, itemStyle: { color: '#f59e0b' } },
+  { name: 'M6', data: trimTimedSeries(droneStore.history.pwm6, 100), lineStyle: { color: '#f97316' }, itemStyle: { color: '#f97316' } }
+])
+
+const groundVelocitySeries = computed(() => [
+  { name: 'Vx', data: trimTimedSeries(droneStore.history.velocityX), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
+  { name: 'Vy', data: trimTimedSeries(droneStore.history.velocityY), lineStyle: { color: '#f97316' }, itemStyle: { color: '#f97316' } },
+  { name: 'Vz', data: trimTimedSeries(droneStore.history.velocityZ), lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' } }
+])
+
+const angularRateSeries = computed(() => [
+  { name: 'p', data: trimTimedSeries(droneStore.history.angularRateP), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
+  { name: 'q', data: trimTimedSeries(droneStore.history.angularRateQ), lineStyle: { color: '#f97316' }, itemStyle: { color: '#f97316' } },
+  { name: 'r', data: trimTimedSeries(droneStore.history.angularRateR), lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' } }
+])
+
+const controlTokenSeries = computed(() => [
+  { name: 'rud', data: trimTimedSeries(droneStore.history.tokenRud), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
+  { name: 'ail', data: trimTimedSeries(droneStore.history.tokenAil), lineStyle: { color: '#f59e0b' }, itemStyle: { color: '#f59e0b' } },
+  { name: 'ele', data: trimTimedSeries(droneStore.history.tokenEle), lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' } },
+  { name: 'col', data: trimTimedSeries(droneStore.history.tokenCol), lineStyle: { color: '#ef4444' }, itemStyle: { color: '#ef4444' } }
+])
+
+const heightSeries = computed(() => [
+  { name: 'Actual', data: trimTimedSeries(droneStore.history.altitudeActual), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
+  { name: 'Target', data: trimTimedSeries(droneStore.history.altitudeTarget), lineStyle: { color: '#94a3b8', type: 'dashed' }, itemStyle: { color: '#94a3b8' } }
+])
+
+const futabaSeries = computed(() => [
+  { name: 'Roll', data: trimTimedSeries(droneStore.history.futabaRoll), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
+  { name: 'Pitch', data: trimTimedSeries(droneStore.history.futabaPitch), lineStyle: { color: '#f97316' }, itemStyle: { color: '#f97316' } },
+  { name: 'Yaw', data: trimTimedSeries(droneStore.history.futabaYaw), lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' } }
+])
+
+const attitudeTrendSeries = computed(() => [
+  { name: 'Roll', data: trimTimedSeries(droneStore.history.rollActual, 160), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
+  { name: 'Pitch', data: trimTimedSeries(droneStore.history.pitchActual, 160), lineStyle: { color: '#0ea5e9' }, itemStyle: { color: '#0ea5e9' } },
+  { name: 'Yaw', data: trimTimedSeries(droneStore.history.yawActual, 160), lineStyle: { color: '#f97316' }, itemStyle: { color: '#f97316' } }
+])
+
+const pathDeviationSeries = computed(() => [
+  { name: 'Error X', data: trimTimedSeries(droneStore.metricTrends.pathErrorX, 160), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
+  { name: 'Error Y', data: trimTimedSeries(droneStore.metricTrends.pathErrorY, 160), lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' } },
+  { name: 'Error Z', data: trimTimedSeries(droneStore.metricTrends.pathErrorZ, 160), lineStyle: { color: '#ef4444' }, itemStyle: { color: '#ef4444' } },
+  { name: 'Total', data: trimTimedSeries(droneStore.metricTrends.pathDeviationM, 160), lineStyle: { color: '#111827' }, itemStyle: { color: '#111827' } }
+])
+
+const trajectorySeries = computed(() => {
+  const actualPath = trimTrack(droneStore.trajectory, 220).map((point) => [point.x, point.y])
+  const targetPathSource = droneStore.localTraj.length ? droneStore.localTraj : droneStore.globalPath
+  const targetPath = trimTrack(targetPathSource, 220).map((point) => [point.x, point.y])
+
   return [
-    { name: 'Roll (φ)', data: rollData.length ? rollData : [0], lineStyle: { color: '#ff6b6b' }, itemStyle: { color: '#ff6b6b' } },
-    { name: 'Pitch (θ)', data: pitchData.length ? pitchData : [0], lineStyle: { color: '#4ecdc4' }, itemStyle: { color: '#4ecdc4' } },
-    { name: 'Yaw (ψ)', data: yawData.length ? yawData : [0], lineStyle: { color: '#45b7d1' }, itemStyle: { color: '#45b7d1' } }
+    {
+      name: '实际航迹',
+      data: actualPath,
+      lineStyle: { color: '#2563eb', width: 2.5 },
+      itemStyle: { color: '#2563eb' },
+      symbol: 'none'
+    },
+    {
+      name: '目标航迹',
+      data: targetPath,
+      lineStyle: { color: '#94a3b8', type: 'dashed', width: 2 },
+      itemStyle: { color: '#94a3b8' },
+      symbol: 'none'
+    }
   ]
 })
 
-const velocitySeries = computed(() => {
-  const vxData = droneStore.history.velocityX?.map(item => item.value) || []
-  const vyData = droneStore.history.velocityY?.map(item => item.value) || []
-  const vzData = droneStore.history.velocityZ?.map(item => item.value) || []
-  
-  return [
-    { name: 'Vx (纵向)', data: vxData.length ? vxData.slice(-100) : [0], lineStyle: { color: '#96ceb4' }, itemStyle: { color: '#96ceb4' } },
-    { name: 'Vy (横向)', data: vyData.length ? vyData.slice(-100) : [0], lineStyle: { color: '#ffeaa7' }, itemStyle: { color: '#ffeaa7' } },
-    { name: 'Vz (垂向)', data: vzData.length ? vzData.slice(-100) : [0], lineStyle: { color: '#dfe6e9' }, itemStyle: { color: '#dfe6e9' } }
-  ]
-})
+const trajectoryChartOverrides = computed(() => ({
+  xAxis: {
+    type: 'value',
+    name: 'X (m)',
+    nameLocation: 'middle',
+    nameGap: 24,
+    axisLine: { lineStyle: { color: '#94a3b8' } },
+    axisLabel: { color: '#475569' },
+    splitLine: { lineStyle: { color: '#dbe4ef', type: 'dashed' } }
+  },
+  yAxis: {
+    type: 'value',
+    name: 'Y (m)',
+    nameLocation: 'middle',
+    nameGap: 32,
+    axisLine: { lineStyle: { color: '#94a3b8' } },
+    axisLabel: { color: '#475569' },
+    splitLine: { lineStyle: { color: '#dbe4ef', type: 'dashed' } }
+  },
+  tooltip: { trigger: 'item' }
+}))
 
-const altitudeSeries = computed(() => {
-  const altitudeData = droneStore.history.altitudeActual?.map(item => item.value) || []
-  
-  return [
-    { name: '高度', data: altitudeData.length ? altitudeData.slice(-200) : [0], lineStyle: { color: '#74b9ff' }, itemStyle: { color: '#74b9ff' } }
-  ]
-})
 </script>
 
 <style scoped>
@@ -602,553 +338,248 @@ const altitudeSeries = computed(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  overflow: hidden;  /* 关键修复：确保父容器有overflow: hidden，才能让子元素滚动 */
-  background: linear-gradient(180deg, #0f0f0f 0%, #1a1a1a 100%);
-  transition: width 0.3s ease, max-width 0.3s ease;
-}
-
-.monitor-tabs-panel.maximized {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 9999;
-  width: 100vw !important;
-  max-width: none !important;
-}
-
-.monitor-tabs-panel.collapsed {
-  width: 60px;
-}
-
-/* ==================== 标签页头部 ==================== */
-.tabs-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: rgba(0, 0, 0, 0.3);
-  border-bottom: 1px solid #333;
-  padding: 0;
-  flex-shrink: 0; /* 固定头部高度 */
-  height: 50px; /* 明确设置高度 */
-}
-
-.tabs-wrapper {
-  display: flex;
-  flex: 1;
   overflow: hidden;
+  background: linear-gradient(180deg, #f8fbff 0%, #edf4fb 100%);
+  color: var(--text-primary);
 }
 
-.tab-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 16px; /* 垂直居中 */
-  height: 100%; /* 占满父容器高度 */
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  transition: all 0.3s ease;
-  user-select: none;
-  flex-shrink: 0;
+.monitor-content {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: 12px;
+  padding: 12px 12px 8px;
 }
 
-.tab-item:hover {
-  background: rgba(255, 255, 255, 0.05);
+.monitor-content.single-column {
+  grid-template-columns: 1fr;
 }
 
-.tab-item.active {
-  border-bottom-color: #00bcd4;
-  background: rgba(0, 188, 212, 0.1);
-}
-
-.tab-icon {
-  font-size: 16px;
-}
-
-.tab-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: #888;
-  transition: all 0.3s ease;
-}
-
-.tab-item.active .tab-label {
-  color: #00bcd4;
-}
-
-.panel-controls {
-  display: flex;
-  gap: 6px;
-  padding-right: 8px;
-  flex-shrink: 0;
-}
-
-.control-btn {
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  color: #666;
-  cursor: pointer;
-  border-radius: 4px;
-  transition: all 0.2s ease;
-  padding: 0;
-  flex-shrink: 0;
-}
-
-.control-btn:hover {
-  background: rgba(50, 136, 250, 0.2);
-  color: #3288fa;
-}
-
-.control-btn.active {
-  background: rgba(50, 136, 250, 0.3);
-  color: #3288fa;
-}
-
-/* ==================== 标签页内容区域 - 关键修复 ==================== */
-.tabs-content {
-  flex: 1; /* 占据剩余空间 */
-  min-height: 0; /* 关键：允许flex容器缩小和滚动 */
-  overflow: hidden; /* 隐藏内容区域的直接溢出 */
-  display: flex;
-  flex-direction: column;
-}
-
-.tabs-content.minimized {
+.monitor-content.empty-panel {
   display: none;
 }
 
-/* 滚动容器 - 关键修复（参考LeftConfigPanel） */
-.content-scroll {
-  flex: 1; /* 占据剩余空间 */
-  overflow-y: auto; /* 始终启用垂直滚动 */
-  overflow-x: hidden;
-  padding: 16px;
-  padding-right: 8px;
+.monitor-column {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
 }
 
-/* 优化滚动条样式 */
-.content-scroll::-webkit-scrollbar {
+.column-header {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-light);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 1) 0%, rgba(241, 245, 249, 0.96) 100%);
+}
+
+.column-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.column-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(37, 99, 235, 0.38) rgba(219, 228, 239, 0.7);
+}
+
+.column-scroll::-webkit-scrollbar {
   width: 8px;
 }
 
-.content-scroll::-webkit-scrollbar-track {
-  background: rgba(30, 30, 30, 0.1);
-  border-radius: 4px;
+.column-scroll::-webkit-scrollbar-track {
+  background: rgba(219, 228, 239, 0.7);
+  border-radius: 999px;
 }
 
-.content-scroll::-webkit-scrollbar-thumb {
-  background: rgba(50, 136, 250, 0.5);
-  border-radius: 4px;
-  transition: background 0.2s;
+.column-scroll::-webkit-scrollbar-thumb {
+  background: rgba(37, 99, 235, 0.38);
+  border-radius: 999px;
 }
 
-.content-scroll::-webkit-scrollbar-thumb:hover {
-  background: rgba(50, 136, 250, 0.8);
-}
-
-/* Firefox */
-.content-scroll {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(50, 136, 250, 0.5) rgba(30, 30, 30, 0.1);
-}
-
-/* ==================== 响应式调整 ==================== */
-@media (max-height: 700px) {
-  .content-scroll {
-    padding: 12px;
-  }
-  
-  .monitor-section {
-    padding: 12px;
-    margin-bottom: 12px;
-  }
-}
-
-@media (max-height: 500px) {
-  .content-scroll {
-    padding: 8px;
-  }
-  
-  .monitor-section {
-    padding: 8px;
-    margin-bottom: 8px;
-  }
-}
-
-/* ==================== 监控面板通用样式 ==================== */
+.chart-shell,
 .monitor-section {
-  background: rgba(255, 255, 255, 0.02);
-  border-radius: 8px;
-  padding: 16px;
-  border: 1px solid #333;
-  flex-shrink: 0; /* 防止内容被压缩 */
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }
 
-.monitor-section:last-child {
-  margin-bottom: 0;
-}
-
-.section-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #00bcd4;
-  margin-bottom: 16px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-}
-
-/* ==================== 控制标签页 ==================== */
-.control-charts-section {
-  flex-shrink: 0;
-  margin-bottom: 20px;
-}
-
-/* PWM显示 */
-.pwm-display {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-}
-
-.pwm-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding: 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 6px;
-}
-
-.pwm-label {
-  font-size: 11px;
-  color: #888;
-  margin-bottom: 6px;
-}
-
-.pwm-value {
-  font-size: 20px;
-  font-weight: bold;
-  color: #00bcd4;
-  font-family: 'Courier New', monospace;
-}
-
-/* 遥控输入 */
-.remote-control-display {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.control-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-.control-item:last-child {
-  border-bottom: none;
-}
-
-.control-label {
-  font-size: 12px;
-  color: #808080;
-}
-
-.control-value {
-  font-size: 16px;
-  font-weight: bold;
-  color: #ffffff;
-  font-family: 'Courier New', monospace;
-}
-
-.status-badge {
-  padding: 4px 12px;
+.monitor-section {
+  background: #ffffff;
+  border: 1px solid var(--border-light);
   border-radius: 12px;
-  font-size: 12px;
-}
-
-.status-badge.active {
-  background: rgba(46, 213, 115, 0.2);
-  color: #2ed573;
-}
-
-.status-badge.inactive {
-  background: rgba(255, 82, 82, 0.2);
-  color: #ff5252;
-}
-
-/* ESC参数显示 */
-.esc-display {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 10px;
-}
-
-.esc-item {
-  display: flex;
-  flex-direction: column;
   padding: 10px;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 6px;
-  border: 1px solid rgba(0, 188, 212, 0.2);
 }
 
-.esc-motor-label {
+.section-subtitle {
   font-size: 12px;
-  font-weight: bold;
-  color: #00bcd4;
+  font-weight: 700;
+  color: var(--accent-color);
   margin-bottom: 8px;
-  text-align: center;
 }
 
-.esc-data-grid {
+.state-section {
+  padding: 8px;
+}
+
+.state-columns {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 8px;
-}
-
-.esc-data-item {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-
-.esc-data-label {
-  font-size: 9px;
-  color: #666;
-  text-transform: uppercase;
-}
-
-.esc-data-value {
-  font-size: 13px;
-  font-weight: bold;
-  color: #fff;
-  font-family: 'Courier New', monospace;
-}
-
-.esc-data-value.error {
-  color: #ff5252;
-}
-
-.esc-data-value.rpm {
-  color: #4ecdc4;
-}
-
-.esc-data-value.power {
-  color: #ffc107;
-}
-
-/* 避障显示 */
-.avoidance-display {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.status-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 6px;
-}
-
-.status-label {
-  font-size: 12px;
-  color: #888;
-}
-
-.status-value {
-  font-size: 14px;
-  font-weight: bold;
-  padding: 4px 12px;
-  border-radius: 4px;
-}
-
-.status-value.active {
-  background: rgba(46, 213, 115, 0.2);
-  color: #2ed573;
-}
-
-.status-value.inactive {
-  background: rgba(255, 82, 82, 0.2);
-  color: #ff5252;
-}
-
-/* ==================== 导航标签页 ==================== */
-.navigation-charts-section {
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-bottom: 20px;
-}
-
-/* GCS数据显示 */
-.gcs-display {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
 }
 
-.gcs-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 6px;
-}
-
-.gcs-value.error {
-  color: #ff5252;
-}
-
-.gcs-value.ok {
-  color: #2ed573;
-}
-
-/* 姿态、速度、位置、角速度显示 */
-.attitude-display,
-.angular-display,
-.position-display,
-.speed-display,
-.gnc-display {
+.state-column {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-}
-
-.gnc-display {
-  grid-template-columns: repeat(2, 1fr);
-}
-
-.attitude-item,
-.angular-item,
-.position-item,
-.speed-item,
-.gnc-item {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 6px;
-}
-
-.attitude-label,
-.angular-label,
-.position-label,
-.speed-label,
-.gnc-label {
-  font-size: 11px;
-  color: #888;
-  text-transform: uppercase;
-}
-
-.attitude-value,
-.angular-value,
-.position-value,
-.speed-value,
-.gnc-value {
-  font-size: 18px;
-  font-weight: bold;
-  color: #00bcd4;
-  font-family: 'Courier New', monospace;
-}
-
-/* ==================== 系统性能标签页 ==================== */
-.system-tab {
-  display: flex;
-  flex-direction: column;
-}
-
-.dsm-recording-section {
-  padding: 16px;
-  background: rgba(0, 188, 212, 0.05);
-  border: 1px solid rgba(0, 188, 212, 0.3);
-  border-radius: 8px;
-  flex-shrink: 0;
-}
-
-.recording-status {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-  padding: 8px 12px;
-  background: rgba(255, 255, 255, 0.03);
-  border-radius: 4px;
-}
-
-.status-indicator {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  animation: pulse 2s infinite;
-}
-
-.status-idle {
-  background: #666;
-  animation: none;
-}
-
-.status-recording {
-  background: #ff5252;
-}
-
-.status-disconnected {
-  background: #ff9800;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-.status-text {
-  font-size: 12px;
-  color: #b0b0b0;
-}
-
-.recording-controls {
-  display: flex;
+  grid-template-rows: repeat(3, minmax(0, 1fr));
   gap: 10px;
-  margin-bottom: 12px;
 }
 
-.btn-icon {
-  font-size: 14px;
+.state-column .metric-card {
+  min-height: 74px;
 }
 
-.session-info {
+.gcs-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metric-card {
   padding: 10px;
-  background: rgba(0, 188, 212, 0.1);
-  border-radius: 6px;
+  border-radius: 10px;
+  background: var(--panel-muted);
+  border: 1px solid var(--border-light);
 }
 
-.session-label {
-  font-size: 10px;
-  color: #00bcd4;
-  margin-bottom: 4px;
-  text-transform: uppercase;
+.compact-card {
+  min-height: 64px;
 }
 
-.session-id {
-  font-size: 12px;
-  color: #ffffff;
-  font-family: 'Courier New', monospace;
-  word-break: break-all;
+.metric-label,
+.metric-unit {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.metric-value {
+  margin-top: 4px;
+  font-size: 17px;
+  font-weight: 700;
+  line-height: 1.15;
+  font-family: 'Consolas', 'Monaco', monospace;
+  color: var(--text-primary);
+}
+
+.compact-value {
+  font-size: 15px;
+}
+
+.metric-unit {
+  margin-top: 2px;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.chart-cell {
+  min-height: 0;
+  border: 1px solid var(--border-light);
+  border-radius: 10px;
+  background: rgba(248, 250, 252, 0.72);
+  overflow: hidden;
+}
+
+.chart-span-2 {
+  grid-column: span 2;
+}
+
+.trend-band {
+  flex: 0 0 232px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0 12px 12px;
+}
+
+.trend-card {
+  min-height: 0;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.pwm-shell :deep(.chart-header),
+.chart-cell :deep(.chart-header),
+.trend-card :deep(.chart-header) {
+  padding: 10px 12px 6px;
+}
+
+.pwm-shell :deep(.chart-title),
+.pwm-shell :deep(.chart-unit),
+.chart-cell :deep(.chart-title),
+.chart-cell :deep(.chart-unit),
+.trend-card :deep(.chart-title),
+.trend-card :deep(.chart-unit) {
+  font-size: 11px;
+}
+
+.pwm-shell :deep(.chart-container) {
+  height: 118px !important;
+  min-height: 118px !important;
+}
+
+.status-ok {
+  color: var(--success-color);
+}
+
+.status-warn {
+  color: var(--warning-color);
+}
+
+.status-danger {
+  color: var(--error-color);
+}
+
+.system-column {
+  min-width: 320px;
+}
+
+@media (max-width: 1400px) {
+  .monitor-content {
+    grid-template-columns: 1fr;
+  }
+
+  .trend-band {
+    grid-template-columns: 1fr;
+    flex-basis: 620px;
+  }
+}
+
+@media (max-width: 760px) {
+  .state-columns,
+  .gcs-grid,
+  .chart-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chart-span-2 {
+    grid-column: span 1;
+  }
+
+  .state-column {
+    grid-template-rows: none;
+  }
 }
 </style>

@@ -5,19 +5,40 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { useWebSocket } from '@/composables/useWebSocket'
+import backend from '@/api/backend'
+import { buildApiUrl, getBackendBaseUrl } from '@/api/backend'
 
 // WebSocket composable
 let wsInstance = null
+
+function getWebSocketUrl() {
+  const backendBaseUrl = getBackendBaseUrl()
+
+  try {
+    const backendUrl = new URL(backendBaseUrl)
+    backendUrl.protocol = backendUrl.protocol === 'https:' ? 'wss:' : 'ws:'
+    backendUrl.pathname = '/ws/drone'
+    backendUrl.search = ''
+    backendUrl.hash = ''
+    return backendUrl.toString()
+  } catch (error) {
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    const host = window.location.hostname || 'localhost'
+    return `${protocol}://${host}:8000/ws/drone`
+  }
+}
 
 export const useDroneStore = defineStore('drone', {
   state: () => ({
     // ========== 连接状态 ==========
     connected: false,
     connecting: false,
+    udpConnected: false,
+    lastBackendMessage: null,
     
     // ========== ExtY_FCS_T 飞控完整数据结构 ==========
     // PWM输出数据 (ExtY_FCS_OUTPUTPWM_T)
-    pwms: [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],  // 8个通道的PWM值
+    pwms: [0, 0, 0, 0, 0, 0, 0, 0],  // 8个通道的归一化PWM比值
     
     // 飞控状态 (ExtY_FCS_STATES_T)
     fcsStates: {
@@ -51,17 +72,10 @@ export const useDroneStore = defineStore('drone', {
       GNCBus_CmdValue_Vy_cmd: 0,   // Y速度指令
       GNCBus_CmdValue_height_cmd: 0,  // 高度指令
       GNCBus_CmdValue_psi_cmd: 0,  // 偏航指令
-      pos_x: 0,
-      pos_y: 0,
-      pos_z: 0,
-      vel_x: 0,
-      vel_y: 0,
-      vel_z: 0,
-      euler_phi: 0,
-      euler_theta: 0,
-      euler_psi: 0,
-      control_mode: 0,
-      flight_mode: 0
+      GNCBus_TokenMode_rud_state: 0,
+      GNCBus_TokenMode_ail_state: 0,
+      GNCBus_TokenMode_ele_state: 0,
+      GNCBus_TokenMode_col_state: 0
     },
     
     // 避障标志 (ExtY_FCS_AVOIFLAG_T)
@@ -166,14 +180,6 @@ export const useDroneStore = defineStore('drone', {
       paramMax: 0
     },
     
-    // ========== 雷达状态 ==========
-    lidarStatus: {
-      isRunning: false,
-      lidarConnected: false,
-      imuDataValid: false,
-      motionCompActive: false
-    },
-    
     // ========== 规划系统遥测 ==========
     planningTelemetry: {
       seqId: 0,
@@ -188,15 +194,30 @@ export const useDroneStore = defineStore('drone', {
       localTrajCount: 0,
       obstacleCount: 0
     },
+
+    actualPose: {
+      x: 0,
+      y: 0,
+      z: 0,
+      pitch: 0,
+      roll: 0,
+      yaw: 0,
+      timestamp: null,
+      source: 'unknown'
+    },
+    actualFlightOrigin: {
+      lat: null,
+      lon: null,
+      alt: null
+    },
     
     // ========== 航迹数据 ==========
-    trajectory: [],     // 历史轨迹点 [{x, y, z, timestamp}]
+    trajectory: [],     // 实际飞行轨迹点（飞控遥测）[{x, y, z, timestamp}]
     globalPath: [],  // 全局路径点 [{x, y, z}]
     localTraj: [],  // 局部轨迹点 [{x, y, z}]
     
     // ========== 障碍物数据 ==========
     obstacles: [],      // 障碍物列表 (Planning Telemetry)
-    lidarObstacles: [], // 雷达感知障碍物列表 (ObstacleOutput_T)
     
     // ========== 日志数据 ==========
     logs: [],          // 系统日志列表
@@ -225,15 +246,28 @@ export const useDroneStore = defineStore('drone', {
       velocityX: [{ value: 0, timestamp: Date.now() }],
       velocityY: [{ value: 0, timestamp: Date.now() }],
       velocityZ: [{ value: 0, timestamp: Date.now() }],
+      // 角速度历史数据
+      angularRateP: [{ value: 0, timestamp: Date.now() }],
+      angularRateQ: [{ value: 0, timestamp: Date.now() }],
+      angularRateR: [{ value: 0, timestamp: Date.now() }],
+      // 控制令牌状态
+      tokenRud: [{ value: 0, timestamp: Date.now() }],
+      tokenAil: [{ value: 0, timestamp: Date.now() }],
+      tokenEle: [{ value: 0, timestamp: Date.now() }],
+      tokenCol: [{ value: 0, timestamp: Date.now() }],
+      // 遥控输入历史
+      futabaRoll: [{ value: 0, timestamp: Date.now() }],
+      futabaPitch: [{ value: 0, timestamp: Date.now() }],
+      futabaYaw: [{ value: 0, timestamp: Date.now() }],
       // PWM历史数据（添加初始默认值）
-      pwm1: [{ value: 1000, timestamp: Date.now() }],
-      pwm2: [{ value: 1000, timestamp: Date.now() }],
-      pwm3: [{ value: 1000, timestamp: Date.now() }],
-      pwm4: [{ value: 1000, timestamp: Date.now() }],
-      pwm5: [{ value: 1000, timestamp: Date.now() }],
-      pwm6: [{ value: 1000, timestamp: Date.now() }],
-      pwm7: [{ value: 1000, timestamp: Date.now() }],
-      pwm8: [{ value: 1000, timestamp: Date.now() }]
+      pwm1: [{ value: 0, timestamp: Date.now() }],
+      pwm2: [{ value: 0, timestamp: Date.now() }],
+      pwm3: [{ value: 0, timestamp: Date.now() }],
+      pwm4: [{ value: 0, timestamp: Date.now() }],
+      pwm5: [{ value: 0, timestamp: Date.now() }],
+      pwm6: [{ value: 0, timestamp: Date.now() }],
+      pwm7: [{ value: 0, timestamp: Date.now() }],
+      pwm8: [{ value: 0, timestamp: Date.now() }]
     },
     
     // ========== KPI历史数据（用于KPI图表显示）==========
@@ -244,6 +278,272 @@ export const useDroneStore = defineStore('drone', {
       mission: [],         // 任务效能历史
       performance: []      // 飞行性能历史
     },
+
+    metricTrends: {
+      planningTimeMs: [{ value: 0, timestamp: Date.now() }],
+      controlJitterMs: [{ value: 0, timestamp: Date.now() }],
+      trackingRmse: [{ value: 0, timestamp: Date.now() }],
+      obstacleCount: [{ value: 0, timestamp: Date.now() }],
+      pathDeviationM: [{ value: 0, timestamp: Date.now() }],
+      pathErrorX: [{ value: 0, timestamp: Date.now() }],
+      pathErrorY: [{ value: 0, timestamp: Date.now() }],
+      pathErrorZ: [{ value: 0, timestamp: Date.now() }]
+    },
+
+    // ========== 新版实时视图状态（来自结构化推送）==========
+    realtimeViews: {
+      flightState: {
+        latitude: 0,
+        longitude: 0,
+        height: 0,
+        vx: 0,
+        vy: 0,
+        vz: 0,
+        p_rate: 0,
+        q_rate: 0,
+        r_rate: 0,
+        phi: 0,
+        theta: 0,
+        psi: 0,
+        raw: {}
+      },
+      planningState: {
+        cmd_idx: 0,
+        mission_id: 0,
+        mission_value: 0,
+        gcs_link_fail: false,
+        avoid_enabled: false,
+        avoid_triggered: false,
+        guide_flag: false,
+        next_waypoint: 0,
+        next_segment_index: 0,
+        ab_next_waypoint: 0,
+        planning_status: 0,
+        global_path_count: 0,
+        local_traj_count: 0,
+        obstacle_count: 0,
+        current_pos_x: 0,
+        current_pos_y: 0,
+        current_pos_z: 0
+      },
+      systemPerformance: {
+        perception_latency_ms: 0,
+        planning_time_ms: null,
+        tracking_rmse: null,
+        control_jitter_ms: null,
+        planner_cycle_hz: null,
+        radar_fps: null,
+        attitude_peak_phi_deg: 0,
+        obstacle_count: 0,
+        avoid_trigger_count: 0,
+        mission_switch_count: 0,
+        cmd_idx: 0,
+        mission_id: 0,
+        esc_power_pct: 0,
+        esc_power_pct_avg: 0,
+        esc_rpm_avg: 0,
+        esc_rpm_max: 0,
+        esc_power_max: 0,
+        downlink_loss_rate: 0,
+        trusted: {},
+        derived: {},
+        metric_quality: {}
+      },
+      updatedAt: null
+    },
+
+    experimentContext: {
+      caseId: '',
+      planCaseId: '',
+      selectedPlanCaseId: '',
+      figureRunId: '',
+      figureBatchId: '',
+      figureBatchGroup: '',
+      figureLedgerRange: '',
+      experimentType: '',
+      chapterTarget: '',
+      lawValidationScope: '',
+      analysisRunId: '',
+      scenarioName: 'Scenario Default',
+      scenarioId: 'scenario_default',
+      scenarioSource: 'default',
+      scenarioConfidence: 0,
+      environmentClass: 'unknown',
+      obstacleDensity: 'unknown',
+      windLevel: 'unknown',
+      linkQualityLevel: 'unknown',
+      sensorQualityLevel: 'unknown',
+      missionPhase: 'idle',
+      triggerPolicy: '',
+      availableCases: [],
+      updatedAt: null,
+      caseMeta: {
+        repeatIndex: null,
+        durationSec: null,
+        evaluationWindowSec: null
+      },
+      task: {
+        plannedCmdIdx: 0,
+        effectiveCmdIdx: 0,
+        missionId: 0,
+        taskName: 'Idle',
+        taskGroup: 'idle',
+        phase: 'idle',
+        source: 'default'
+      },
+      architecture: {
+        architectureId: '',
+        displayName: 'Baseline Balanced',
+        mappingProfile: '',
+        adaptationMode: '',
+        focus: ''
+      },
+      architectureProfiles: {
+        baselineProfiles: [],
+        candidateProfiles: [],
+        researchProfiles: []
+      },
+      disturbanceTags: [],
+      heuristicTags: []
+    },
+
+    pipelineStatus: {
+      rawRecordingStatus: 'waiting',
+      standardFilesStatus: 'missing',
+      dsmStatus: 'waiting',
+      evaluationStatus: 'waiting',
+      optimizationStatus: 'waiting',
+      archiveStatus: 'waiting',
+      figureAssetReady: false,
+      figureBatchManifestPath: '',
+      standardFiles: {
+        fcsTelemetry: 'missing',
+        planningTelemetry: 'missing',
+        radarData: 'missing',
+        busTraffic: 'missing',
+        cameraData: 'missing'
+      },
+      updatedAt: null
+    },
+
+    dsmSummary: {
+      nodeCount: null,
+      edgeCount: null,
+      crossModuleInteractions: null,
+      totalBusBytes: null,
+      avgCrossLatency: null,
+      globalStatsReady: false,
+      figureRunId: '',
+      figureBatchId: '',
+      figureBatchGroup: '',
+      figureLedgerRange: '',
+      experimentType: '',
+      chapterTarget: '',
+      lawValidationScope: '',
+      analysisRunId: '',
+      figureAssetReady: false,
+      figureBatchManifestPath: '',
+      updatedAt: null
+    },
+
+    evaluationSummary: {
+      baselineAllocationId: '',
+      candidateAllocationId: '',
+      finalCompositeScore: null,
+      constraintViolationCount: null,
+      domainScores: {},
+      baselineDelta: {},
+      evaluationReady: false,
+      figureRunId: '',
+      figureBatchId: '',
+      figureBatchGroup: '',
+      figureLedgerRange: '',
+      experimentType: '',
+      chapterTarget: '',
+      lawValidationScope: '',
+      analysisRunId: '',
+      figureAssetReady: false,
+      figureBatchManifestPath: '',
+      updatedAt: null
+    },
+
+    architectureRecommendation: {
+      currentArchitecture: '',
+      recommendedArchitecture: '',
+      scoreDelta: null,
+      crossCountDelta: null,
+      powerDelta: null,
+      constraintPass: null,
+      riskText: '',
+      triggerEvidence: [],
+      candidates: [],
+      figureRunId: '',
+      figureBatchId: '',
+      figureBatchGroup: '',
+      figureLedgerRange: '',
+      experimentType: '',
+      chapterTarget: '',
+      lawValidationScope: '',
+      analysisRunId: '',
+      figureAssetReady: false,
+      figureBatchManifestPath: '',
+      updatedAt: null
+    },
+
+    figureAssetStatus: {
+      figureRunId: '',
+      figureBatchId: '',
+      figureBatchGroup: '',
+      figureLedgerRange: '',
+      experimentType: '',
+      chapterTarget: '',
+      lawValidationScope: '',
+      analysisRunId: '',
+      figureAssetReady: false,
+      figureBatchManifestPath: '',
+      updatedAt: null
+    },
+
+    captureState: {
+      recording: false,
+      inputPorts: [],
+      flightControlRateHz: 0,
+      planningRateHz: 0,
+      radarRateHz: 0,
+      perceptionRateHz: 0,
+      packetCounts: {},
+      lastPacketTs: null,
+      parseErrorCount: 0,
+      lastError: '',
+      outputDir: '',
+      bytesWritten: 0
+    },
+
+    dataQuality: {
+      parseErrorCount: 0,
+      windowMissingCount: 0,
+      planningGapMs: null,
+      flightControlGapMs: null,
+      radarGapMs: null,
+      radarMissing: true,
+      healthLevel: 'unknown',
+      healthText: 'waiting for stream'
+    },
+
+    // ========== 新版KPI汇总（来自kpi_update）==========
+    kpiSummary: {
+      dimensions: {
+        computing: null,
+        communication: null,
+        energy: null,
+        mission: null,
+        performance: null
+      },
+      indicators: {},
+      windowMetrics: {},
+      overallScore: null,
+      updatedAt: null
+    },
     
     // ========== 数据记录信息 ==========
     dataRecording: {
@@ -251,7 +551,10 @@ export const useDroneStore = defineStore('drone', {
       recordingStartTime: null, // 记录开始时间
       recordCount: 0,        // 记录的数据包数量
       recordFilePath: '',      // 记录文件路径
-      lastRecordTime: null     // 最后记录时间
+      lastRecordTime: null,     // 最后记录时间
+      sessionId: '',
+      totalBytes: 0,
+      functionStats: []
     },
     
     // ========== 系统模式 ==========
@@ -287,9 +590,9 @@ export const useDroneStore = defineStore('drone', {
     // ========== 配置数据 ==========
     config: {
       protocol: 'udp',
-      hostIp: '192.168.1.1',
-      hostPort: 18504,
-      remoteIp: '192.168.1.10',
+      hostIp: '192.168.16.13',
+      hostPort: 30509,
+      remoteIp: '192.168.16.116',
       sendOnlyPort: 18506,
       lidarSendPort: 18507,
       planningSendPort: 18510,
@@ -304,6 +607,8 @@ export const useDroneStore = defineStore('drone', {
   getters: {
     // 连接状态
     isConnected: (state) => state.connected,
+    isUdpConnected: (state) => state.udpConnected,
+    canSendCommands: (state) => state.connected && state.udpConnected,
     isConnectedText: (state) => state.connected ? '已连接' : '未连接',
     
     // 是否已解算
@@ -334,6 +639,413 @@ export const useDroneStore = defineStore('drone', {
   },
   
   actions: {
+    _safeNumber(value, fallback = 0) {
+      const parsed = Number(value)
+      return Number.isFinite(parsed) ? parsed : fallback
+    },
+
+    _looksLikeRadians(value) {
+      return Math.abs(value) <= (2 * Math.PI + 0.5)
+    },
+
+    _normalizeAngleToRadians(value) {
+      const numericValue = this._safeNumber(value)
+      if (this._looksLikeRadians(numericValue)) {
+        return numericValue
+      }
+      return numericValue * Math.PI / 180
+    },
+
+    _normalizeAngleToDegrees(value) {
+      const numericValue = this._safeNumber(value)
+      if (this._looksLikeRadians(numericValue)) {
+        return numericValue * 180 / Math.PI
+      }
+      return numericValue
+    },
+
+    _degreesToRadians(value) {
+      return this._safeNumber(value) * Math.PI / 180
+    },
+
+    _buildCaseId(sessionId = '') {
+      const dateMatch = String(sessionId || '').match(/(\d{8})/)
+      const dateToken = dateMatch?.[1] || new Date().toISOString().slice(0, 10).replace(/-/g, '')
+      return `case001_${dateToken}`
+    },
+
+    _pickDefinedValue(...values) {
+      for (const value of values) {
+        if (value !== undefined && value !== null && value !== '') {
+          return value
+        }
+      }
+      return undefined
+    },
+
+    _extractFigureSemantics(...sources) {
+      const mappings = [
+        ['figure_run_id', 'figureRunId'],
+        ['figure_batch_id', 'figureBatchId'],
+        ['figure_batch_group', 'figureBatchGroup'],
+        ['figure_ledger_range', 'figureLedgerRange'],
+        ['experiment_type', 'experimentType'],
+        ['chapter_target', 'chapterTarget'],
+        ['law_validation_scope', 'lawValidationScope'],
+        ['analysis_run_id', 'analysisRunId'],
+        ['figure_asset_ready', 'figureAssetReady'],
+        ['figure_batch_manifest_path', 'figureBatchManifestPath']
+      ]
+      const figureContext = {}
+
+      mappings.forEach(([snakeKey, camelKey]) => {
+        const candidates = []
+        sources.forEach((source) => {
+          if (!source || typeof source !== 'object') {
+            return
+          }
+          candidates.push(source[snakeKey], source[camelKey])
+        })
+        const value = this._pickDefinedValue(...candidates)
+        if (value !== undefined) {
+          figureContext[camelKey] = value
+        }
+      })
+
+      return figureContext
+    },
+
+    _buildFigurePatch(figureContext = {}) {
+      const patch = {}
+      const fields = [
+        'figureRunId',
+        'figureBatchId',
+        'figureBatchGroup',
+        'figureLedgerRange',
+        'experimentType',
+        'chapterTarget',
+        'lawValidationScope',
+        'analysisRunId',
+        'figureAssetReady',
+        'figureBatchManifestPath'
+      ]
+
+      fields.forEach((field) => {
+        if (figureContext[field] !== undefined) {
+          patch[field] = figureContext[field]
+        }
+      })
+
+      return patch
+    },
+
+    _applyFigureContext(figureContext = {}) {
+      const figurePatch = this._buildFigurePatch(figureContext)
+      const contextFields = [
+        'figureRunId',
+        'figureBatchId',
+        'figureBatchGroup',
+        'figureLedgerRange',
+        'experimentType',
+        'chapterTarget',
+        'lawValidationScope',
+        'analysisRunId'
+      ]
+      const nextContext = { ...this.experimentContext }
+      let changed = false
+
+      contextFields.forEach((field) => {
+        if (figurePatch[field] !== undefined && nextContext[field] !== figurePatch[field]) {
+          nextContext[field] = figurePatch[field]
+          changed = true
+        }
+      })
+
+      if (changed) {
+        nextContext.updatedAt = Date.now()
+        this.experimentContext = nextContext
+      }
+
+      return figurePatch
+    },
+
+    _buildMissionPhase(missionId = 0) {
+      const phaseMap = {
+        0: 'idle',
+        1: 'manual',
+        2: 'standby',
+        3: 'guided',
+        4: 'takeoff',
+        5: 'cruise',
+        6: 'descent',
+        14: 'auto_takeoff',
+        15: 'auto_landing',
+        16: 'hover',
+        24: 'avoidance_enabled',
+        25: 'avoidance_disabled'
+      }
+      const normalizedMissionId = this._safeNumber(missionId, 0)
+      return phaseMap[normalizedMissionId] || `mission_${normalizedMissionId}`
+    },
+
+    _pushBoundedHistory(targetKey, payload, maxPoints = 120) {
+      if (!this.kpiHistory[targetKey] || !payload) {
+        return
+      }
+
+      this.kpiHistory[targetKey].push(payload)
+      if (this.kpiHistory[targetKey].length > maxPoints) {
+        this.kpiHistory[targetKey] = this.kpiHistory[targetKey].slice(-maxPoints)
+      }
+    },
+
+    _pushMetricTrend(targetKey, value, timestamp = Date.now(), maxPoints = 120) {
+      if (!this.metricTrends[targetKey]) {
+        return
+      }
+
+      if (value === null || value === undefined || value === '') {
+        return
+      }
+
+      const numericValue = Number(value)
+      if (!Number.isFinite(numericValue)) {
+        return
+      }
+
+      this.metricTrends[targetKey].push({ value: numericValue, timestamp })
+      if (this.metricTrends[targetKey].length > maxPoints) {
+        this.metricTrends[targetKey] = this.metricTrends[targetKey].slice(-maxPoints)
+      }
+    },
+
+    _pushHistoryPoint(targetKey, value, timestamp = Date.now(), maxPoints = 500) {
+      if (!this.history[targetKey]) {
+        return
+      }
+
+      const numericValue = Number(value)
+      if (!Number.isFinite(numericValue)) {
+        return
+      }
+
+      this.history[targetKey].push({ value: numericValue, timestamp })
+      if (this.history[targetKey].length > maxPoints) {
+        this.history[targetKey] = this.history[targetKey].slice(-maxPoints)
+      }
+    },
+
+    _extractPathPoint(point = {}) {
+      return {
+        x: this._safeNumber(point.x ?? point.pos_x ?? point.current_pos_x ?? point[0]),
+        y: this._safeNumber(point.y ?? point.pos_y ?? point.current_pos_y ?? point[1]),
+        z: this._safeNumber(point.z ?? point.pos_z ?? point.current_pos_z ?? point[2])
+      }
+    },
+
+    _computeMinPathDistance(referencePoint, path = []) {
+      if (!referencePoint || !Array.isArray(path) || !path.length) {
+        return null
+      }
+
+      let minDistance = Number.POSITIVE_INFINITY
+      path.forEach((item) => {
+        const candidate = this._extractPathPoint(item)
+        const distance = Math.sqrt(
+          Math.pow(referencePoint.x - candidate.x, 2) +
+          Math.pow(referencePoint.y - candidate.y, 2) +
+          Math.pow(referencePoint.z - candidate.z, 2)
+        )
+        if (distance < minDistance) {
+          minDistance = distance
+        }
+      })
+
+      return Number.isFinite(minDistance) ? minDistance : null
+    },
+
+    _findNearestPathPoint(referencePoint, path = []) {
+      if (!referencePoint || !Array.isArray(path) || !path.length) {
+        return null
+      }
+
+      let nearestPoint = null
+      let minDistance = Number.POSITIVE_INFINITY
+
+      path.forEach((item) => {
+        const candidate = this._extractPathPoint(item)
+        const distance = Math.sqrt(
+          Math.pow(referencePoint.x - candidate.x, 2) +
+          Math.pow(referencePoint.y - candidate.y, 2) +
+          Math.pow(referencePoint.z - candidate.z, 2)
+        )
+        if (distance < minDistance) {
+          minDistance = distance
+          nearestPoint = candidate
+        }
+      })
+
+      return nearestPoint
+    },
+
+    _getActualFlightReferencePoint() {
+      if (this.actualPose.timestamp === null) {
+        return null
+      }
+
+      return {
+        x: this._safeNumber(this.actualPose.x),
+        y: this._safeNumber(this.actualPose.y),
+        z: this._safeNumber(this.actualPose.z)
+      }
+    },
+
+    _hasValidGeoCoordinate(lat, lon) {
+      const latitude = Number(lat)
+      const longitude = Number(lon)
+
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        return false
+      }
+
+      if (Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
+        return false
+      }
+
+      return !(Math.abs(latitude) < 1e-6 && Math.abs(longitude) < 1e-6)
+    },
+
+    _buildPlanningFallbackPose(timestamp = Date.now()) {
+      const x = Number(this.planningTelemetry.currentPosX)
+      const y = Number(this.planningTelemetry.currentPosY)
+      const z = Number(this.planningTelemetry.currentPosZ)
+
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+        return null
+      }
+
+      if (x === 0 && y === 0 && z === 0) {
+        return null
+      }
+
+      return {
+        x,
+        y,
+        z,
+        pitch: this._safeNumber(this.attitude.pitch),
+        roll: this._safeNumber(this.attitude.roll),
+        yaw: this._safeNumber(this.attitude.yaw),
+        timestamp,
+        source: 'planning_telemetry'
+      }
+    },
+
+    _projectGeoToLocal(lat, lon, alt = 0) {
+      const latitude = Number(lat)
+      const longitude = Number(lon)
+      const altitude = this._safeNumber(alt)
+
+      if (!this._hasValidGeoCoordinate(latitude, longitude)) {
+        return null
+      }
+
+      if (this.actualFlightOrigin.lat === null || this.actualFlightOrigin.lon === null) {
+        this.actualFlightOrigin = {
+          lat: latitude,
+          lon: longitude,
+          alt: altitude
+        }
+      }
+
+      const originLat = Number(this.actualFlightOrigin.lat)
+      const originLon = Number(this.actualFlightOrigin.lon)
+      const originAlt = this._safeNumber(this.actualFlightOrigin.alt, 0)
+      const latScale = 111320
+      const lonScale = 111320 * Math.cos((originLat * Math.PI) / 180)
+
+      return {
+        x: (longitude - originLon) * lonScale,
+        y: (latitude - originLat) * latScale,
+        z: altitude - originAlt
+      }
+    },
+
+    _buildActualFlightPose(timestamp = Date.now()) {
+      const projected = this._projectGeoToLocal(
+        this.fcsStates.states_lat,
+        this.fcsStates.states_lon,
+        this.fcsStates.states_height
+      )
+      if (projected) {
+        return {
+          ...projected,
+          pitch: this._safeNumber(this.attitude.pitch),
+          roll: this._safeNumber(this.attitude.roll),
+          yaw: this._safeNumber(this.attitude.yaw),
+          timestamp,
+          source: 'fcs_states'
+        }
+      }
+
+      return this._buildPlanningFallbackPose(timestamp)
+    },
+
+    _updateActualPoseFromTelemetry(timestamp = Date.now()) {
+      const pose = this._buildActualFlightPose(timestamp)
+      if (!pose) {
+        return null
+      }
+
+      this.actualPose = pose
+      this.addTrajectoryPoint(pose.x, pose.y, pose.z, timestamp)
+      return pose
+    },
+
+    _updatePathDeviationTrend(timestamp = Date.now()) {
+      const referencePoint = this._getActualFlightReferencePoint()
+
+      if (!referencePoint) {
+        return
+      }
+
+      const nearestLocalPoint = this._findNearestPathPoint(referencePoint, this.localTraj)
+      const nearestGlobalPoint = this._findNearestPathPoint(referencePoint, this.globalPath)
+      const targetPoint = nearestLocalPoint || nearestGlobalPoint
+
+      if (!targetPoint) {
+        return
+      }
+
+      const errorX = targetPoint.x - referencePoint.x
+      const errorY = targetPoint.y - referencePoint.y
+      const errorZ = targetPoint.z - referencePoint.z
+      const totalError = Math.sqrt(errorX ** 2 + errorY ** 2 + errorZ ** 2)
+
+      this._pushMetricTrend('pathErrorX', errorX, timestamp)
+      this._pushMetricTrend('pathErrorY', errorY, timestamp)
+      this._pushMetricTrend('pathErrorZ', errorZ, timestamp)
+      this._pushMetricTrend('pathDeviationM', totalError, timestamp)
+    },
+
+    async sendRemoteCommand(cmdId, cmdName) {
+      if (!this.connected) {
+        this.addLog('未连接到后端，无法发送指令', 'warning')
+        return null
+      }
+
+      if (!this.udpConnected) {
+        this.addLog('UDP未连接，指令不会发往机载端', 'warning')
+        return null
+      }
+
+      this.gcsData.Tele_GCS_CmdIdx = cmdId
+
+      return await this.sendCommandREST('cmd_idx', {
+        cmdId,
+        name: cmdName
+      })
+    },
+
     /**
      * 初始化 WebSocket 连接
      * 注意：此方法应在组件的 setup() 中调用，不能在 action 中使用生命周期钩子
@@ -346,7 +1058,7 @@ export const useDroneStore = defineStore('drone', {
         this.disconnect()
       }
       
-      wsInstance = useWebSocket('ws://localhost:8000/ws/drone')
+      wsInstance = useWebSocket(getWebSocketUrl())
       
       // 注册回调函数（使用on方法，避免覆盖）
       wsInstance.onOpen(() => {
@@ -366,11 +1078,12 @@ export const useDroneStore = defineStore('drone', {
       wsInstance.onError((error) => {
         console.error('[Store] WebSocket 错误:', error)
         this.connecting = false
-        this.addLog(`WebSocket 错误: ${error}`, 'error')
+        const errorText = error?.message || error?.type || '连接异常'
+        this.addLog(`WebSocket 错误: ${errorText}`, 'error')
       })
       
       wsInstance.onMessage((message) => {
-        console.log('[Store] WebSocket收到消息')
+        // console.log('[Store] WebSocket收到消息')
         this.handleMessage(message)
       })
       
@@ -383,9 +1096,11 @@ export const useDroneStore = defineStore('drone', {
      */
     disconnect() {
       if (wsInstance) {
-        wsInstance.close()
+        wsInstance.disconnect()
         wsInstance = null
       }
+      this.connected = false
+      this.connecting = false
     },
     
     /**
@@ -415,51 +1130,53 @@ export const useDroneStore = defineStore('drone', {
     handleMessage(message) {
       try {
         const data = typeof message === 'string' ? JSON.parse(message) : message
+        this.lastBackendMessage = data
         
-        console.log('[Store] 收到WebSocket消息:', data.type, data)
+        // Console log removed for performance
+        // console.log('[Store] 收到WebSocket消息:', data.type, data)
         
         // 处理UDP数据包装类型
         if (data.type === 'udp_data') {
           const innerType = data.data?.type || 'unknown'
           const innerData = data.data?.data || data.data || {}
           
-          console.log('[Store] 解析UDP数据，内部类型:', innerType, '内部数据:', innerData)
+          // console.log('[Store] 解析UDP数据，内部类型:', innerType, '内部数据:', innerData)
           
           switch (innerType) {
             case 'fcs_states':
               this.updateFlightState(innerData)
-              this.addLog('收到飞行状态数据', 'info')
+              // this.addLog('收到飞行状态数据', 'info')
               break
             
             case 'fcs_pwms':
               this.updateMotorPWMs(innerData)
               this.addHistoryData('pwmData', innerData)
-              this.addLog(`收到PWM数据 [${Array.isArray(innerData) ? innerData.length : (innerData.pwms?.length || 0)}个通道]`, 'info')
+              // this.addLog(`收到PWM数据 [${Array.isArray(innerData) ? innerData.length : (innerData.pwms?.length || 0)}个通道]`, 'info')
               break
             
             case 'fcs_datactrl':
               this.updateControlLoop(innerData)
-              this.addLog('收到控制循环数据', 'info')
+              // this.addLog('收到控制循环数据', 'info')
               break
             
             case 'fcs_gncbus':
               this.updateGNCBus(innerData)
-              this.addLog('收到GN&C总线数据', 'info')
+              // this.addLog('收到GN&C总线数据', 'info')
               break
             
             case 'avoiflag':
               this.updateAvoiFlag(innerData)
-              this.addLog('收到避障标志', 'info')
+              // this.addLog('收到避障标志', 'info')
               break
               
             case 'fcs_datafutaba':
               this.updateFCSData(innerData)
-              this.addLog('收到遥控数据', 'info')
+              // this.addLog('收到遥控数据', 'info')
               break
             
             case 'fcs_esc':
               this.updateESCData(innerData)
-              this.addLog('收到电机数据', 'info')
+              // this.addLog('收到电机数据', 'info')
               break
             
             case 'fcs_datagcs':
@@ -469,12 +1186,19 @@ export const useDroneStore = defineStore('drone', {
             
             case 'fcs_param':
               this.updateFCSParam(innerData)
-              this.addLog('收到参数数据', 'info')
+              // this.addLog('收到参数数据', 'info')
               break
-              
+
             case 'lidar_obstacles':
               this.updateLidarObstacles(innerData)
-              // this.addLog(`收到雷达障碍物 [${innerData.obstacle_count}个]`, 'info')
+              break
+
+            case 'lidar_status':
+              this.updateLidarStatus(innerData)
+              break
+              
+            case 'planning_telemetry':
+              this.updatePlanningTelemetry(innerData)
               break
             
             default:
@@ -484,6 +1208,30 @@ export const useDroneStore = defineStore('drone', {
         }
         
         switch (data.type) {
+          case 'kpi_update':
+            this.applyKPIUpdate(data)
+            break
+
+          case 'flight_state_update':
+            this.applyFlightStateUpdate(data.data)
+            break
+
+          case 'planning_state_update':
+            this.applyPlanningStateUpdate(data.data)
+            break
+
+          case 'system_performance_update':
+            this.applySystemPerformanceUpdate(data.data)
+            break
+
+          case 'capture_overview_update':
+            this.applyCaptureOverviewUpdate(data)
+            break
+
+          case 'data_quality_update':
+            this.applyDataQualityUpdate(data)
+            break
+
           case 'fcs_states':
             this.updateFlightState(data.data)
             break
@@ -520,7 +1268,7 @@ export const useDroneStore = defineStore('drone', {
           case 'fcs_param':
             this.updateFCSParam(data.data)
             break
-          
+
           case 'lidar_status':
             this.updateLidarStatus(data.data)
             break
@@ -544,9 +1292,57 @@ export const useDroneStore = defineStore('drone', {
           case 'command_response':
             this.handleCommandResponse(data)
             break
+
+          case 'recording_status':
+            this.applyRecordingStatus(data)
+            break
+
+          case 'experiment_context_update':
+            this.applyExperimentContextUpdate(data)
+            break
+
+          case 'pipeline_status_update':
+            this.applyPipelineStatusUpdate(data)
+            break
+
+          case 'dsm_summary_update':
+            this.applyDsmSummaryUpdate(data)
+            break
+
+          case 'evaluation_summary_update':
+            this.applyEvaluationSummaryUpdate(data)
+            break
+
+          case 'architecture_recommendation_update':
+            this.applyArchitectureRecommendationUpdate(data)
+            break
+
+          case 'figure_asset_status_update':
+            this.applyFigureAssetStatusUpdate(data)
+            break
+
+          case 'recording_response':
+            if (data.session_info || data.session_id !== undefined) {
+              this.applyRecordingStatus({
+                is_active: data.status === 'success' ? data.message !== '录制已停止' : this.dataRecording.enabled,
+                session_id: data.session_id,
+                session_info: data.session_info
+              })
+            }
+            break
+
+          case 'udp_status_change':
+            this.udpConnected = data.status === 'connected'
+            this.addLog(
+              `UDP链路${this.udpConnected ? '已连接' : '已断开'}`,
+              this.udpConnected ? 'success' : 'warning'
+            )
+            break
           
           case 'config_update':
-            this.updateConfig(data.data)
+            if (data.config_type === 'connection' && data.data) {
+              this.updateConfig(data.data)
+            }
             break
           
           case 'system_mode_change':
@@ -581,58 +1377,83 @@ export const useDroneStore = defineStore('drone', {
      * 更新飞行状态 - 兼容新旧数据格式
      */
     updateFlightState(data) {
-      console.log('[Store] 更新飞行状态:', data)
+      // console.log('[Store] 更新飞行状态:', data)
       
-      // 方式1: 新格式 - 直接更新fcsStates完整结构体
+      // 方式1: 新格式 - 直接更新fcsStates完整结构体，并同步到通用状态变量
       if (data.states_lat !== undefined) {
         this.fcsStates.states_lat = parseFloat(data.states_lat)
+        this.position.lat = parseFloat(data.states_lat)
       }
       if (data.states_lon !== undefined) {
         this.fcsStates.states_lon = parseFloat(data.states_lon)
+        this.position.lon = parseFloat(data.states_lon)
       }
       if (data.states_height !== undefined) {
         this.fcsStates.states_height = parseFloat(data.states_height)
+        this.position.alt = parseFloat(data.states_height)
+        this.position.relAlt = parseFloat(data.states_height)
       }
       if (data.states_Vx_GS !== undefined) {
         this.fcsStates.states_Vx_GS = parseFloat(data.states_Vx_GS)
+        this.velocity.x = parseFloat(data.states_Vx_GS)
       }
       if (data.states_Vy_GS !== undefined) {
         this.fcsStates.states_Vy_GS = parseFloat(data.states_Vy_GS)
+        this.velocity.y = parseFloat(data.states_Vy_GS)
       }
       if (data.states_Vz_GS !== undefined) {
         this.fcsStates.states_Vz_GS = parseFloat(data.states_Vz_GS)
+        this.velocity.z = parseFloat(data.states_Vz_GS)
       }
       if (data.states_p !== undefined) {
-        this.fcsStates.states_p = parseFloat(data.states_p)
+        const p = this._safeNumber(data.states_p)
+        this.fcsStates.states_p = p
+        this.angularVelocity.p = p
       }
       if (data.states_q !== undefined) {
-        this.fcsStates.states_q = parseFloat(data.states_q)
+        const q = this._safeNumber(data.states_q)
+        this.fcsStates.states_q = q
+        this.angularVelocity.q = q
       }
       if (data.states_r !== undefined) {
-        this.fcsStates.states_r = parseFloat(data.states_r)
+        const r = this._safeNumber(data.states_r)
+        this.fcsStates.states_r = r
+        this.angularVelocity.r = r
       }
       if (data.states_phi !== undefined) {
-        this.fcsStates.states_phi = parseFloat(data.states_phi)
+        const phiDeg = this._safeNumber(data.states_phi)
+        const phiRad = this._degreesToRadians(phiDeg)
+        this.fcsStates.states_phi = phiRad
+        this.attitude.roll = phiDeg
       }
       if (data.states_theta !== undefined) {
-        this.fcsStates.states_theta = parseFloat(data.states_theta)
+        const thetaDeg = this._safeNumber(data.states_theta)
+        const thetaRad = this._degreesToRadians(thetaDeg)
+        this.fcsStates.states_theta = thetaRad
+        this.attitude.pitch = thetaDeg
       }
       if (data.states_psi !== undefined) {
-        this.fcsStates.states_psi = parseFloat(data.states_psi)
+        const psiDeg = this._safeNumber(data.states_psi)
+        const psiRad = this._degreesToRadians(psiDeg)
+        this.fcsStates.states_psi = psiRad
+        this.attitude.yaw = psiDeg
       }
       
       // 方式2: 旧格式 - 保持向后兼容
       if (data.roll !== undefined) {
-        this.attitude.roll = parseFloat(data.roll)
-        this.fcsStates.states_phi = parseFloat(data.roll)
+        const rollDeg = this._safeNumber(data.roll)
+        this.attitude.roll = rollDeg
+        this.fcsStates.states_phi = this._degreesToRadians(rollDeg)
       }
       if (data.pitch !== undefined) {
-        this.attitude.pitch = parseFloat(data.pitch)
-        this.fcsStates.states_theta = parseFloat(data.pitch)
+        const pitchDeg = this._safeNumber(data.pitch)
+        this.attitude.pitch = pitchDeg
+        this.fcsStates.states_theta = this._degreesToRadians(pitchDeg)
       }
       if (data.yaw !== undefined) {
-        this.attitude.yaw = parseFloat(data.yaw)
-        this.fcsStates.states_psi = parseFloat(data.yaw)
+        const yawDeg = this._safeNumber(data.yaw)
+        this.attitude.yaw = yawDeg
+        this.fcsStates.states_psi = this._degreesToRadians(yawDeg)
       }
       
       if (data.latitude !== undefined) {
@@ -664,20 +1485,25 @@ export const useDroneStore = defineStore('drone', {
       }
       
       if (data.angular_velocity_x !== undefined) {
-        this.angularVelocity.p = parseFloat(data.angular_velocity_x)
-        this.fcsStates.states_p = parseFloat(data.angular_velocity_x)
+        const p = this._safeNumber(data.angular_velocity_x)
+        this.angularVelocity.p = p
+        this.fcsStates.states_p = p
       }
       if (data.angular_velocity_y !== undefined) {
-        this.angularVelocity.q = parseFloat(data.angular_velocity_y)
-        this.fcsStates.states_q = parseFloat(data.angular_velocity_y)
+        const q = this._safeNumber(data.angular_velocity_y)
+        this.angularVelocity.q = q
+        this.fcsStates.states_q = q
       }
       if (data.angular_velocity_z !== undefined) {
-        this.angularVelocity.r = parseFloat(data.angular_velocity_z)
-        this.fcsStates.states_r = parseFloat(data.angular_velocity_z)
+        const r = this._safeNumber(data.angular_velocity_z)
+        this.angularVelocity.r = r
+        this.fcsStates.states_r = r
       }
       
       // 记录历史数据用于图表显示
       this.addHistoryData('flightState', data)
+
+      this._updateActualPoseFromTelemetry(Date.now())
     },
     
     /**
@@ -752,19 +1578,17 @@ export const useDroneStore = defineStore('drone', {
       if (data.GNCBus_CmdValue_psi_cmd !== undefined) {
         this.gncBus.GNCBus_CmdValue_psi_cmd = parseFloat(data.GNCBus_CmdValue_psi_cmd)
       }
+      if (data.GNCBus_TokenMode_rud_state !== undefined) this.gncBus.GNCBus_TokenMode_rud_state = parseInt(data.GNCBus_TokenMode_rud_state)
+      if (data.GNCBus_TokenMode_ail_state !== undefined) this.gncBus.GNCBus_TokenMode_ail_state = parseInt(data.GNCBus_TokenMode_ail_state)
+      if (data.GNCBus_TokenMode_ele_state !== undefined) this.gncBus.GNCBus_TokenMode_ele_state = parseInt(data.GNCBus_TokenMode_ele_state)
+      if (data.GNCBus_TokenMode_col_state !== undefined) this.gncBus.GNCBus_TokenMode_col_state = parseInt(data.GNCBus_TokenMode_col_state)
       
-      // 旧格式 - 保持向后兼容
-      if (data.pos_x !== undefined) this.gncBus.pos_x = parseFloat(data.pos_x)
-      if (data.pos_y !== undefined) this.gncBus.pos_y = parseFloat(data.pos_y)
-      if (data.pos_z !== undefined) this.gncBus.pos_z = parseFloat(data.pos_z)
-      if (data.vel_x !== undefined) this.gncBus.vel_x = parseFloat(data.vel_x)
-      if (data.vel_y !== undefined) this.gncBus.vel_y = parseFloat(data.vel_y)
-      if (data.vel_z !== undefined) this.gncBus.vel_z = parseFloat(data.vel_z)
-      if (data.euler_phi !== undefined) this.gncBus.euler_phi = parseFloat(data.euler_phi)
-      if (data.euler_theta !== undefined) this.gncBus.euler_theta = parseFloat(data.euler_theta)
-      if (data.euler_psi !== undefined) this.gncBus.euler_psi = parseFloat(data.euler_psi)
-      if (data.control_mode !== undefined) this.gncBus.control_mode = parseInt(data.control_mode)
-      if (data.flight_mode !== undefined) this.gncBus.flight_mode = parseInt(data.flight_mode)
+      const actualPoint = this._updateActualPoseFromTelemetry(Date.now()) || this._getActualFlightReferencePoint()
+      if (actualPoint) {
+        this._updatePathDeviationTrend(Date.now())
+      }
+
+      this.addHistoryData('gncBus', data)
     },
     
     /**
@@ -824,6 +1648,8 @@ export const useDroneStore = defineStore('drone', {
       if (data.Tele_ftb_com_Ftb_fail !== undefined) {
         this.fcsData.Tele_ftb_com_Ftb_fail = parseInt(data.Tele_ftb_com_Ftb_fail)
       }
+
+      this.addHistoryData('fcsData', data)
     },
     
     /**
@@ -921,15 +1747,26 @@ export const useDroneStore = defineStore('drone', {
     updateGCSData(data) {
       if (data.Tele_GCS_CmdIdx !== undefined) {
         this.gcsData.Tele_GCS_CmdIdx = parseInt(data.Tele_GCS_CmdIdx)
+      } else if (data.CmdIdx !== undefined) {
+        this.gcsData.Tele_GCS_CmdIdx = parseInt(data.CmdIdx)
       }
+
       if (data.Tele_GCS_Mission !== undefined) {
         this.gcsData.Tele_GCS_Mission = parseInt(data.Tele_GCS_Mission)
+      } else if (data.Mission !== undefined) {
+        this.gcsData.Tele_GCS_Mission = parseInt(data.Mission)
       }
+
       if (data.Tele_GCS_Val !== undefined) {
         this.gcsData.Tele_GCS_Val = parseFloat(data.Tele_GCS_Val)
+      } else if (data.Val !== undefined) {
+        this.gcsData.Tele_GCS_Val = parseFloat(data.Val)
       }
+
       if (data.Tele_GCS_com_GCS_fail !== undefined) {
         this.gcsData.Tele_GCS_com_GCS_fail = parseInt(data.Tele_GCS_com_GCS_fail)
+      } else if (data.fail !== undefined) {
+        this.gcsData.Tele_GCS_com_GCS_fail = data.fail ? 1 : 0
       }
     },
     
@@ -944,25 +1781,22 @@ export const useDroneStore = defineStore('drone', {
     },
     
     /**
-     * 更新雷达状态
-     */
-    updateLidarStatus(data) {
-      if (data.is_running !== undefined) this.lidarStatus.isRunning = !!data.is_running
-      if (data.lidar_connected !== undefined) this.lidarStatus.lidarConnected = !!data.lidar_connected
-      if (data.imu_data_valid !== undefined) this.lidarStatus.imuDataValid = !!data.imu_data_valid
-      if (data.motion_comp_active !== undefined) this.lidarStatus.motionCompActive = !!data.motion_comp_active
-    },
-    
-    /**
      * 更新规划系统遥测
      */
     updatePlanningTelemetry(data) {
+      const position = data.position || {}
+      const velocity = data.velocity
+      const currentPosX = data.current_pos_x ?? position.x
+      const currentPosY = data.current_pos_y ?? position.y
+      const currentPosZ = data.current_pos_z ?? position.z
+      const currentVel = data.current_vel ?? velocity
+
       if (data.seq_id !== undefined) this.planningTelemetry.seqId = parseInt(data.seq_id)
       if (data.timestamp !== undefined) this.planningTelemetry.timestamp = parseInt(data.timestamp)
-      if (data.current_pos_x !== undefined) this.planningTelemetry.currentPosX = parseFloat(data.current_pos_x)
-      if (data.current_pos_y !== undefined) this.planningTelemetry.currentPosY = parseFloat(data.current_pos_y)
-      if (data.current_pos_z !== undefined) this.planningTelemetry.currentPosZ = parseFloat(data.current_pos_z)
-      if (data.current_vel !== undefined) this.planningTelemetry.currentVel = parseFloat(data.current_vel)
+      if (currentPosX !== undefined) this.planningTelemetry.currentPosX = parseFloat(currentPosX)
+      if (currentPosY !== undefined) this.planningTelemetry.currentPosY = parseFloat(currentPosY)
+      if (currentPosZ !== undefined) this.planningTelemetry.currentPosZ = parseFloat(currentPosZ)
+      if (currentVel !== undefined) this.planningTelemetry.currentVel = parseFloat(currentVel)
       if (data.update_flags !== undefined) this.planningTelemetry.updateFlags = parseInt(data.update_flags)
       if (data.status !== undefined) this.planningTelemetry.status = parseInt(data.status)
       if (data.global_path_count !== undefined) this.planningTelemetry.globalPathCount = parseInt(data.global_path_count)
@@ -974,10 +1808,16 @@ export const useDroneStore = defineStore('drone', {
         this.globalPath = data.global_path
         console.log('[Store] 更新全局路径:', this.globalPath.length, '个点')
       }
-      if (data.local_traj && Array.isArray(data.local_traj)) {
-        this.localTraj = data.local_traj
+      const localTraj = Array.isArray(data.local_traj) ? data.local_traj : (Array.isArray(data.local_path) ? data.local_path : null)
+      if (localTraj) {
+        this.localTraj = localTraj
         console.log('[Store] 更新局部轨迹:', this.localTraj.length, '个点')
       }
+      if (Array.isArray(data.obstacles)) {
+        this.obstacles = data.obstacles
+      }
+
+      this._updatePathDeviationTrend(Date.now())
     },
     
     /**
@@ -987,17 +1827,6 @@ export const useDroneStore = defineStore('drone', {
       this.obstacles = data.obstacles || []
     },
 
-    /**
-     * 更新雷达感知障碍物数据 (ObstacleOutput_T)
-     */
-    updateLidarObstacles(data) {
-      if (!data) return
-      
-      this.lidarObstacles = data.obstacles || []
-      // 可以在这里更新其他相关状态，如时间戳等
-      // console.log(`[Store] 更新雷达障碍物: ${this.lidarObstacles.length}个`)
-    },
-    
     /**
      * 更新系统状态
      */
@@ -1017,6 +1846,595 @@ export const useDroneStore = defineStore('drone', {
       console.log('[Store] 系统模式切换:', mode)
       this.systemMode = mode
       this.addLog(`系统模式切换为: ${mode === 'REALTIME' ? '实时模式' : '回放模式'}`, 'info')
+    },
+
+    applyFlightStateUpdate(data = {}, timestamp = Date.now()) {
+      this.realtimeViews.flightState = {
+        ...this.realtimeViews.flightState,
+        ...data,
+        raw: data.raw || this.realtimeViews.flightState.raw || {}
+      }
+      this.realtimeViews.updatedAt = timestamp
+
+      this.updateFlightState({
+        states_lat: data.latitude,
+        states_lon: data.longitude,
+        states_height: data.height,
+        states_Vx_GS: data.vx,
+        states_Vy_GS: data.vy,
+        states_Vz_GS: data.vz,
+        states_p: data.raw?.states_p ?? data.p_rate,
+        states_q: data.raw?.states_q ?? data.q_rate,
+        states_r: data.raw?.states_r ?? data.r_rate,
+        states_phi: data.raw?.states_phi ?? data.phi,
+        states_theta: data.raw?.states_theta ?? data.theta,
+        states_psi: data.raw?.states_psi ?? data.psi
+      })
+    },
+
+    applyPlanningStateUpdate(data = {}, timestamp = Date.now()) {
+      this.realtimeViews.planningState = {
+        ...this.realtimeViews.planningState,
+        ...data
+      }
+      this.realtimeViews.updatedAt = timestamp
+      this.experimentContext.missionPhase = this._buildMissionPhase(data.mission_id)
+
+      this.updateGCSData({
+        Tele_GCS_CmdIdx: data.cmd_idx,
+        Tele_GCS_Mission: data.mission_id,
+        Tele_GCS_Val: data.mission_value,
+        Tele_GCS_com_GCS_fail: data.gcs_link_fail ? 1 : 0
+      })
+
+      this.updateAvoiFlag({
+        AvoiFlag_LaserRadar_Enabled: data.avoid_enabled,
+        AvoiFlag_AvoidanceFlag: data.avoid_triggered,
+        AvoiFlag_GuideFlag: data.guide_flag
+      })
+
+      this.planningTelemetry.status = this._safeNumber(data.planning_status, 0)
+      this.planningTelemetry.globalPathCount = this._safeNumber(data.global_path_count, 0)
+      this.planningTelemetry.localTrajCount = this._safeNumber(data.local_traj_count, 0)
+      this.planningTelemetry.obstacleCount = this._safeNumber(data.obstacle_count, 0)
+      if (data.current_pos_x !== undefined) this.planningTelemetry.currentPosX = this._safeNumber(data.current_pos_x, 0)
+      if (data.current_pos_y !== undefined) this.planningTelemetry.currentPosY = this._safeNumber(data.current_pos_y, 0)
+      if (data.current_pos_z !== undefined) this.planningTelemetry.currentPosZ = this._safeNumber(data.current_pos_z, 0)
+
+      if (Array.isArray(data.global_path) || Array.isArray(data.local_path) || Array.isArray(data.local_traj) || Array.isArray(data.obstacles)) {
+        this.updatePlanningTelemetry(data)
+      }
+
+      const actualPoint = this._updateActualPoseFromTelemetry(timestamp)
+      if (!actualPoint) {
+        const fallbackPoint = this._buildPlanningFallbackPose(timestamp)
+        if (fallbackPoint) {
+          this.actualPose = fallbackPoint
+          this.addTrajectoryPoint(fallbackPoint.x, fallbackPoint.y, fallbackPoint.z, timestamp)
+        }
+      }
+
+      this._pushMetricTrend('obstacleCount', this.planningTelemetry.obstacleCount)
+    },
+
+    applySystemPerformanceUpdate(data = {}, timestamp = Date.now()) {
+      this.realtimeViews.systemPerformance = {
+        ...this.realtimeViews.systemPerformance,
+        esc_power_pct: data.esc_power_pct ?? data.esc_power_pct_avg ?? this.realtimeViews.systemPerformance.esc_power_pct,
+        esc_power_pct_avg: data.esc_power_pct_avg ?? data.esc_power_pct ?? this.realtimeViews.systemPerformance.esc_power_pct_avg,
+        trusted: {
+          ...(this.realtimeViews.systemPerformance.trusted || {}),
+          ...(data.trusted || {})
+        },
+        derived: {
+          ...(this.realtimeViews.systemPerformance.derived || {}),
+          ...(data.derived || {})
+        },
+        metric_quality: {
+          ...(this.realtimeViews.systemPerformance.metric_quality || {}),
+          ...(data.metric_quality || {})
+        },
+        ...data
+      }
+      this.realtimeViews.updatedAt = timestamp
+
+      this._pushMetricTrend('planningTimeMs', this.realtimeViews.systemPerformance.planning_time_ms, this.realtimeViews.updatedAt)
+      this._pushMetricTrend('controlJitterMs', this.realtimeViews.systemPerformance.control_jitter_ms, this.realtimeViews.updatedAt)
+      this._pushMetricTrend('trackingRmse', this.realtimeViews.systemPerformance.tracking_rmse, this.realtimeViews.updatedAt)
+      this._pushMetricTrend('obstacleCount', this.realtimeViews.systemPerformance.obstacle_count, this.realtimeViews.updatedAt)
+    },
+
+    applyCaptureOverviewUpdate(message = {}) {
+      const payload = message?.data || {}
+      this.captureState = {
+        ...this.captureState,
+        recording: !!payload.recording,
+        inputPorts: payload.enabled_ports || [],
+        flightControlRateHz: this._safeNumber(payload.flight_control_rate_hz, 0),
+        planningRateHz: this._safeNumber(payload.planning_rate_hz, 0),
+        radarRateHz: this._safeNumber(payload.radar_rate_hz, 0),
+        perceptionRateHz: this._safeNumber(payload.perception_rate_hz, 0),
+        packetCounts: payload.packet_counts || {},
+        lastPacketTs: payload.last_packet_ts || null,
+        parseErrorCount: this._safeNumber(payload.parse_error_count, 0),
+        lastError: payload.last_error || '',
+        outputDir: payload.output_dir || this.captureState.outputDir,
+        bytesWritten: this._safeNumber(payload.bytes_written, 0)
+      }
+
+      if (message.case_id) {
+        this.experimentContext.caseId = message.case_id
+      }
+
+      this.refreshDerivedAnalysisState()
+    },
+
+    applyDataQualityUpdate(message = {}) {
+      const payload = message?.data || {}
+      this.dataQuality = {
+        ...this.dataQuality,
+        parseErrorCount: this._safeNumber(payload.parse_error_count, 0),
+        windowMissingCount: this._safeNumber(payload.window_missing_count, 0),
+        planningGapMs: payload.planning_gap_ms ?? null,
+        flightControlGapMs: payload.flight_control_gap_ms ?? null,
+        radarGapMs: payload.radar_gap_ms ?? null,
+        radarMissing: !!payload.radar_missing,
+        healthLevel: payload.health_level || 'unknown',
+        healthText: payload.health_text || ''
+      }
+
+      this.refreshDerivedAnalysisState()
+    },
+
+    applyKPIUpdate(message = {}) {
+      const payload = message?.data || {}
+      const timestamp = message?.timestamp || Date.now()
+      const dimensions = payload.dimensions || {}
+
+      this.kpiSummary.dimensions = {
+        computing: dimensions.computing || null,
+        communication: dimensions.communication || null,
+        energy: dimensions.energy || null,
+        mission: dimensions.mission || null,
+        performance: dimensions.performance || null
+      }
+      this.kpiSummary.indicators = payload.indicators || {}
+      this.kpiSummary.windowMetrics = payload.window_metrics || {}
+      this.kpiSummary.overallScore = payload.overallScore ?? payload.overall_score ?? null
+      this.kpiSummary.updatedAt = timestamp
+
+      Object.entries(this.kpiSummary.dimensions).forEach(([key, value]) => {
+        if (!value) {
+          return
+        }
+        this._pushBoundedHistory(key, {
+          ...value,
+          timestamp
+        })
+      })
+
+      if (payload.views?.flight_state) {
+        this.applyFlightStateUpdate(payload.views.flight_state, timestamp)
+      }
+      if (payload.views?.planning_state) {
+        this.applyPlanningStateUpdate(payload.views.planning_state, timestamp)
+      }
+      if (payload.views?.system_performance) {
+        this.applySystemPerformanceUpdate(payload.views.system_performance, timestamp)
+      }
+    },
+
+    applyExperimentContextUpdate(payload = {}) {
+      const runtime = payload?.data || payload?.runtime || payload || {}
+      const caseData = runtime.case || {}
+      const taskData = runtime.task || {}
+      const scenarioData = runtime.scenario || {}
+      const architectureData = runtime.architecture || {}
+      const architectureProfiles = runtime.architecture_profiles || payload?.architecture_profiles || {}
+      const figureContext = this._extractFigureSemantics(runtime, caseData, runtime.figure_semantics, payload)
+
+      if (!Object.keys(caseData).length && !Object.keys(taskData).length && !Object.keys(scenarioData).length && !Object.keys(figureContext).length) {
+        return
+      }
+
+      if (caseData.recording_case_id) {
+        this.experimentContext.caseId = caseData.recording_case_id
+      }
+      if (caseData.case_id) {
+        this.experimentContext.planCaseId = caseData.case_id
+        this.experimentContext.selectedPlanCaseId = caseData.case_id
+      }
+
+      this.experimentContext.caseMeta = {
+        repeatIndex: caseData.repeat_index ?? this.experimentContext.caseMeta.repeatIndex,
+        durationSec: caseData.duration_sec ?? this.experimentContext.caseMeta.durationSec,
+        evaluationWindowSec: caseData.evaluation_window_sec ?? this.experimentContext.caseMeta.evaluationWindowSec
+      }
+
+      this.experimentContext.task = {
+        plannedCmdIdx: this._safeNumber(taskData.planned_cmd_idx, this.experimentContext.task.plannedCmdIdx),
+        effectiveCmdIdx: this._safeNumber(taskData.effective_cmd_idx, this.experimentContext.task.effectiveCmdIdx),
+        missionId: this._safeNumber(taskData.mission_id, this.experimentContext.task.missionId),
+        taskName: taskData.task_name || this.experimentContext.task.taskName,
+        taskGroup: taskData.task_group || this.experimentContext.task.taskGroup,
+        phase: taskData.phase || this.experimentContext.task.phase,
+        source: taskData.source || this.experimentContext.task.source
+      }
+
+      this.experimentContext.architecture = {
+        architectureId: architectureData.architecture_id || this.experimentContext.architecture.architectureId,
+        displayName: architectureData.display_name || this.experimentContext.architecture.displayName,
+        mappingProfile: architectureData.mapping_profile || this.experimentContext.architecture.mappingProfile,
+        adaptationMode: architectureData.adaptation_mode || this.experimentContext.architecture.adaptationMode,
+        focus: architectureData.focus || this.experimentContext.architecture.focus
+      }
+
+      this.experimentContext.architectureProfiles = {
+        baselineProfiles: architectureProfiles.baseline_profiles || architectureProfiles.baselineProfiles || this.experimentContext.architectureProfiles.baselineProfiles,
+        candidateProfiles: architectureProfiles.candidate_profiles || architectureProfiles.candidateProfiles || this.experimentContext.architectureProfiles.candidateProfiles,
+        researchProfiles: architectureProfiles.research_profiles || architectureProfiles.researchProfiles || this.experimentContext.architectureProfiles.researchProfiles
+      }
+
+      this.experimentContext.scenarioId = scenarioData.scenario_id || this.experimentContext.scenarioId
+      this.experimentContext.scenarioName = scenarioData.display_name || this.experimentContext.scenarioName
+      this.experimentContext.scenarioSource = scenarioData.source || this.experimentContext.scenarioSource
+      this.experimentContext.scenarioConfidence = this._safeNumber(scenarioData.confidence, this.experimentContext.scenarioConfidence)
+      this.experimentContext.environmentClass = scenarioData.environment_class || this.experimentContext.environmentClass
+      this.experimentContext.obstacleDensity = scenarioData.obstacle_density || this.experimentContext.obstacleDensity
+      this.experimentContext.windLevel = scenarioData.wind_level || this.experimentContext.windLevel
+      this.experimentContext.linkQualityLevel = scenarioData.link_quality || this.experimentContext.linkQualityLevel
+      this.experimentContext.sensorQualityLevel = scenarioData.sensor_quality || this.experimentContext.sensorQualityLevel
+      this.experimentContext.disturbanceTags = scenarioData.disturbance_tags || this.experimentContext.disturbanceTags
+      this.experimentContext.heuristicTags = scenarioData.heuristic_tags || this.experimentContext.heuristicTags
+      this.experimentContext.triggerPolicy = runtime.trigger_policy || this.experimentContext.triggerPolicy
+      this.experimentContext.missionPhase = taskData.phase || this.experimentContext.missionPhase
+      this.experimentContext.updatedAt = Date.now()
+      this._applyFigureContext(figureContext)
+
+      if (!this.architectureRecommendation.currentArchitecture) {
+        this.architectureRecommendation.currentArchitecture = this.experimentContext.architecture.displayName
+      }
+
+      this.refreshDerivedAnalysisState()
+    },
+
+    applyRecordingStatus(payload) {
+      const sessionInfo = payload?.session_info || {}
+      const recordingData = payload?.data || {}
+      const figureContext = this._extractFigureSemantics(payload, sessionInfo, recordingData)
+      this.dataRecording.enabled = payload?.is_active ?? !!recordingData.recording
+      this.dataRecording.sessionId = payload?.session_id || sessionInfo.session_id || ''
+      this.dataRecording.recordingStartTime = sessionInfo.start_time
+        ? Math.round(sessionInfo.start_time * 1000)
+        : (this.dataRecording.enabled ? this.dataRecording.recordingStartTime : null)
+      this.dataRecording.recordFilePath = sessionInfo.data_directory || recordingData.output_dir || ''
+      this.dataRecording.recordCount = sessionInfo.data_counters?.raw_records || sessionInfo.data_counters?.bus_traffic || 0
+      this.dataRecording.totalBytes = sessionInfo.total_bytes || recordingData.bytes_written || 0
+      this.dataRecording.functionStats = sessionInfo.func_stats || []
+      this.dataRecording.lastRecordTime = Date.now()
+      this.experimentContext.caseId = payload?.case_id || sessionInfo.case_id || this._buildCaseId(this.dataRecording.sessionId)
+      this._applyFigureContext(figureContext)
+      this.applyFigureAssetStatusUpdate(figureContext)
+      if (payload?.experiment_context) {
+        this.applyExperimentContextUpdate(payload.experiment_context)
+      }
+      if (payload?.pipeline_status) {
+        this.applyPipelineStatusUpdate(payload.pipeline_status)
+      }
+
+      this.refreshDerivedAnalysisState()
+    },
+
+    applyPipelineStatusUpdate(message = {}) {
+      const payload = message?.data || message || {}
+      this.pipelineStatus = {
+        ...this.pipelineStatus,
+        rawRecordingStatus: payload.raw_recording_status || this.pipelineStatus.rawRecordingStatus,
+        standardFilesStatus: payload.standard_files_status || this.pipelineStatus.standardFilesStatus,
+        dsmStatus: payload.dsm_status || this.pipelineStatus.dsmStatus,
+        evaluationStatus: payload.evaluation_status || this.pipelineStatus.evaluationStatus,
+        optimizationStatus: payload.optimization_status || this.pipelineStatus.optimizationStatus,
+        archiveStatus: payload.archive_status || this.pipelineStatus.archiveStatus,
+        figureAssetReady: payload.figure_asset_ready ?? this.pipelineStatus.figureAssetReady,
+        figureBatchManifestPath: payload.figure_batch_manifest_path ?? this.pipelineStatus.figureBatchManifestPath,
+        standardFiles: {
+          ...this.pipelineStatus.standardFiles,
+          ...(payload.standard_files || {})
+        },
+        updatedAt: Date.now()
+      }
+      this.applyFigureAssetStatusUpdate(payload)
+    },
+
+    applyDsmSummaryUpdate(message = {}) {
+      const payload = message?.data || message || {}
+      const figurePatch = this._applyFigureContext(this._extractFigureSemantics(payload))
+      this.dsmSummary = {
+        nodeCount: payload.node_count ?? this.dsmSummary.nodeCount,
+        edgeCount: payload.edge_count ?? this.dsmSummary.edgeCount,
+        crossModuleInteractions: payload.cross_module_interactions ?? this.dsmSummary.crossModuleInteractions,
+        totalBusBytes: payload.total_bus_bytes ?? this.dsmSummary.totalBusBytes,
+        avgCrossLatency: payload.avg_cross_latency ?? this.dsmSummary.avgCrossLatency,
+        globalStatsReady: !!(payload.global_stats_ready ?? this.dsmSummary.globalStatsReady),
+        ...figurePatch,
+        updatedAt: Date.now()
+      }
+      this.applyFigureAssetStatusUpdate(payload)
+    },
+
+    applyEvaluationSummaryUpdate(message = {}) {
+      const payload = message?.data || message || {}
+      const figurePatch = this._applyFigureContext(this._extractFigureSemantics(payload))
+      this.evaluationSummary = {
+        baselineAllocationId: payload.baseline_allocation_id ?? this.evaluationSummary.baselineAllocationId,
+        candidateAllocationId: payload.candidate_allocation_id ?? this.evaluationSummary.candidateAllocationId,
+        finalCompositeScore: payload.final_composite_score ?? this.evaluationSummary.finalCompositeScore,
+        constraintViolationCount: payload.constraint_violation_count ?? this.evaluationSummary.constraintViolationCount,
+        domainScores: payload.domain_scores || this.evaluationSummary.domainScores,
+        baselineDelta: payload.baseline_delta || this.evaluationSummary.baselineDelta,
+        evaluationReady: !!(payload.evaluation_ready ?? this.evaluationSummary.evaluationReady),
+        ...figurePatch,
+        updatedAt: Date.now()
+      }
+      this.applyFigureAssetStatusUpdate(payload)
+    },
+
+    applyArchitectureRecommendationUpdate(message = {}) {
+      const payload = message?.data || message || {}
+      const figurePatch = this._applyFigureContext(this._extractFigureSemantics(payload))
+      const currentArchitectureDetail = payload.current_architecture || payload.currentArchitecture || {}
+      const recommendedArchitectureDetail = payload.recommended_architecture || payload.recommendedArchitecture || {}
+      const candidateSummaries = payload.all_candidate_summaries || payload.candidates || payload.candidate_summaries || this.architectureRecommendation.candidates
+      const currentArchitecture = typeof currentArchitectureDetail === 'string'
+        ? currentArchitectureDetail
+        : currentArchitectureDetail.profile_name || currentArchitectureDetail.display_name || currentArchitectureDetail.name || this.experimentContext.architecture.displayName || this.architectureRecommendation.currentArchitecture
+      const recommendedArchitecture = typeof recommendedArchitectureDetail === 'string'
+        ? recommendedArchitectureDetail
+        : recommendedArchitectureDetail.profile_name || recommendedArchitectureDetail.display_name || recommendedArchitectureDetail.name || this.architectureRecommendation.recommendedArchitecture
+
+      this.architectureRecommendation = {
+        currentArchitecture,
+        recommendedArchitecture,
+        scoreDelta: payload.score_delta ?? payload.expected_score_delta ?? payload.predicted_score_delta ?? this.architectureRecommendation.scoreDelta,
+        crossCountDelta: payload.cross_count_delta ?? payload.predicted_cross_count_delta ?? this.architectureRecommendation.crossCountDelta,
+        powerDelta: payload.power_delta ?? payload.predicted_power_delta ?? this.architectureRecommendation.powerDelta,
+        constraintPass: payload.constraint_pass ?? this.architectureRecommendation.constraintPass,
+        riskText: payload.risk_explanations || payload.risk_text || this.architectureRecommendation.riskText,
+        triggerEvidence: payload.trigger_evidence || payload.evidence || this.architectureRecommendation.triggerEvidence,
+        candidates: candidateSummaries,
+        ...figurePatch,
+        updatedAt: Date.now()
+      }
+      this.applyFigureAssetStatusUpdate(payload)
+    },
+
+    applyFigureAssetStatusUpdate(message = {}) {
+      const payload = message?.data || message || {}
+      const figurePatch = this._applyFigureContext(this._extractFigureSemantics(payload))
+
+      if (!Object.keys(figurePatch).length) {
+        return
+      }
+
+      this.figureAssetStatus = {
+        ...this.figureAssetStatus,
+        ...figurePatch,
+        figureAssetReady: figurePatch.figureAssetReady ?? this.figureAssetStatus.figureAssetReady,
+        figureBatchManifestPath: figurePatch.figureBatchManifestPath ?? this.figureAssetStatus.figureBatchManifestPath,
+        updatedAt: Date.now()
+      }
+
+      this.pipelineStatus = {
+        ...this.pipelineStatus,
+        figureAssetReady: this.figureAssetStatus.figureAssetReady,
+        figureBatchManifestPath: this.figureAssetStatus.figureBatchManifestPath,
+        updatedAt: Date.now()
+      }
+    },
+
+    refreshDerivedAnalysisState() {
+      const hasSession = !!this.dataRecording.sessionId
+      const hasFlight = this.captureState.flightControlRateHz > 0 || this.history.rollActual.length > 1 || this.history.pwm1.length > 1
+      const hasPlanning = this.captureState.planningRateHz > 0 || this.planningTelemetry.seqId > 0 || this.globalPath.length > 0 || this.localTraj.length > 0
+      const hasRadar = this.captureState.radarRateHz > 0 || this.planningTelemetry.obstacleCount > 0 || this.obstacles.length > 0
+      const hasPerception = this.captureState.perceptionRateHz > 0
+
+      const nextStandardFiles = {
+        fcsTelemetry: hasFlight ? 'raw_only' : 'missing',
+        planningTelemetry: hasPlanning ? 'raw_only' : 'missing',
+        radarData: hasRadar ? 'raw_only' : 'missing',
+        busTraffic: 'missing',
+        cameraData: hasPerception ? 'raw_only' : 'missing'
+      }
+
+      const rawRecordingStatus = this.dataRecording.enabled
+        ? 'running'
+        : hasSession
+          ? 'ready'
+          : 'waiting'
+
+      const standardFilesStatus = Object.values(nextStandardFiles).every((value) => value === 'ready')
+        ? 'ready'
+        : hasSession
+          ? 'missing'
+          : 'waiting'
+
+      this.pipelineStatus = {
+        ...this.pipelineStatus,
+        rawRecordingStatus,
+        standardFilesStatus: this.pipelineStatus.standardFilesStatus === 'ready' ? 'ready' : standardFilesStatus,
+        standardFiles: {
+          fcsTelemetry: this.pipelineStatus.standardFiles.fcsTelemetry === 'ready' ? 'ready' : nextStandardFiles.fcsTelemetry,
+          planningTelemetry: this.pipelineStatus.standardFiles.planningTelemetry === 'ready' ? 'ready' : nextStandardFiles.planningTelemetry,
+          radarData: this.pipelineStatus.standardFiles.radarData === 'ready' ? 'ready' : nextStandardFiles.radarData,
+          busTraffic: this.pipelineStatus.standardFiles.busTraffic === 'ready' ? 'ready' : nextStandardFiles.busTraffic,
+          cameraData: this.pipelineStatus.standardFiles.cameraData === 'ready' ? 'ready' : nextStandardFiles.cameraData
+        },
+        updatedAt: Date.now()
+      }
+
+      const evidence = []
+      const perf = this.realtimeViews.systemPerformance || {}
+      const standardFileStates = Object.values(this.pipelineStatus.standardFiles || {})
+      const emptyFileCount = standardFileStates.filter((value) => value === 'empty').length
+      const missingFileCount = standardFileStates.filter((value) => value === 'missing').length
+      if (Number.isFinite(Number(perf.planning_time_ms)) && Number(perf.planning_time_ms) > 0) {
+        evidence.push(`planning ${Number(perf.planning_time_ms).toFixed(1)} ms`)
+      }
+      if (Number.isFinite(Number(perf.obstacle_count)) && Number(perf.obstacle_count) > 0) {
+        evidence.push(`obstacles ${Math.round(Number(perf.obstacle_count))}`)
+      }
+      if (this.dataQuality.healthLevel && this.dataQuality.healthLevel !== 'unknown') {
+        evidence.push(`quality ${this.dataQuality.healthLevel}`)
+      }
+      if (emptyFileCount > 0) {
+        evidence.push(`${emptyFileCount} standard files empty`)
+      } else if (missingFileCount > 0 || this.pipelineStatus.standardFilesStatus !== 'ready') {
+        evidence.push(`${missingFileCount || 5} standard files missing`)
+      }
+
+      const fallbackRiskText = this.pipelineStatus.standardFilesStatus === 'ready'
+        ? '标准文件已就绪，但 DSM 和评估结果还未形成可比较的推荐输出。'
+        : this.pipelineStatus.standardFilesStatus === 'empty'
+          ? '标准文件已生成，但当前只有表头没有有效数据行，不能形成可用的架构分析结果。'
+          : '尚未导出 thesis-compatible 五类标准文件，当前不能形成有效架构分析依据。'
+
+      const hasRecommendation = !!this.architectureRecommendation.recommendedArchitecture
+
+      const currentArchitecture = this.experimentContext.architecture.displayName || this.architectureRecommendation.currentArchitecture || 'Baseline Balanced'
+      const candidateProfiles = this.experimentContext.architectureProfiles.candidateProfiles || []
+      const baselineProfiles = this.experimentContext.architectureProfiles.baselineProfiles || []
+      const placeholderCandidates = [...baselineProfiles, ...candidateProfiles].slice(0, 3).map((profile) => ({
+        id: profile.profile_id,
+        name: profile.profile_name,
+        group: profile.profile_group,
+        status: 'awaiting_evaluation'
+      }))
+
+      this.architectureRecommendation = {
+        ...this.architectureRecommendation,
+        currentArchitecture,
+        recommendedArchitecture: this.architectureRecommendation.recommendedArchitecture || '',
+        riskText: hasRecommendation
+          ? (this.architectureRecommendation.riskText || fallbackRiskText)
+          : fallbackRiskText,
+        triggerEvidence: hasRecommendation && this.architectureRecommendation.triggerEvidence.length
+          ? this.architectureRecommendation.triggerEvidence
+          : evidence,
+        candidates: this.architectureRecommendation.candidates.length
+          ? this.architectureRecommendation.candidates
+          : placeholderCandidates,
+        updatedAt: Date.now()
+      }
+    },
+
+    async fetchExperimentPlan() {
+      try {
+        const response = await backend.experiment.getPlan()
+        const cases = response?.cases || []
+        this.experimentContext.availableCases = cases
+        const selectedCaseId = response?.selected_case_id || this.experimentContext.selectedPlanCaseId || cases[0]?.case_id || ''
+        this.experimentContext.selectedPlanCaseId = selectedCaseId
+        if (!this.experimentContext.planCaseId && selectedCaseId) {
+          this.experimentContext.planCaseId = selectedCaseId
+        }
+        return response
+      } catch (error) {
+        this.addLog(`获取实验矩阵失败: ${error.message}`, 'warning')
+        return null
+      }
+    },
+
+    async fetchExperimentRuntime() {
+      try {
+        const response = await backend.experiment.getRuntime()
+        if (response?.runtime) {
+          this.applyExperimentContextUpdate(response)
+        }
+        if (response?.selected_case_id) {
+          this.experimentContext.selectedPlanCaseId = response.selected_case_id
+        }
+        return response
+      } catch (error) {
+        this.addLog(`获取实验运行态失败: ${error.message}`, 'warning')
+        return null
+      }
+    },
+
+    async selectExperimentCase(caseId) {
+      if (!caseId) {
+        return null
+      }
+      try {
+        const response = await backend.experiment.selectCase({ case_id: caseId })
+        this.experimentContext.selectedPlanCaseId = response?.selected_case_id || caseId
+        this.applyExperimentContextUpdate(response)
+        return response
+      } catch (error) {
+        this.addLog(`切换实验 case 失败: ${error.message}`, 'warning')
+        throw error
+      }
+    },
+
+    async fetchRecordingStatus() {
+      try {
+        const status = await backend.recording.getStatus()
+        this.applyRecordingStatus(status)
+        return status
+      } catch (error) {
+        this.addLog(`获取录制状态失败: ${error.message}`, 'warning')
+        return null
+      }
+    },
+
+    async fetchUdpStatus() {
+      try {
+        const status = await backend.udp.getStatus()
+        this.udpConnected = !!status?.data?.connected
+        return status
+      } catch (error) {
+        this.udpConnected = false
+        this.addLog(`获取UDP状态失败: ${error.message}`, 'warning')
+        return null
+      }
+    },
+
+    async startFullRecording(config = {}) {
+      try {
+        const startConfig = {
+          ...config,
+          plan_case_id: config.plan_case_id || this.experimentContext.selectedPlanCaseId || undefined
+        }
+        const response = await backend.recording.startRecording(startConfig)
+        this.applyRecordingStatus({
+          is_active: true,
+          session_id: response.session_id,
+          session_info: response.session_info,
+          experiment_context: response.experiment_context
+        })
+        this.addLog('开始全量录制', 'info')
+        return response
+      } catch (error) {
+        this.addLog(`开始录制失败: ${error.message}`, 'error')
+        throw error
+      }
+    },
+
+    async stopFullRecording() {
+      try {
+        const response = await backend.recording.stopRecording()
+        this.applyRecordingStatus({
+          is_active: false,
+          session_id: response.session_id,
+          session_info: response.session_info,
+          experiment_context: response.experiment_context
+        })
+        this.addLog('停止全量录制', 'info')
+        return response
+      } catch (error) {
+        this.addLog(`停止录制失败: ${error.message}`, 'error')
+        throw error
+      }
     },
     
     /**
@@ -1065,7 +2483,7 @@ export const useDroneStore = defineStore('drone', {
         this.replayAnalysis.loading = true
         this.replayAnalysis.error = null
         
-        const response = await fetch('http://localhost:8000/api/replay/headers')
+        const response = await fetch(buildApiUrl('/api/replay/headers'))
         const data = await response.json()
         
         if (data.type === 'replay_headers' && data.headers) {
@@ -1145,7 +2563,7 @@ export const useDroneStore = defineStore('drone', {
         this.replayAnalysis.loading = true
         this.replayAnalysis.error = null
         
-        const response = await fetch('http://localhost:8000/api/replay/chart', {
+        const response = await fetch(buildApiUrl('/api/replay/chart'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -1240,15 +2658,15 @@ export const useDroneStore = defineStore('drone', {
         case 'flightState':
           // 新格式 - fcsStates结构体数据
           if (data.states_phi !== undefined || data.roll !== undefined) {
-            const phi = data.states_phi ?? data.roll ?? this.fcsStates.states_phi
+            const phi = data.states_phi !== undefined ? this._safeNumber(data.states_phi) : this._normalizeAngleToDegrees(data.roll ?? this.attitude.roll)
             this.history.rollActual.push({ value: phi, timestamp })
           }
           if (data.states_theta !== undefined || data.pitch !== undefined) {
-            const theta = data.states_theta ?? data.pitch ?? this.fcsStates.states_theta
+            const theta = data.states_theta !== undefined ? this._safeNumber(data.states_theta) : this._normalizeAngleToDegrees(data.pitch ?? this.attitude.pitch)
             this.history.pitchActual.push({ value: theta, timestamp })
           }
           if (data.states_psi !== undefined || data.yaw !== undefined) {
-            const psi = data.states_psi ?? data.yaw ?? this.fcsStates.states_psi
+            const psi = data.states_psi !== undefined ? this._safeNumber(data.states_psi) : this._normalizeAngleToDegrees(data.yaw ?? this.attitude.yaw)
             this.history.yawActual.push({ value: psi, timestamp })
           }
           if (data.states_height !== undefined || data.altitude !== undefined) {
@@ -1267,6 +2685,31 @@ export const useDroneStore = defineStore('drone', {
             const vz = data.states_Vz_GS ?? data.velocity_z ?? this.fcsStates.states_Vz_GS
             this.history.velocityZ.push({ value: vz, timestamp })
           }
+          if (data.states_p !== undefined || data.angular_velocity_x !== undefined) {
+            const p = data.states_p ?? data.angular_velocity_x ?? this.fcsStates.states_p
+            this._pushHistoryPoint('angularRateP', p, timestamp, maxPoints)
+          }
+          if (data.states_q !== undefined || data.angular_velocity_y !== undefined) {
+            const q = data.states_q ?? data.angular_velocity_y ?? this.fcsStates.states_q
+            this._pushHistoryPoint('angularRateQ', q, timestamp, maxPoints)
+          }
+          if (data.states_r !== undefined || data.angular_velocity_z !== undefined) {
+            const r = data.states_r ?? data.angular_velocity_z ?? this.fcsStates.states_r
+            this._pushHistoryPoint('angularRateR', r, timestamp, maxPoints)
+          }
+          break
+
+        case 'gncBus':
+          this._pushHistoryPoint('tokenRud', data.GNCBus_TokenMode_rud_state ?? this.gncBus.GNCBus_TokenMode_rud_state, timestamp, maxPoints)
+          this._pushHistoryPoint('tokenAil', data.GNCBus_TokenMode_ail_state ?? this.gncBus.GNCBus_TokenMode_ail_state, timestamp, maxPoints)
+          this._pushHistoryPoint('tokenEle', data.GNCBus_TokenMode_ele_state ?? this.gncBus.GNCBus_TokenMode_ele_state, timestamp, maxPoints)
+          this._pushHistoryPoint('tokenCol', data.GNCBus_TokenMode_col_state ?? this.gncBus.GNCBus_TokenMode_col_state, timestamp, maxPoints)
+          break
+
+        case 'fcsData':
+          this._pushHistoryPoint('futabaRoll', data.Tele_ftb_Roll ?? this.fcsData.Tele_ftb_Roll, timestamp, maxPoints)
+          this._pushHistoryPoint('futabaPitch', data.Tele_ftb_Pitch ?? this.fcsData.Tele_ftb_Pitch, timestamp, maxPoints)
+          this._pushHistoryPoint('futabaYaw', data.Tele_ftb_Yaw ?? this.fcsData.Tele_ftb_Yaw, timestamp, maxPoints)
           break
           
         case 'controlLoop':
@@ -1354,9 +2797,6 @@ export const useDroneStore = defineStore('drone', {
            const keys = Object.keys(params);
            return `[${keys.length}个参数]`
         }
-        if (type === 'scan_lidar') {
-           return `[范围:${params.ip_start}-${params.ip_end}]`
-        }
       } catch (e) {
         return ''
       }
@@ -1368,7 +2808,7 @@ export const useDroneStore = defineStore('drone', {
      */
     async sendCommandREST(type, payload) {
       try {
-        const response = await fetch('http://localhost:8000/api/command', {
+        const response = await fetch(buildApiUrl('/api/command'), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json'
@@ -1452,13 +2892,17 @@ export const useDroneStore = defineStore('drone', {
      * 更新配置
      */
     updateConfig(config) {
-      this.config = { ...this.config, ...config }
+      const normalizedConfig = { ...config }
+      if (Object.prototype.hasOwnProperty.call(normalizedConfig, 'listenAddress')) {
+        normalizedConfig.hostIp = normalizedConfig.listenAddress
+      }
+      this.config = { ...this.config, ...normalizedConfig }
     },
     
     /**
      * 更新轨迹点
      */
-    addTrajectoryPoint(x, y, z) {
+    addTrajectoryPoint(x, y, z, timestamp = Date.now()) {
       const lastPoint = this.trajectory[this.trajectory.length - 1]
       
       // 距离阈值，避免记录过于密集的点
@@ -1468,14 +2912,14 @@ export const useDroneStore = defineStore('drone', {
           Math.pow(y - lastPoint.y, 2) +
           Math.pow(z - lastPoint.z, 2)
         )
-        if (distance < 0.5) {
+        if (distance < 0.1) {
           return
         }
       }
       
       this.trajectory.push({
         x, y, z,
-        timestamp: Date.now()
+        timestamp
       })
       
       // 限制轨迹长度，最多保留1000个点
@@ -1497,6 +2941,21 @@ export const useDroneStore = defineStore('drone', {
      */
     clearTrajectory() {
       this.trajectory = []
+      this.actualPose = {
+        x: 0,
+        y: 0,
+        z: 0,
+        pitch: 0,
+        roll: 0,
+        yaw: 0,
+        timestamp: null,
+        source: 'unknown'
+      }
+      this.actualFlightOrigin = {
+        lat: null,
+        lon: null,
+        alt: null
+      }
     },
     
     /**

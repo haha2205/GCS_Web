@@ -1,11 +1,38 @@
 <template>
   <div class="top-status-bar">
-    <!-- Logo -->
-    <div class="status-section logo-section">
-      <div class="logo-text">Apollo-GCS</div>
+    <div class="status-section brand-section">
+      <div class="logo-text">TJU-GCS</div>
+      <div class="recording-strip">
+        <select class="case-select" :value="selectedPlanCaseId" @change="changeExperimentCase($event.target.value)">
+          <option value="">选择实验 Case</option>
+          <option v-for="item in planCases" :key="item.case_id" :value="item.case_id">
+            {{ item.case_id }} | {{ item.task_name }} | {{ item.scenario_name }}
+          </option>
+        </select>
+        <div class="recording-pill" :class="{ active: recordingEnabled }">
+          <span class="record-dot"></span>
+          <span>{{ recordingEnabled ? '记录中' : '未记录' }}</span>
+        </div>
+        <button class="record-btn start" @click="startRecording" :disabled="recordingEnabled || recordingLoading">
+          开始记录
+        </button>
+        <button class="record-btn stop" @click="stopRecording" :disabled="!recordingEnabled || recordingLoading">
+          停止记录
+        </button>
+        <div class="record-meta">
+          <span>{{ caseIdLabel }}</span>
+          <span>{{ planCaseLabel }}</span>
+          <span>{{ taskLabel }}</span>
+          <span>{{ missionPhaseLabel }}</span>
+          <span>{{ scenarioLabel }}</span>
+          <span>{{ architectureLabel }}</span>
+          <span>{{ elapsedLabel }}</span>
+          <span>{{ currentSessionLabel }}</span>
+          <span>{{ totalBytesLabel }}</span>
+        </div>
+      </div>
     </div>
-   
-    <!-- 链路状态 -->
+
     <div class="status-section link-section">
       <div class="status-item">
         <span class="status-label">UDP:</span>
@@ -15,21 +42,8 @@
         <span class="status-label">WS:</span>
         <span :class="wsClass">{{ wsStatusText }}</span>
       </div>
-      <div class="status-item">
-        <span class="status-label">延迟:</span>
-        <span class="status-text">{{ latency }}ms</span>
-      </div>
     </div>
-    
-    <!-- 系统模式 -->
-    <div class="status-section mode-section">
-      <div class="status-item mode-item">
-        <span class="status-label">模式:</span>
-        <span :class="systemModeClass">{{ systemModeText }}</span>
-      </div>
-    </div>
-    
-    <!-- 当前时间 -->
+
     <div class="status-section time-section">
       <div class="time-text">{{ currentTime }}</div>
     </div>
@@ -37,16 +51,13 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useDroneStore } from '@/store/drone'
 
 const droneStore = useDroneStore()
-
-// 当前时间显示
 const currentTime = ref('')
-const latency = ref(0)
+const recordingLoading = ref(false)
 
-// 更新时间
 const updateTime = () => {
   const now = new Date()
   const hours = String(now.getHours()).padStart(2, '0')
@@ -56,77 +67,105 @@ const updateTime = () => {
 }
 
 let timeInterval = null
-let lastPacketTime = null
+let recordingPoll = null
+let udpPoll = null
 
 onMounted(() => {
   updateTime()
   timeInterval = setInterval(updateTime, 1000)
-  
-  // 监听数据包接收，计算延迟
-  watch(() => [droneStore.position.lat, droneStore.position.lon], ([newLat, newLon]) => {
-    if (newLat !== 0 || newLon !== 0) {
-      lastPacketTime = Date.now()
-    }
-  }, { immediate: true })
-  
-  // 每秒检查链路延迟
-  const latencyCheck = setInterval(() => {
-    if (lastPacketTime && droneStore.isConnected) {
-      latency.value = Date.now() - lastPacketTime
-    } else {
-      latency.value = 0
-    }
-  }, 1000)
-  
-  onUnmounted(() => {
-    clearInterval(latencyCheck)
-  })
+  droneStore.fetchExperimentPlan()
+  droneStore.fetchExperimentRuntime()
+  droneStore.fetchRecordingStatus()
+  droneStore.fetchUdpStatus()
+  recordingPoll = setInterval(() => {
+    droneStore.fetchRecordingStatus()
+  }, 1500)
+  udpPoll = setInterval(() => {
+    droneStore.fetchUdpStatus()
+  }, 1500)
 })
 
 onUnmounted(() => {
   if (timeInterval) {
     clearInterval(timeInterval)
   }
+  if (recordingPoll) {
+    clearInterval(recordingPoll)
+  }
+  if (udpPoll) {
+    clearInterval(udpPoll)
+  }
 })
 
-// UDP连接状态
 const udpClass = computed(() => {
+  if (!droneStore.isUdpConnected) return 'poor'
   if (droneStore.systemStatus.linkQuality > 80) return 'good'
   if (droneStore.systemStatus.linkQuality > 50) return 'medium'
   return 'poor'
 })
 
-const udpStatusText = computed(() => {
-  if (!droneStore.isConnected) return '未连接'
-  if (latency.value < 100) return '已连接'
-  return '超时'
-})
-
-// WebSocket连接状态
+const udpStatusText = computed(() => (droneStore.isUdpConnected ? '已连接' : '未连接'))
 const wsClass = computed(() => ({
   connected: droneStore.isConnected,
   disconnected: !droneStore.isConnected
 }))
-
-const wsStatusText = computed(() => {
-  return droneStore.isConnected ? '已连接' : '未连接'
-})
-
-// 系统模式
-const systemMode = computed(() => {
-  return droneStore.systemMode || 'REALTIME'
-})
-
-const systemModeText = computed(() => {
-  return systemMode.value === 'REALTIME' ? '实时' : '回放'
-})
-
-const systemModeClass = computed(() => {
-  return {
-    'mode-realtime': systemMode.value === 'REALTIME',
-    'mode-replay': systemMode.value === 'REPLAY'
+const wsStatusText = computed(() => (droneStore.isConnected ? '已连接' : '未连接'))
+const recordingEnabled = computed(() => droneStore.dataRecording.enabled)
+const currentSessionLabel = computed(() => droneStore.dataRecording.sessionId || '无会话')
+const totalBytesLabel = computed(() => formatBytes(droneStore.dataRecording.totalBytes || 0))
+const caseIdLabel = computed(() => droneStore.experimentContext.caseId || 'case001')
+const planCaseLabel = computed(() => droneStore.experimentContext.planCaseId || 'UNPLANNED')
+const missionPhaseLabel = computed(() => droneStore.experimentContext.missionPhase || 'idle')
+const taskLabel = computed(() => droneStore.experimentContext.task.taskName || 'Idle')
+const scenarioLabel = computed(() => droneStore.experimentContext.scenarioName || droneStore.experimentContext.scenarioId || 'scenario_default')
+const architectureLabel = computed(() => droneStore.experimentContext.architecture.displayName || 'Baseline Balanced')
+const planCases = computed(() => droneStore.experimentContext.availableCases || [])
+const selectedPlanCaseId = computed(() => droneStore.experimentContext.selectedPlanCaseId || '')
+const elapsedLabel = computed(() => {
+  currentTime.value
+  const startTime = droneStore.dataRecording.recordingStartTime
+  if (!startTime) {
+    return '00:00:00'
   }
+  const endTime = droneStore.dataRecording.enabled ? Date.now() : (droneStore.dataRecording.lastRecordTime || Date.now())
+  const totalSeconds = Math.max(0, Math.floor((endTime - startTime) / 1000))
+  const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0')
+  const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0')
+  const seconds = String(totalSeconds % 60).padStart(2, '0')
+  return `${hours}:${minutes}:${seconds}`
 })
+
+const formatBytes = (value) => {
+  const bytes = Number(value || 0)
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)}KB`
+  return `${bytes}B`
+}
+
+const changeExperimentCase = async (caseId) => {
+  if (!caseId || caseId === droneStore.experimentContext.selectedPlanCaseId) {
+    return
+  }
+  await droneStore.selectExperimentCase(caseId)
+}
+
+const startRecording = async () => {
+  recordingLoading.value = true
+  try {
+    await droneStore.startFullRecording()
+  } finally {
+    recordingLoading.value = false
+  }
+}
+
+const stopRecording = async () => {
+  recordingLoading.value = true
+  try {
+    await droneStore.stopFullRecording()
+  } finally {
+    recordingLoading.value = false
+  }
+}
 </script>
 
 <style scoped>
@@ -134,76 +173,165 @@ const systemModeClass = computed(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 48px;
-  padding: 0 24px;
-  background-color: #1F1F1F;
-  border-bottom: 1px solid #2A2A2A;
-  color: #FFFFFF;
+  min-height: 56px;
+  padding: 0 14px;
+  background-color: transparent;
+  border-bottom: 0;
+  color: var(--text-primary);
+  gap: 12px;
 }
 
 .status-section {
   display: flex;
   align-items: center;
-  gap: 24px;
+  gap: 12px;
 }
 
-.logo-section .logo-text {
-  font-size: 20px;
+.brand-section {
+  min-width: 0;
+  flex: 1;
+}
+
+.logo-text {
+  flex-shrink: 0;
+  white-space: nowrap;
+  line-height: 1;
+  font-size: 13px;
   font-weight: 700;
-  color: #00BCD4;
-  letter-spacing: 1.5px;
-  background: linear-gradient(135deg, #00BCD4, #2196F3);
+  color: var(--accent-color);
+  letter-spacing: 0.8px;
+  background: linear-gradient(135deg, #0f172a, #2563eb);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+.recording-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.case-select {
+  min-width: 210px;
+  max-width: 320px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: rgba(255, 255, 255, 0.9);
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.recording-pill {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: #eef2f8;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.recording-pill.active {
+  background: rgba(22, 163, 74, 0.1);
+  border-color: rgba(22, 163, 74, 0.25);
+  color: #166534;
+}
+
+.record-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #94a3b8;
+}
+
+.recording-pill.active .record-dot {
+  background: #16a34a;
+}
+
+.record-btn {
+  height: 30px;
+  border-radius: 8px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.record-btn.start {
+  background: rgba(22, 163, 74, 0.1);
+  color: #166534;
+}
+
+.record-btn.stop {
+  background: rgba(220, 38, 38, 0.08);
+  color: #b91c1c;
+}
+
+.record-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.record-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .link-section {
   display: flex;
   gap: 24px;
   align-items: center;
+  flex-shrink: 0;
 }
 
-.status-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
 
 .status-label {
-  color: #999999;
+  color: var(--text-tertiary);
   font-weight: 400;
 }
 
 .status-text {
-  color: #FFFFFF;
+  color: var(--text-primary);
   font-weight: 500;
   font-family: 'Consolas', 'Monaco', monospace;
 }
 
 /* 链路状态样式 */
 .link-section .status-item .good {
-  color: #00C853;
+  color: var(--success-color);
   font-weight: 500;
 }
 
 .link-section .status-item .medium {
-  color: #FFC107;
+  color: var(--warning-color);
   font-weight: 500;
 }
 
 .link-section .status-item .poor {
-  color: #FF5252;
+  color: var(--error-color);
   font-weight: 500;
 }
 
 .ws-status.connected {
-  color: #00C853;
+  color: var(--success-color);
 }
 
 .ws-status.disconnected {
-  color: #FF5252;
+  color: var(--error-color);
 }
 
 /* 系统模式样式 */
@@ -214,31 +342,37 @@ const systemModeClass = computed(() => {
 }
 
 .mode-item .mode-realtime {
-  color: #00C853;
+  color: var(--success-color);
   font-weight: 600;
 }
 
-.mode-item .mode-replay {
-  color: #FFC107;
+.mode-item .mode-standby {
+  color: var(--warning-color);
   font-weight: 600;
-  animation: pulse-replay 2s ease-in-out infinite;
-}
-
-@keyframes pulse-replay {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
 }
 
 .time-section {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
 }
 
 .time-text {
-  font-size: 14px;
-  color: #999999;
+  font-size: 12px;
+  color: var(--text-secondary);
   font-weight: 400;
   font-family: 'Consolas', 'Monaco', monospace;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.3px;
+}
+
+@media (max-width: 1400px) {
+  .top-status-bar {
+    padding: 0 10px;
+    gap: 8px;
+  }
+
+  .recording-strip {
+    gap: 6px;
+  }
 }
 </style>

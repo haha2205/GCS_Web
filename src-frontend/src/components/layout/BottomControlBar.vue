@@ -1,41 +1,63 @@
 <template>
   <div class="bottom-bar">
-    <!-- 实时模式：显示链路状态和系统日志 -->
-    <div v-if="systemMode === 'REALTIME'" class="realtime-content">
-      <!-- 中间：后端链路状态 -->
-      <div class="link-console-section">
-        <div class="console-header">
-          <span class="console-title">LINK STATUS</span>
-          <div class="status-indicators">
-            <span class="indicator" :class="{ error: !droneStore.isConnected }">
-              <span class="indicator-dot"></span>
-              UDP: {{ udpConnected ? '已连接' : '未连接' }}
-            </span>
-            <span class="indicator" :class="{ error: !wsConnected }">
-              <span class="indicator-dot"></span>
-              WS: {{ wsConnected ? '已连接' : '未连接' }}
-            </span>
-            <span class="indicator">
-              <span class="indicator-dot success"></span>
-              延迟: {{ latency }}ms
-            </span>
+    <div class="bottom-grid">
+      <div class="left-panels">
+        <div class="planning-console-section section-column">
+          <div class="console-header">
+            <span class="console-title">PLANNING COMMAND</span>
+            <div class="planning-header-actions">
+              <span class="planning-summary">{{ currentCmdIdxInfo }}</span>
+              <button class="planning-btn primary compact-header-btn" @click="sendPlanningCommand" :disabled="!droneStore.canSendCommands">发送</button>
+              <button class="planning-btn compact-header-btn" @click="resetPlanning">重置</button>
+            </div>
+          </div>
+
+          <div class="planning-grid">
+            <label class="planning-field">
+              <span>X</span>
+              <input v-model.number="targetPos.x" type="number" class="planning-input" step="1" />
+            </label>
+            <label class="planning-field">
+              <span>Y</span>
+              <input v-model.number="targetPos.y" type="number" class="planning-input" step="1" />
+            </label>
+            <label class="planning-field">
+              <span>Z</span>
+              <input v-model.number="targetPos.z" type="number" class="planning-input" step="1" min="0" />
+            </label>
+            <label class="planning-field speed-field">
+              <span>速度</span>
+              <input v-model.number="cruiseSpeed" type="number" class="planning-input" step="0.5" min="0" max="30" />
+            </label>
+            <label class="mission-toggle">
+              <input type="checkbox" v-model="enableMission" />
+              <span>使能任务</span>
+            </label>
           </div>
         </div>
-        <div class="console-content" ref="linkLogRef">
-          <div
-            v-for="(log, i) in linkLogs"
-            :key="i"
-            class="log-line"
-            :class="'log-' + log.level"
-          >
-            <span class="log-time">[{{ log.time }}]</span>
-            <span class="log-message">{{ log.message }}</span>
+
+        <div class="command-column">
+          <div class="critical-console-section">
+            <div class="console-header">
+              <span class="console-title">CRITICAL CMDIDX</span>
+            </div>
+            <div class="critical-actions compact-actions" :class="{ disabled: !droneStore.canSendCommands }">
+              <button
+                v-for="cmd in criticalBottomCommands"
+                :key="cmd.id"
+                class="quick-command-btn compact-btn"
+                :class="[`tone-${cmd.tone}`, { disabled: !droneStore.canSendCommands }]"
+                :title="cmd.name"
+                @click="triggerCriticalCommand(cmd)"
+              >
+                <span class="quick-command-label">{{ cmd.name }}</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
 
-      <!-- 右侧：系统日志 -->
-      <div class="sys-console-section">
+      <div class="sys-console-section section-column">
         <div class="console-header">
           <span class="console-title">SYSTEM LOG</span>
           <button class="clear-btn" @click="clearSysLog" title="清空日志">清空</button>
@@ -53,50 +75,39 @@
         </div>
       </div>
     </div>
-
-    <!-- 回放模式：显示播放控制器 -->
-    <div v-else class="replay-content">
-      <ReplayController />
-    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useDroneStore } from '@/store/drone'
-import ReplayController from './ReplayController.vue'
+import { criticalBottomCommands } from '@/constants/commandConfig'
 
 const droneStore = useDroneStore()
 
-// 获取系统模式
-const systemMode = computed(() => droneStore.systemMode)
-const linkLogRef = ref(null)
 const sysLogRef = ref(null)
+const targetPos = ref({ x: 100, y: 100, z: 10 })
+const cruiseSpeed = ref(5)
+const enableMission = ref(false)
+const currentCmdIdx = ref(0)
+const seqIdCounter = ref(0)
+const sysLogs = ref([])
 
-// 模拟链路状态（实际应用中从store获取）
-const udpConnected = ref(true)
-const wsConnected = ref(true)
-const latency = ref(45)
+watch(() => droneStore.gcsData?.Tele_GCS_CmdIdx, (newVal) => {
+  if (newVal !== 0 && newVal !== undefined) {
+    currentCmdIdx.value = newVal
+  }
+}, { immediate: true })
 
-// 链路日志
-const linkLogs = ref([
-])
-
-// 系统日志
-const sysLogs = ref([
-])
-
-// 监听store的日志
 watch(() => droneStore.logs, (logs) => {
   if (logs.length > 0) {
     const lastLog = logs[logs.length - 1]
     sysLogs.value.push({
       time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-      level: lastLog.level === 'error' ? 'error' : lastLog.level === 'warning' ? 'warn' : 'info',
+      level: lastLog.level === 'error' ? 'error' : lastLog.level === 'warning' ? 'warn' : lastLog.level === 'success' ? 'success' : 'info',
       icon: lastLog.level === 'error' ? '❌' : lastLog.level === 'warning' ? '⚠' : '✓',
       message: lastLog.message
     })
-    // 自动滚动到底部
     setTimeout(() => {
       if (sysLogRef.value) {
         sysLogRef.value.scrollTop = sysLogRef.value.scrollHeight
@@ -105,100 +116,17 @@ watch(() => droneStore.logs, (logs) => {
   }
 }, { deep: true })
 
-// 飞行指令
-const handleExternalControl = async () => {
-  if (!droneStore.connected) return
-  try {
-    // 发送外控命令 (CmdIdx: 1)
-    await droneStore.sendCommand('cmd_idx', { cmdId: 1, name: '外控' })
-    addSysLog('外控指令已发送', 'info')
-  } catch (error) {
-    addSysLog('外控失败: ' + error.message, 'error')
+const currentCmdIdxInfo = computed(() => {
+  if (currentCmdIdx.value === 0) return 'CmdIdx: 无'
+  const cmdMap = {
+    1: '外控', 2: '混控', 3: '程控', 4: '爬升', 5: '巡航', 6: '下降', 7: '解除定高', 8: '航向保持',
+    9: '左盘旋', 10: '右盘旋', 11: '航向锁定', 12: '发动机启动', 13: '发动机停止', 14: '自动起飞',
+    15: '自动着陆', 16: '悬停', 17: '复原', 18: '预控', 19: '地速飞行', 20: '空速飞行', 21: '起飞准备',
+    22: '人工起飞', 23: '人工着陆', 24: '避障开', 25: '避障关'
   }
-}
+  return `CmdIdx ${currentCmdIdx.value} ${cmdMap[currentCmdIdx.value] || ''}`
+})
 
-const handleTakeoffPreparation = async () => {
-  if (!droneStore.connected) return
-  try {
-    // 发送起飞准备命令 (CmdIdx: 21)
-    await droneStore.sendCommand('cmd_idx', { cmdId: 21, name: '起飞准备' })
-    addSysLog('起飞准备指令已发送', 'info')
-  } catch (error) {
-    addSysLog('起飞准备失败: ' + error.message, 'error')
-  }
-}
-
-const handleManualTakeoff = async () => {
-  if (!droneStore.connected) return
-  try {
-    // 发送人工起飞命令 (CmdIdx: 22)
-    await droneStore.sendCommand('cmd_idx', { cmdId: 22, name: '人工起飞' })
-    addSysLog('人工起飞指令已发送', 'success')
-  } catch (error) {
-    addSysLog('人工起飞失败: ' + error.message, 'error')
-  }
-}
-
-const handleAutoTakeoff = async () => {
-  if (!droneStore.connected) return
-  try {
-    // 发送自动起飞命令 (CmdIdx: 14)
-    await droneStore.sendCommand('cmd_idx', { cmdId: 14, name: '自动起飞' })
-    addSysLog('自动起飞指令已发送', 'success')
-  } catch (error) {
-    addSysLog('自动起飞失败: ' + error.message, 'error')
-  }
-}
-
-const handleManualLanding = async () => {
-  if (!droneStore.connected) return
-  try {
-    // 发送人工着陆命令 (CmdIdx: 23)
-    await droneStore.sendCommand('cmd_idx', { cmdId: 23, name: '人工着陆' })
-    addSysLog('人工着陆指令已发送', 'info')
-  } catch (error) {
-    addSysLog('人工着陆失败: ' + error.message, 'error')
-  }
-}
-
-const handleAutoLanding = async () => {
-  if (!droneStore.connected) return
-  try {
-    // 发送自动着陆命令 (CmdIdx: 15)
-    await droneStore.sendCommand('cmd_idx', { cmdId: 15, name: '自动着陆' })
-    addSysLog('自动着陆指令已发送', 'info')
-  } catch (error) {
-    addSysLog('自动着陆失败: ' + error.message, 'error')
-  }
-}
-
-const handleRTL = async () => {
-  if (!droneStore.connected) return
-  if (!confirm('确认要返航吗？')) return
-  try {
-    // 发送一键返航命令 (CmdIdx: 17)
-    await droneStore.sendCommand('cmd_idx', { cmdId: 17, name: '一键返航' })
-    addSysLog('返航指令已发送', 'warning')
-  } catch (error) {
-    addSysLog('返航失败: ' + error.message, 'error')
-  }
-}
-
-const handleAvoidanceControl = async () => {
-  if (!droneStore.connected) return
-  try {
-    // 切换避障开关 (CmdIdx: 24/25)
-    const avoidanceEnabled = !droneStore.avoidanceEnabled || false
-    const cmdId = avoidanceEnabled ? 25 : 24
-    const name = avoidanceEnabled ? '避障关' : '避障开'
-    await droneStore.sendCommand('cmd_idx', { cmdId, name })
-    addSysLog(`${name}指令已发送`, 'info')
-  } catch (error) {
-    addSysLog('避障控制失败: ' + error.message, 'error')
-  }
-}
-
-// 添加系统日志
 const addSysLog = (message, level = 'info') => {
   sysLogs.value.unshift({
     time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
@@ -206,18 +134,72 @@ const addSysLog = (message, level = 'info') => {
     icon: level === 'error' ? '❌' : level === 'warning' ? '⚠' : level === 'success' ? '✓' : 'ℹ',
     message
   })
-  
-  // 限制日志数量
+
   if (sysLogs.value.length > 100) {
     sysLogs.value = sysLogs.value.slice(0, 100)
   }
-  
-  // 自动滚动
+
   setTimeout(() => {
     if (sysLogRef.value) {
       sysLogRef.value.scrollTop = sysLogRef.value.scrollHeight
     }
   }, 50)
+}
+
+const triggerCriticalCommand = async (cmd) => {
+  if (!droneStore.canSendCommands) {
+    addSysLog('WS或UDP未就绪，无法发送关键指令', 'warning')
+    return
+  }
+
+  if (cmd.confirm && !window.confirm(cmd.confirm)) {
+    return
+  }
+
+  try {
+    const result = await droneStore.sendRemoteCommand(cmd.id, cmd.name)
+    if (result?.status === 'success') {
+      const level = cmd.tone === 'danger' ? 'warning' : cmd.tone === 'success' ? 'success' : 'info'
+      addSysLog(`${cmd.name}指令已发送`, level)
+    }
+  } catch (error) {
+    addSysLog(`${cmd.name}失败: ${error.message}`, 'error')
+  }
+}
+
+const sendPlanningCommand = async () => {
+  if (!droneStore.canSendCommands) {
+    addSysLog('WS或UDP未就绪，无法发送规划指令', 'warning')
+    return
+  }
+
+  try {
+    seqIdCounter.value = (seqIdCounter.value + 1) % 1000000
+    const result = await droneStore.sendCommandREST('gcs_command', {
+      seqId: seqIdCounter.value,
+      targetX: targetPos.value.x,
+      targetY: targetPos.value.y,
+      targetZ: targetPos.value.z,
+      cruiseSpeed: cruiseSpeed.value,
+      enable: enableMission.value ? 1 : 0,
+      cmdId: currentCmdIdx.value
+    })
+
+    if (result?.status === 'success') {
+      addSysLog(`规划指令已发送: (${targetPos.value.x}, ${targetPos.value.y}, ${targetPos.value.z}) ${cruiseSpeed.value}m/s`, 'success')
+    } else {
+      throw new Error(result?.message || '发送失败')
+    }
+  } catch (error) {
+    addSysLog(`规划发送失败: ${error.message}`, 'error')
+  }
+}
+
+const resetPlanning = () => {
+  targetPos.value = { x: 100, y: 100, z: 10 }
+  cruiseSpeed.value = 5
+  enableMission.value = false
+  addSysLog('规划指令已重置', 'info')
 }
 
 const clearSysLog = () => {
@@ -228,108 +210,248 @@ const clearSysLog = () => {
 
 <style scoped>
 .bottom-bar {
-  display: flex;
-  flex-direction: row;
-  gap: 10px;
-  padding: 8px 16px;
-  background: #141414;
-  border-top: 1px solid #2e2e2;
-  height: 140px;
+  box-sizing: border-box;
+  height: 100%;
+  padding: 6px 12px;
+  background: var(--surface-secondary);
+  border-top: 1px solid var(--border-color);
+  overflow: hidden;
 }
 
-/* 实时模式内容 - 左右排列 */
-.realtime-content {
-  display: flex;
-  flex-direction: row;
+.bottom-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(300px, 0.9fr);
   gap: 10px;
   width: 100%;
   height: 100%;
+  min-height: 0;
 }
 
-/* 回放模式内容 */
-.replay-content {
+.left-panels {
+  display: grid;
+  grid-template-columns: minmax(320px, 1.1fr) minmax(420px, 1.2fr);
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.section-column,
+.command-column {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 100%;
-  padding: 0 20px;
-  width: 100%;
-  background: #141414;
-  border-top: 2px solid #3274F6;
-  user-select: none;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
 }
 
-/* 控制台区域 - 实时模式下左右排列 */
-.realtime-content .link-console-section,
-.realtime-content .sys-console-section {
-  background: #1e1e1e;
-  border: 1px solid #333;
+.critical-console-section,
+.planning-console-section,
+.sys-console-section {
+  background: var(--panel-bg);
+  border: 1px solid var(--border-color);
   border-radius: 4px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  flex: 1;
   min-width: 0;
+}
+
+.critical-console-section,
+.planning-console-section,
+.sys-console-section {
+  flex: 1;
 }
 
 .console-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 6px 10px;
-  background: #252526;
-  border-bottom: 1px solid #333;
+  padding: 5px 8px;
+  background: var(--surface-elevated);
+  border-bottom: 1px solid var(--border-soft);
 }
 
 .console-title {
   font-size: 12px;
   font-weight: 600;
-  color: #00bcd4;
+  color: var(--accent-color);
   font-family: 'Roboto Mono', monospace;
 }
 
-.status-indicators {
-  display: flex;
-  gap: 12px;
+.planning-summary {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: 'Roboto Mono', monospace;
 }
 
-.indicator {
+.planning-header-actions {
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
+}
+
+.planning-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(70px, 1fr));
+  gap: 6px 8px;
+  padding: 8px 10px;
+  align-items: start;
+  background: rgba(255, 255, 255, 0.82);
+  flex: 1;
+}
+
+.planning-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   font-size: 11px;
-  color: #888;
-  font-family: 'Roboto Mono', monospace;
+  color: var(--text-secondary);
 }
 
-.indicator-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #666;
+.planning-input {
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  background: var(--surface-elevated);
+  padding: 0 8px;
+  color: var(--text-primary);
 }
 
-.indicator-dot.success {
-  background: #4caf50;
+.planning-input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.14);
 }
 
-.indicator.error {
-  background: #ff4d4f;
+.speed-field {
+  min-width: 0;
+}
+
+.mission-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.mission-toggle input {
+  accent-color: var(--accent-color);
+}
+
+.planning-btn {
+  min-width: 96px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: #f8fbff;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.planning-btn.primary {
+  background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
+  border-color: rgba(59, 130, 246, 0.28);
+  color: var(--accent-color);
+}
+
+.planning-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.compact-header-btn {
+  min-width: 60px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+  border-radius: 8px;
+}
+
+.critical-actions {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.55) 0%, rgba(248, 250, 252, 0.95) 100%);
+  flex: 1;
+}
+
+.critical-actions.disabled {
+  opacity: 0.58;
+}
+
+.quick-command-btn {
+  min-height: 34px;
+  padding: 4px 6px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+  color: var(--text-primary);
+}
+
+.quick-command-btn:hover:not(.disabled) {
+  transform: translateY(-1px);
+}
+
+.quick-command-btn.disabled {
+  cursor: not-allowed;
+}
+
+.quick-command-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.tone-primary {
+  background: linear-gradient(180deg, #eff6ff 0%, #dbeafe 100%);
+  border-color: rgba(59, 130, 246, 0.28);
+}
+
+.tone-success {
+  background: linear-gradient(180deg, #ecfdf5 0%, #d1fae5 100%);
+  border-color: rgba(16, 185, 129, 0.28);
+}
+
+.tone-warning {
+  background: linear-gradient(180deg, #fffbeb 0%, #fef3c7 100%);
+  border-color: rgba(245, 158, 11, 0.28);
+}
+
+.tone-danger {
+  background: linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%);
+  border-color: rgba(239, 68, 68, 0.28);
 }
 
 .console-content {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 8px;
+  padding: 6px 8px;
   font-family: 'Roboto Mono', monospace;
   font-size: 11px;
+  background: rgba(255, 255, 255, 0.68);
 }
 
 .log-line {
   display: flex;
   gap: 8px;
   padding: 4px 0;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--border-soft);
   line-height: 1.5;
 }
 
@@ -337,37 +459,32 @@ const clearSysLog = () => {
   border-bottom: none;
 }
 
-.log-time {
-  color: #666;
-  min-width: 80px;
-}
-
 .log-message {
-  color: #ccc;
+  color: var(--text-secondary);
   flex: 1;
   word-break: break-all;
 }
 
 .log-info .log-message {
-  color: #e0e0e0;
+  color: var(--text-primary);
 }
 
 .log-success .log-message {
-  color: #69f0ae;
+  color: #166534;
 }
 
 .log-warn .log-message {
-  color: #ffab40;
+  color: #c2410c;
 }
 
 .log-error .log-message {
-  color: #ff5252;
+  color: #b91c1c;
 }
 
 .clear-btn {
-  background: #1e3a8a;
-  border: 1px solid #333;
-  color: #fff;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  color: var(--accent-color);
   padding: 4px 12px;
   border-radius: 4px;
   font-size: 11px;
@@ -376,24 +493,49 @@ const clearSysLog = () => {
 }
 
 .clear-btn:hover {
-  background: #264078;
+  background: rgba(59, 130, 246, 0.18);
 }
 
-/* 滚动条样式 */
 .console-content::-webkit-scrollbar {
   width: 6px;
 }
 
 .console-content::-webkit-scrollbar-track {
-  background: #1a1a1a;
+  background: rgba(226, 232, 240, 0.8);
+  border-radius: 3px;
 }
 
 .console-content::-webkit-scrollbar-thumb {
-  background: #3288fa;
+  background: rgba(59, 130, 246, 0.5);
   border-radius: 3px;
 }
 
 .console-content::-webkit-scrollbar-thumb:hover {
-  background: #2676ea;
+  background: rgba(59, 130, 246, 0.72);
+}
+
+@media (max-width: 1280px) {
+  .bottom-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .left-panels {
+    grid-template-columns: 1fr;
+  }
+
+  .planning-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .planning-header-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 760px) {
+  .planning-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>
