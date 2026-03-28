@@ -1,0 +1,11 @@
+logical_function_id,constraint_type,allowed_hardware,required_safety_level,notes
+LF_RC_Parser,fixed_hardware,MCU_GP4,ASIL-D,RC parser is bound to GP4 sensor input CAN channels
+LF_INS_Parser,fixed_hardware,MCU_GP4,ASIL-B,INS parser is bound to GP4 sensor input channels
+LF_Motor_Driver,fixed_hardware,MCU_GP3,ASIL-B,Motor driver is bound to GP3 actuator output channels
+LF_SoC_Adapter,fixed_hardware,MCU_GP2,ASIL-B,SoC adapter is bound to the unique SoC to MCU port on GP2
+LF_Flight_Control,allowed_hardware,MCU_GP1|MCU_GP2,ASIL-D,Flight control may run on GP1 or GP2 but must stay on ASIL-D MCU
+LF_Perception_Radar,allowed_hardware,SoC_NPU|SoC_CPU|SoC_ISP,QM,Radar perception is a SoC-domain function with compute mismatch penalties on non-native resources
+LF_Perception_Camera,allowed_hardware,SoC_ISP|SoC_CPU|SoC_NPU,QM,Camera perception is a SoC-domain function with compute mismatch penalties on non-native resources
+LF_Path_Planning,allowed_hardware,SoC_CPU|SoC_NPU|SoC_ISP,QM,Planning is a SoC-domain function with compute mismatch penalties on non-native resources
+LF_Comm_Telemery,allowed_hardware,SoC_CPU|SoC_NPU|SoC_ISP,QM,Telemetry manager is a SoC-domain communication function
+LF_Comm_MCU,allowed_hardware,SoC_CPU|SoC_NPU|SoC_ISP,QM,MCU communication manager is a SoC-domain communication function

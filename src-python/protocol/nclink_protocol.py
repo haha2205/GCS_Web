@@ -54,20 +54,12 @@ NCLINK_RECEIVE_EXTY_FCS_PARAM = 0x49
 NCLINK_RECEIVE_EXTY_FCS_ROOT = 0x4A
 NCLINK_RECEIVE_EXTY_FCS_ESC = 0x4B
 
-# 雷达/障碍物感知相关功能字
-NCLINK_RECEIVE_LIDAR_OBSTACLES = 0x50
-NCLINK_RECEIVE_LIDAR_OBSTACLE_INFO = 0x51
-NCLINK_RECEIVE_LIDAR_PERF = 0x52
-NCLINK_RECEIVE_LIDAR_STATUS = 0x53
-NCLINK_SEND_LIDAR_CONFIG = 0x54
-
 # 航迹规划协议定义
 NCLINK_GCS_COMMAND = 0x70
 NCLINK_GCS_TELEMETRY = 0x71
 
 # 端口定义
 SEND_ONLY_PORT = 18506
-LIDAR_SEND_PORT = 18507
 RECEIVE_PORT = 18504
 PLANNING_SEND_PORT = 18510
 PLANNING_RECV_PORT = 18511
@@ -387,7 +379,8 @@ class ExtY_FCS_DATACTRL_T:
                 'dR_delta': self.dataCtrl_n_rudInLoop_dR_delta,
                 'R_P': self.dataCtrl_n_rudInLoop_R_P,
                 'R_Int': self.dataCtrl_n_rudInLoop_R_Int,
-                'rud_fbc': self.dataCtrl_n_rudInLoop_rud_fbc
+                'rud_fbc': self.dataCtrl_n_rudInLoop_rud_fbc,
+                'rud_law_out': self.dataCtrl_n_rudInLoop_rud_law_out
             },
             'colOutLoop': {
                 'H_delta': self.dataCtrl_n_colOutLoop_H_delta,
@@ -607,19 +600,6 @@ class ExtY_FCS_GNCBUS_T:
     GNCBus_HomeValue_lon_home: real_T = 0.0
     GNCBus_HomeValue_lat_home: real_T = 0.0
     
-    # 向后兼容的简化字段（保持旧代码可用）
-    pos_x: real32_T = 0.0
-    pos_y: real32_T = 0.0
-    pos_z: real32_T = 0.0
-    vel_x: real32_T = 0.0
-    vel_y: real32_T = 0.0
-    vel_z: real32_T = 0.0
-    euler_phi: real32_T = 0.0
-    euler_theta: real32_T = 0.0
-    euler_psi: real32_T = 0.0
-    control_mode: int32_T = 0
-    flight_mode: int32_T = 0
-    
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ExtY_FCS_GNCBUS_T':
         """从字节数据解析GN&C总线状态
@@ -634,27 +614,18 @@ class ExtY_FCS_GNCBUS_T:
         - CmdValue: 7个real32 = 28字节
         - VarValue: 4个real32 = 16字节
         - TrimValue: 3个real32 = 12字节
-        - ParamsLMT: 10个real32 = 40字节
+        - ParamsLMT: 11个real32 = 44字节
         - AcValue: 4个real32 = 16字节
         - HoverValue: 2个real_T + 1个int8 = 16+1 = 17字节
         - HomeValue: 2个real_T = 16字节
         
-        总计：17 + 37 + 2 + 40 + 28 + 16 + 12 + 40 + 16 + 17 + 16 = 241字节
-        但实际可能只发送部分字段，这里解析CmdValue关键字段
+        总计：17 + 37 + 2 + 40 + 28 + 16 + 12 + 44 + 16 + 17 + 16 = 245字节
         """
-        if len(data) < 56:
-            # 至少需要TokenMode(17) + FtbOpt(37) + SrcValue(2) = 56字节
+        if len(data) < 245:
+            # 至少需要完整的 GNCBUS 基础结构
             return cls()
         
         try:
-            # 定义解析格式（小端序）
-            # TokenMode: 17个int8
-            # FtbOpt: 9个float + 1个int8
-            # SrcValue: 2个int8
-            # MixValue: 10个float
-            # CmdValue: 7个float（包含我们需要的Vx_cmd, Vy_cmd, height_cmd, psi_cmd）
-            
-            # 由于字段太多，我们只解析到CmdValue的前7个float
             offset = 0
             
             # 1. TokenMode (17个int8)
@@ -675,9 +646,33 @@ class ExtY_FCS_GNCBUS_T:
             mixvalue_values = struct.unpack_from('<10f', data, offset)
             offset += 40  # 10*4
             
-            # 5. CmdValue (7个float) - 这是我们需要的！
+            # 5. CmdValue (7个float)
             cmdvalue_values = struct.unpack_from('<7f', data, offset)
             offset += 28  # 7*4
+
+            # 6. VarValue (4个float)
+            varvalue_values = struct.unpack_from('<4f', data, offset)
+            offset += 16
+
+            # 7. TrimValue (3个float)
+            trimvalue_values = struct.unpack_from('<3f', data, offset)
+            offset += 12
+
+            # 8. ParamsLMT (11个float)
+            paramslmt_values = struct.unpack_from('<11f', data, offset)
+            offset += 44
+
+            # 9. AcValue (4个float)
+            acvalue_values = struct.unpack_from('<4f', data, offset)
+            offset += 16
+
+            # 10. HoverValue (2个double + 1个int8)
+            hovervalue_values = struct.unpack_from('<2db', data, offset)
+            offset += 17
+
+            # 11. HomeValue (2个double)
+            homevalue_values = struct.unpack_from('<2d', data, offset)
+            offset += 16
             
             # 构建返回对象
             return cls(
@@ -728,7 +723,7 @@ class ExtY_FCS_GNCBUS_T:
                 GNCBus_MixValue_Hdot_mix=mixvalue_values[8],
                 GNCBus_MixValue_height_mix=mixvalue_values[9],
                 
-                # CmdValue - 重要！这是导航标签页需要的数据
+                # CmdValue
                 GNCBus_CmdValue_phi_cmd=cmdvalue_values[0],   # 滚转指令
                 GNCBus_CmdValue_Hdot_cmd=cmdvalue_values[1],   # 垂向速度指令
                 GNCBus_CmdValue_R_cmd=cmdvalue_values[2],      # 偏航速率指令
@@ -736,12 +731,45 @@ class ExtY_FCS_GNCBUS_T:
                 GNCBus_CmdValue_Vx_cmd=cmdvalue_values[4],     # X速度指令
                 GNCBus_CmdValue_Vy_cmd=cmdvalue_values[5],     # Y速度指令
                 GNCBus_CmdValue_height_cmd=cmdvalue_values[6],  # 高度指令
-                
-                # 向后兼容字段
-                pos_x=0.0, pos_y=0.0, pos_z=0.0,
-                vel_x=0.0, vel_y=0.0, vel_z=0.0,
-                euler_phi=0.0, euler_theta=0.0, euler_psi=0.0,
-                control_mode=0, flight_mode=0
+
+                # VarValue
+                GNCBus_VarValue_psi_var=varvalue_values[0],
+                GNCBus_VarValue_height_var=varvalue_values[1],
+                GNCBus_VarValue_dX_var=varvalue_values[2],
+                GNCBus_VarValue_dY_var=varvalue_values[3],
+
+                # TrimValue
+                GNCBus_TrimValue_Vx_trim=trimvalue_values[0],
+                GNCBus_TrimValue_col_trim=trimvalue_values[1],
+                GNCBus_TrimValue_col_autotrim=trimvalue_values[2],
+
+                # ParamsLMT
+                GNCBus_ParamsLMT_Vx_LMT=paramslmt_values[0],
+                GNCBus_ParamsLMT_Vy_LMT=paramslmt_values[1],
+                GNCBus_ParamsLMT_R_LMT=paramslmt_values[2],
+                GNCBus_ParamsLMT_Hdot_ILmt=paramslmt_values[3],
+                GNCBus_ParamsLMT_Hdot_UpLMT=paramslmt_values[4],
+                GNCBus_ParamsLMT_Hdot_DownLMT=paramslmt_values[5],
+                GNCBus_ParamsLMT_R_FLYTURN=paramslmt_values[6],
+                GNCBus_ParamsLMT_R_unit=paramslmt_values[7],
+                GNCBus_ParamsLMT_Hdot_unit=paramslmt_values[8],
+                GNCBus_ParamsLMT_Vx_unit=paramslmt_values[9],
+                GNCBus_ParamsLMT_Vy_unit=paramslmt_values[10],
+
+                # AcValue
+                GNCBus_AcValue_ac_dY=acvalue_values[0],
+                GNCBus_AcValue_ac_dX=acvalue_values[1],
+                GNCBus_AcValue_ac_dPsi=acvalue_values[2],
+                GNCBus_AcValue_ac_dL=acvalue_values[3],
+
+                # HoverValue
+                GNCBus_HoverValue_lon_hov=hovervalue_values[0],
+                GNCBus_HoverValue_lat_hov=hovervalue_values[1],
+                GNCBus_HoverValue_IsHovStatus_hov=hovervalue_values[2],
+
+                # HomeValue
+                GNCBus_HomeValue_lon_home=homevalue_values[0],
+                GNCBus_HomeValue_lat_home=homevalue_values[1]
             )
         except Exception as e:
             print(f"[ExtY_FCS_GNCBUS_T] 解析失败: {e}")
@@ -754,43 +782,187 @@ class ExtY_FCS_GNCBUS_T:
         包含GNC指令值字段，用于导航标签页显示
         使用解析后的实际值，而不是硬编码的0
         """
-        json_data = {
-            # GNC指令值（新增，用于导航标签页）- 使用解析后的实际值
-            'GNCBus_CmdValue_phi_cmd': float(self.GNCBus_CmdValue_phi_cmd),
-            'GNCBus_CmdValue_Hdot_cmd': float(self.GNCBus_CmdValue_Hdot_cmd),
-            'GNCBus_CmdValue_R_cmd': float(self.GNCBus_CmdValue_R_cmd),
-            'GNCBus_CmdValue_psi_cmd': float(self.GNCBus_CmdValue_psi_cmd),
-            'GNCBus_CmdValue_Vx_cmd': float(self.GNCBus_CmdValue_Vx_cmd),
-            'GNCBus_CmdValue_Vy_cmd': float(self.GNCBus_CmdValue_Vy_cmd),
-            'GNCBus_CmdValue_height_cmd': float(self.GNCBus_CmdValue_height_cmd),
-            # 位置和速度
-            'pos_x': self.pos_x,
-            'pos_y': self.pos_y,
-            'pos_z': self.pos_z,
-            'vel_x': self.vel_x,
-            'vel_y': self.vel_y,
-            'vel_z': self.vel_z,
-            # 姿态
-            'euler_phi': self.euler_phi,
-            'euler_theta': self.euler_theta,
-            'euler_psi': self.euler_psi,
-            # 控制模式
-            'control_mode': self.control_mode,
-            'flight_mode': self.flight_mode,
-            # TokenMode
-            'GNCBus_TokenMode_OnSky': bool(self.GNCBus_TokenMode_OnSky),
-            'GNCBus_TokenMode_Ctrl_Mode': bool(self.GNCBus_TokenMode_Ctrl_Mode),
-            'GNCBus_TokenMode_mode_vert': self.GNCBus_TokenMode_mode_vert,
-            'GNCBus_TokenMode_mode_nav': self.GNCBus_TokenMode_mode_nav,
-            # 旧格式（向后兼容）
-            'TokenMode': {
-                'OnSky': bool(self.GNCBus_TokenMode_OnSky),
-                'Ctrl_Mode': bool(self.GNCBus_TokenMode_Ctrl_Mode),
-                'mode_vert': self.GNCBus_TokenMode_mode_vert,
-                'mode_nav': self.GNCBus_TokenMode_mode_nav
-            }
+        token_mode = {
+            'OnSky': bool(self.GNCBus_TokenMode_OnSky),
+            'Ctrl_Mode': bool(self.GNCBus_TokenMode_Ctrl_Mode),
+            'Pre_CMD': int(self.GNCBus_TokenMode_Pre_CMD),
+            'rud_state': int(self.GNCBus_TokenMode_rud_state),
+            'ail_state': int(self.GNCBus_TokenMode_ail_state),
+            'ele_state': int(self.GNCBus_TokenMode_ele_state),
+            'col_state': int(self.GNCBus_TokenMode_col_state),
+            'nav_guid': int(self.GNCBus_TokenMode_nav_guid),
+            'cmd_guid': int(self.GNCBus_TokenMode_cmd_guid),
+            'mode_guid': int(self.GNCBus_TokenMode_mode_guid),
+            'step_guid': int(self.GNCBus_TokenMode_step_guid),
+            'mode_nav': int(self.GNCBus_TokenMode_mode_nav),
+            'token_nav': int(self.GNCBus_TokenMode_token_nav),
+            'step_nav': int(self.GNCBus_TokenMode_step_nav),
+            'mode_vert': int(self.GNCBus_TokenMode_mode_vert),
+            'token_vert': int(self.GNCBus_TokenMode_token_vert),
+            'step_vert': int(self.GNCBus_TokenMode_step_vert),
         }
-        return json_data
+        ftb_opt = {
+            'ele_opt': float(self.GNCBus_FtbOpt_ele_opt),
+            'ail_opt': float(self.GNCBus_FtbOpt_ail_opt),
+            'rud_opt': float(self.GNCBus_FtbOpt_rud_opt),
+            'col_opt': float(self.GNCBus_FtbOpt_col_opt),
+            'R_opt': float(self.GNCBus_FtbOpt_R_opt),
+            'Vx_opt': float(self.GNCBus_FtbOpt_Vx_opt),
+            'Vy_opt': float(self.GNCBus_FtbOpt_Vy_opt),
+            'coldt_opt': float(self.GNCBus_FtbOpt_coldt_opt),
+            'col0_opt': float(self.GNCBus_FtbOpt_col0_opt),
+            'Ftb_Switch': int(self.GNCBus_FtbOpt_Ftb_Switch),
+        }
+        src_value = {
+            'ac_SrcCmdV': int(self.GNCBus_SrcValue_ac_SrcCmdV),
+            'SrcV_fus': int(self.GNCBus_SrcValue_SrcV_fus),
+        }
+        mix_value = {
+            'col_mix': float(self.GNCBus_MixValue_col_mix),
+            'phi_mix': float(self.GNCBus_MixValue_phi_mix),
+            'Vx_mix': float(self.GNCBus_MixValue_Vx_mix),
+            'dX_mix': float(self.GNCBus_MixValue_dX_mix),
+            'theta_mix': float(self.GNCBus_MixValue_theta_mix),
+            'Vy_mix': float(self.GNCBus_MixValue_Vy_mix),
+            'dY_mix': float(self.GNCBus_MixValue_dY_mix),
+            'psi_mix': float(self.GNCBus_MixValue_psi_mix),
+            'Hdot_mix': float(self.GNCBus_MixValue_Hdot_mix),
+            'height_mix': float(self.GNCBus_MixValue_height_mix),
+        }
+        cmd_value = {
+            'phi_cmd': float(self.GNCBus_CmdValue_phi_cmd),
+            'Hdot_cmd': float(self.GNCBus_CmdValue_Hdot_cmd),
+            'R_cmd': float(self.GNCBus_CmdValue_R_cmd),
+            'psi_cmd': float(self.GNCBus_CmdValue_psi_cmd),
+            'Vx_cmd': float(self.GNCBus_CmdValue_Vx_cmd),
+            'Vy_cmd': float(self.GNCBus_CmdValue_Vy_cmd),
+            'height_cmd': float(self.GNCBus_CmdValue_height_cmd),
+        }
+        var_value = {
+            'psi_var': float(self.GNCBus_VarValue_psi_var),
+            'height_var': float(self.GNCBus_VarValue_height_var),
+            'dX_var': float(self.GNCBus_VarValue_dX_var),
+            'dY_var': float(self.GNCBus_VarValue_dY_var),
+        }
+        trim_value = {
+            'Vx_trim': float(self.GNCBus_TrimValue_Vx_trim),
+            'col_trim': float(self.GNCBus_TrimValue_col_trim),
+            'col_autotrim': float(self.GNCBus_TrimValue_col_autotrim),
+        }
+        params_lmt = {
+            'Vx_LMT': float(self.GNCBus_ParamsLMT_Vx_LMT),
+            'Vy_LMT': float(self.GNCBus_ParamsLMT_Vy_LMT),
+            'R_LMT': float(self.GNCBus_ParamsLMT_R_LMT),
+            'Hdot_ILmt': float(self.GNCBus_ParamsLMT_Hdot_ILmt),
+            'Hdot_UpLMT': float(self.GNCBus_ParamsLMT_Hdot_UpLMT),
+            'Hdot_DownLMT': float(self.GNCBus_ParamsLMT_Hdot_DownLMT),
+            'R_FLYTURN': float(self.GNCBus_ParamsLMT_R_FLYTURN),
+            'R_unit': float(self.GNCBus_ParamsLMT_R_unit),
+            'Hdot_unit': float(self.GNCBus_ParamsLMT_Hdot_unit),
+            'Vx_unit': float(self.GNCBus_ParamsLMT_Vx_unit),
+            'Vy_unit': float(self.GNCBus_ParamsLMT_Vy_unit),
+        }
+        ac_value = {
+            'ac_dY': float(self.GNCBus_AcValue_ac_dY),
+            'ac_dX': float(self.GNCBus_AcValue_ac_dX),
+            'ac_dPsi': float(self.GNCBus_AcValue_ac_dPsi),
+            'ac_dL': float(self.GNCBus_AcValue_ac_dL),
+        }
+        hover_value = {
+            'lon_hov': float(self.GNCBus_HoverValue_lon_hov),
+            'lat_hov': float(self.GNCBus_HoverValue_lat_hov),
+            'IsHovStatus_hov': int(self.GNCBus_HoverValue_IsHovStatus_hov),
+        }
+        home_value = {
+            'lon_home': float(self.GNCBus_HomeValue_lon_home),
+            'lat_home': float(self.GNCBus_HomeValue_lat_home),
+        }
+        return {
+            'GNCBus_TokenMode_OnSky': token_mode['OnSky'],
+            'GNCBus_TokenMode_Ctrl_Mode': token_mode['Ctrl_Mode'],
+            'GNCBus_TokenMode_Pre_CMD': token_mode['Pre_CMD'],
+            'GNCBus_TokenMode_rud_state': token_mode['rud_state'],
+            'GNCBus_TokenMode_ail_state': token_mode['ail_state'],
+            'GNCBus_TokenMode_ele_state': token_mode['ele_state'],
+            'GNCBus_TokenMode_col_state': token_mode['col_state'],
+            'GNCBus_TokenMode_nav_guid': token_mode['nav_guid'],
+            'GNCBus_TokenMode_cmd_guid': token_mode['cmd_guid'],
+            'GNCBus_TokenMode_mode_guid': token_mode['mode_guid'],
+            'GNCBus_TokenMode_step_guid': token_mode['step_guid'],
+            'GNCBus_TokenMode_mode_nav': token_mode['mode_nav'],
+            'GNCBus_TokenMode_token_nav': token_mode['token_nav'],
+            'GNCBus_TokenMode_step_nav': token_mode['step_nav'],
+            'GNCBus_TokenMode_mode_vert': token_mode['mode_vert'],
+            'GNCBus_TokenMode_token_vert': token_mode['token_vert'],
+            'GNCBus_TokenMode_step_vert': token_mode['step_vert'],
+            'GNCBus_FtbOpt_ele_opt': ftb_opt['ele_opt'],
+            'GNCBus_FtbOpt_ail_opt': ftb_opt['ail_opt'],
+            'GNCBus_FtbOpt_rud_opt': ftb_opt['rud_opt'],
+            'GNCBus_FtbOpt_col_opt': ftb_opt['col_opt'],
+            'GNCBus_FtbOpt_R_opt': ftb_opt['R_opt'],
+            'GNCBus_FtbOpt_Vx_opt': ftb_opt['Vx_opt'],
+            'GNCBus_FtbOpt_Vy_opt': ftb_opt['Vy_opt'],
+            'GNCBus_FtbOpt_coldt_opt': ftb_opt['coldt_opt'],
+            'GNCBus_FtbOpt_col0_opt': ftb_opt['col0_opt'],
+            'GNCBus_FtbOpt_Ftb_Switch': ftb_opt['Ftb_Switch'],
+            'GNCBus_SrcValue_ac_SrcCmdV': src_value['ac_SrcCmdV'],
+            'GNCBus_SrcValue_SrcV_fus': src_value['SrcV_fus'],
+            'GNCBus_MixValue_col_mix': mix_value['col_mix'],
+            'GNCBus_MixValue_phi_mix': mix_value['phi_mix'],
+            'GNCBus_MixValue_Vx_mix': mix_value['Vx_mix'],
+            'GNCBus_MixValue_dX_mix': mix_value['dX_mix'],
+            'GNCBus_MixValue_theta_mix': mix_value['theta_mix'],
+            'GNCBus_MixValue_Vy_mix': mix_value['Vy_mix'],
+            'GNCBus_MixValue_dY_mix': mix_value['dY_mix'],
+            'GNCBus_MixValue_psi_mix': mix_value['psi_mix'],
+            'GNCBus_MixValue_Hdot_mix': mix_value['Hdot_mix'],
+            'GNCBus_MixValue_height_mix': mix_value['height_mix'],
+            'GNCBus_CmdValue_phi_cmd': cmd_value['phi_cmd'],
+            'GNCBus_CmdValue_Hdot_cmd': cmd_value['Hdot_cmd'],
+            'GNCBus_CmdValue_R_cmd': cmd_value['R_cmd'],
+            'GNCBus_CmdValue_psi_cmd': cmd_value['psi_cmd'],
+            'GNCBus_CmdValue_Vx_cmd': cmd_value['Vx_cmd'],
+            'GNCBus_CmdValue_Vy_cmd': cmd_value['Vy_cmd'],
+            'GNCBus_CmdValue_height_cmd': cmd_value['height_cmd'],
+            'GNCBus_VarValue_psi_var': var_value['psi_var'],
+            'GNCBus_VarValue_height_var': var_value['height_var'],
+            'GNCBus_VarValue_dX_var': var_value['dX_var'],
+            'GNCBus_VarValue_dY_var': var_value['dY_var'],
+            'GNCBus_TrimValue_Vx_trim': trim_value['Vx_trim'],
+            'GNCBus_TrimValue_col_trim': trim_value['col_trim'],
+            'GNCBus_TrimValue_col_autotrim': trim_value['col_autotrim'],
+            'GNCBus_ParamsLMT_Vx_LMT': params_lmt['Vx_LMT'],
+            'GNCBus_ParamsLMT_Vy_LMT': params_lmt['Vy_LMT'],
+            'GNCBus_ParamsLMT_R_LMT': params_lmt['R_LMT'],
+            'GNCBus_ParamsLMT_Hdot_ILmt': params_lmt['Hdot_ILmt'],
+            'GNCBus_ParamsLMT_Hdot_UpLMT': params_lmt['Hdot_UpLMT'],
+            'GNCBus_ParamsLMT_Hdot_DownLMT': params_lmt['Hdot_DownLMT'],
+            'GNCBus_ParamsLMT_R_FLYTURN': params_lmt['R_FLYTURN'],
+            'GNCBus_ParamsLMT_R_unit': params_lmt['R_unit'],
+            'GNCBus_ParamsLMT_Hdot_unit': params_lmt['Hdot_unit'],
+            'GNCBus_ParamsLMT_Vx_unit': params_lmt['Vx_unit'],
+            'GNCBus_ParamsLMT_Vy_unit': params_lmt['Vy_unit'],
+            'GNCBus_AcValue_ac_dY': ac_value['ac_dY'],
+            'GNCBus_AcValue_ac_dX': ac_value['ac_dX'],
+            'GNCBus_AcValue_ac_dPsi': ac_value['ac_dPsi'],
+            'GNCBus_AcValue_ac_dL': ac_value['ac_dL'],
+            'GNCBus_HoverValue_lon_hov': hover_value['lon_hov'],
+            'GNCBus_HoverValue_lat_hov': hover_value['lat_hov'],
+            'GNCBus_HoverValue_IsHovStatus_hov': hover_value['IsHovStatus_hov'],
+            'GNCBus_HomeValue_lon_home': home_value['lon_home'],
+            'GNCBus_HomeValue_lat_home': home_value['lat_home'],
+            'TokenMode': token_mode,
+            'FtbOpt': ftb_opt,
+            'SrcValue': src_value,
+            'MixValue': mix_value,
+            'CmdValue': cmd_value,
+            'VarValue': var_value,
+            'TrimValue': trim_value,
+            'ParamsLMT': params_lmt,
+            'AcValue': ac_value,
+            'HoverValue': hover_value,
+            'HomeValue': home_value,
+        }
     
     def to_bytes(self) -> bytes:
         """编码为字节数据
@@ -893,8 +1065,8 @@ class ExtY_FCS_GNCBUS_T:
             self.GNCBus_TrimValue_col_autotrim
         )
         
-        # 8. ParamsLMT (10个float)
-        result += struct.pack('<10f',
+        # 8. ParamsLMT (11个float)
+        result += struct.pack('<11f',
             self.GNCBus_ParamsLMT_Vx_LMT,
             self.GNCBus_ParamsLMT_Vy_LMT,
             self.GNCBus_ParamsLMT_R_LMT,
@@ -1192,6 +1364,11 @@ class ExtY_FCS_DATAGCS_T:
     
     def to_json(self) -> dict:
         return {
+            'Tele_GCS_CmdIdx': self.Tele_GCS_CmdIdx,
+            'Tele_GCS_Mission': self.Tele_GCS_Mission,
+            'Tele_GCS_Val': self.Tele_GCS_Val,
+            'Tele_GCS_com_GCS_fail': self.Tele_GCS_com_GCS_fail,
+            # Backward compatibility
             'CmdIdx': self.Tele_GCS_CmdIdx,
             'Mission': self.Tele_GCS_Mission,
             'Val': self.Tele_GCS_Val,
@@ -1200,6 +1377,10 @@ class ExtY_FCS_DATAGCS_T:
 
 
 # 航迹线结构体
+_LINESTRUC_FORMAT = '<dd5fbb2Bf2Bf6B'
+_LINESTRUC_SIZE = struct.calcsize(_LINESTRUC_FORMAT)
+
+
 @dataclass
 class ExtY_FCS_LINESTRUC_ac_aim2AB_T:
     """航迹线结构 ac_aim2AB
@@ -1230,103 +1411,58 @@ class ExtY_FCS_LINESTRUC_ac_aim2AB_T:
     
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ExtY_FCS_LINESTRUC_ac_aim2AB_T':
-        """从字节数据解析航迹线信息
-        
-        总计87字节，按照interface.h第237-259行的字段顺序解析，使用pragma pack(1) 1字节对齐
-        格式：<dd (2*double=16) + 15f (15*float=60) + bb (2*int8=2) + 9B (9*uint8=9) = 87字节
-        
-        字节布局：2*double(16) + 15*float(60) + 2*int8(2) + 9*uint8(9) = 87字节
-        值索引：0-1(2d), 2-16(15f), 17-18(2b), 19-27(9B)
+        """从字节数据解析航迹线信息。
+
+        按照 pack(1) C 结构解析：
+        2*double + 5*float + 2*int8 + 2*uint8 + 1*float + 2*uint8 + 1*float + 6*uint8 = 56 字节。
         """
-        if len(data) < 87:
-            print(f"[ExtY_FCS_LINESTRUC_ac_aim2AB_T] Payload长度不足: {len(data)} < 87")
+        if len(data) < _LINESTRUC_SIZE:
+            print(f"[ExtY_FCS_LINESTRUC_ac_aim2AB_T] Payload长度不足: {len(data)} < {_LINESTRUC_SIZE}")
             return cls()
-        
-        # 直接按照字段顺序一次性解析所有字段，与to_bytes()保持一致
-        values = struct.unpack('<dd15fbb9B', data[:87])
-        
-        # values有28个元素 (索引0-27)
-        # 0-1: 2个double (lon, lat)
-        # 2-16: 15个float (psi, alt, len, rad, Vx2nextdot, R_WP, dL_WP, 7个padding)
-        # 17-18: 2个int8 (next_num, next_dot)
-        # 19-27: 9个uint8 (type_dot, clockwise_WP, type_WP, Num_type_WP, Vx_type,
-        #                TTC_Fault_Mode, deltaY_ctrl, turn_type, Inv_type, type_line)
-        
-        # 注意：只有19个实际字段，但有7个padding floats需要跳过
+        values = struct.unpack(_LINESTRUC_FORMAT, data[:_LINESTRUC_SIZE])
         
         return cls(
-            # 2*real_T (16字节) - values[0-1]
             ac_aim2AB_lon=values[0],
             ac_aim2AB_lat=values[1],
-            # 15*real32_T (60字节) - values[2-16]
             ac_aim2AB_psi=values[2],
             ac_aim2AB_alt=values[3],
             ac_aim2AB_len=values[4],
             ac_aim2AB_rad=values[5],
             ac_aim2AB_Vx2nextdot=values[6],
-            ac_aim2AB_R_WP=values[7],
-            ac_aim2AB_dL_WP=values[8],
-            # 7个padding floats (values[9-15]) - 跳过（不对应任何字段）
-            # 2*int8_T (2字节) - values[16-17]
-            ac_aim2AB_next_num=values[16],
-            ac_aim2AB_next_dot=values[17],
-            # 9*uint8_T (9字节) - values[18-26]
-            ac_aim2AB_type_dot=values[18],
-            ac_aim2AB_clockwise_WP=values[19],
-            ac_aim2AB_type_WP=values[20],
-            ac_aim2AB_Num_type_WP=values[21],
-            ac_aim2AB_Vx_type=values[22],
-            ac_aim2AB_TTC_Fault_Mode=values[23],
-            ac_aim2AB_deltaY_ctrl=values[24],
-            ac_aim2AB_turn_type=values[25],
-            ac_aim2AB_Inv_type=values[26],
-            ac_aim2AB_type_line=values[27]
+            ac_aim2AB_next_num=values[7],
+            ac_aim2AB_next_dot=values[8],
+            ac_aim2AB_type_dot=values[9],
+            ac_aim2AB_clockwise_WP=values[10],
+            ac_aim2AB_R_WP=values[11],
+            ac_aim2AB_type_WP=values[12],
+            ac_aim2AB_Num_type_WP=values[13],
+            ac_aim2AB_dL_WP=values[14],
+            ac_aim2AB_Vx_type=values[15],
+            ac_aim2AB_TTC_Fault_Mode=values[16],
+            ac_aim2AB_deltaY_ctrl=values[17],
+            ac_aim2AB_turn_type=values[18],
+            ac_aim2AB_Inv_type=values[19],
+            ac_aim2AB_type_line=values[20]
         )
     
     def to_bytes(self) -> bytes:
-        """编码为字节数据
-        
-        总计87字节，按照interface.h第237-259行的字段顺序编码，使用pragma pack(1) 1字节对齐
-        直接按照字段顺序打包，不分组
-        """
-        # 格式字符串：< (小端序) + dd (2*double=16) + 5f (5*float=20) + bb (2*int8=2)
-        #             + 2Bf (2*uint8+1*float=6) + 2Bf (2*uint8+1*float=6) + 6B (6*uint8=6)
-        # 总计：16 + 20 + 2 + 6 + 6 + 6 = 56字节？不对！应该是：87字节
-        
-        # 让我重新按照interface.h的字段顺序：
-        # 2*real_T + 6*real32_T + 2*int8_T + 3*uint8_T + 1*real32_T + 2*uint8_T + 1*real32_T + 9*uint8_T
-        # = 16 + 24 + 2 + 3 + 4 + 2 + 4 + 9 = 64？还是不对！
-        
-        # 让我直接按照from_bytes的解析逻辑编写to_bytes
-        # from_bytes中：2*double + 15*float + 2*int8 + 9*uint8 = 16 + 60 + 2 + 9 = 87字节
-        
-        return struct.pack('<dd15fbb9B',
-            # 2*real_T (16字节)
+        """编码为 pack(1) C 结构对应的 56 字节布局。"""
+        return struct.pack(_LINESTRUC_FORMAT,
             self.ac_aim2AB_lon,
             self.ac_aim2AB_lat,
-            # 15*real32_T (60字节)
             self.ac_aim2AB_psi,
             self.ac_aim2AB_alt,
             self.ac_aim2AB_len,
             self.ac_aim2AB_rad,
             self.ac_aim2AB_Vx2nextdot,
-            self.ac_aim2AB_R_WP,
-            self.ac_aim2AB_dL_WP,
-            0.0,  # padding1 (对应floats[6])
-            0.0,  # padding2 (对应floats[7])
-            0.0,  # padding3 (对应floats[8])
-            0.0,  # padding4 (对应floats[9])
-            0.0,  # padding5 (对应floats[10])
-            0.0,  # padding6 (对应floats[11])
-            0.0,  # padding7 (对应floats[12])
-            # 2*int8_T (2字节)
             self.ac_aim2AB_next_num,
             self.ac_aim2AB_next_dot,
-            # 9*uint8_T (9字节)
             self.ac_aim2AB_type_dot,
             self.ac_aim2AB_clockwise_WP,
+            self.ac_aim2AB_R_WP,
             self.ac_aim2AB_type_WP,
             self.ac_aim2AB_Num_type_WP,
+            self.ac_aim2AB_dL_WP,
             self.ac_aim2AB_Vx_type,
             self.ac_aim2AB_TTC_Fault_Mode,
             self.ac_aim2AB_deltaY_ctrl,
@@ -1337,6 +1473,27 @@ class ExtY_FCS_LINESTRUC_ac_aim2AB_T:
     
     def to_json(self) -> dict:
         return {
+            'ac_aim2AB_lon': float(self.ac_aim2AB_lon),
+            'ac_aim2AB_lat': float(self.ac_aim2AB_lat),
+            'ac_aim2AB_psi': float(self.ac_aim2AB_psi),
+            'ac_aim2AB_alt': float(self.ac_aim2AB_alt),
+            'ac_aim2AB_len': float(self.ac_aim2AB_len),
+            'ac_aim2AB_rad': float(self.ac_aim2AB_rad),
+            'ac_aim2AB_Vx2nextdot': float(self.ac_aim2AB_Vx2nextdot),
+            'ac_aim2AB_next_num': self.ac_aim2AB_next_num,
+            'ac_aim2AB_next_dot': self.ac_aim2AB_next_dot,
+            'ac_aim2AB_type_dot': self.ac_aim2AB_type_dot,
+            'ac_aim2AB_clockwise_WP': self.ac_aim2AB_clockwise_WP,
+            'ac_aim2AB_R_WP': float(self.ac_aim2AB_R_WP),
+            'ac_aim2AB_type_WP': self.ac_aim2AB_type_WP,
+            'ac_aim2AB_Num_type_WP': self.ac_aim2AB_Num_type_WP,
+            'ac_aim2AB_dL_WP': float(self.ac_aim2AB_dL_WP),
+            'ac_aim2AB_Vx_type': self.ac_aim2AB_Vx_type,
+            'ac_aim2AB_TTC_Fault_Mode': self.ac_aim2AB_TTC_Fault_Mode,
+            'ac_aim2AB_deltaY_ctrl': self.ac_aim2AB_deltaY_ctrl,
+            'ac_aim2AB_turn_type': self.ac_aim2AB_turn_type,
+            'ac_aim2AB_Inv_type': self.ac_aim2AB_Inv_type,
+            'ac_aim2AB_type_line': self.ac_aim2AB_type_line,
             'lon': float(self.ac_aim2AB_lon),
             'lat': float(self.ac_aim2AB_lat),
             'psi': float(self.ac_aim2AB_psi),
@@ -1391,119 +1548,54 @@ class ExtY_FCS_LINESTRUC_acAB_T:
     
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ExtY_FCS_LINESTRUC_acAB_T':
-        """从字节数据解析AB段航迹线信息
-        
-        总计87字节：2*real_T + 6*real32_T + 2*int8_T + 3*uint8_T +
-                  1*real32_T + 2*uint8_T + 1*real32_T + 5*uint8_T
-        按照interface.h第261-283行的字段顺序解析
-        """
-        if len(data) < 87:
-            print(f"[ExtY_FCS_LINESTRUC_acAB_T] Payload长度不足: {len(data)} < 87")
+        """从字节数据解析 AB 段航迹线信息。"""
+        if len(data) < _LINESTRUC_SIZE:
+            print(f"[ExtY_FCS_LINESTRUC_acAB_T] Payload长度不足: {len(data)} < {_LINESTRUC_SIZE}")
             return cls()
-        
-        offset = 0
-        # acAB_lon (real_T, 8字节)
-        # acAB_lat (real_T, 8字节)
-        lon, lat = struct.unpack_from('<dd', data, offset)
-        offset += 16
-        
-        # acAB_psi (real32_T, 4字节)
-        # acAB_alt (real32_T, 4字节)
-        # acAB_len (real32_T, 4字节)
-        # acAB_rad (real32_T, 4字节)
-        # acAB_Vx2nextdot (real32_T, 4字节)
-        floats_part1 = struct.unpack_from('<5f', data, offset)
-        offset += 20
-        
-        # acAB_next_num (int8_T, 1字节)
-        # acAB_next_dot (int8_T, 1字节)
-        next_num, next_dot = struct.unpack_from('<bb', data, offset)
-        offset += 2
-        
-        # acAB_type_dot (uint8_T, 1字节)
-        # acAB_clockwise_WP (uint8_T, 1字节)
-        # acAB_R_WP (real32_T, 4字节)
-        uint8_part1 = struct.unpack_from('<2B', data, offset)
-        offset += 2
-        r_wp = struct.unpack_from('<f', data, offset)
-        offset += 4
-        
-        # acAB_type_WP (uint8_T, 1字节)
-        # acAB_Num_type_WP (uint8_T, 1字节)
-        # acAB_dL_WP (real32_T, 4字节)
-        uint8_part2 = struct.unpack_from('<2B', data, offset)
-        offset += 2
-        dl_wp = struct.unpack_from('<f', data, offset)
-        offset += 4
-        
-        # acAB_Vx_type (uint8_T, 1字节)
-        # acAB_TTC_Fault_Mode (uint8_T, 1字节)
-        # acAB_deltaY_ctrl (uint8_T, 1字节)
-        # acAB_turn_type (uint8_T, 1字节)
-        # acAB_Inv_type (uint8_T, 1字节)
-        # acAB_type_line (uint8_T, 1字节)
-        uint8_part3 = struct.unpack_from('<6B', data, offset)
+        values = struct.unpack(_LINESTRUC_FORMAT, data[:_LINESTRUC_SIZE])
         
         return cls(
-            acAB_lon=lon,
-            acAB_lat=lat,
-            acAB_psi=floats_part1[0],
-            acAB_alt=floats_part1[1],
-            acAB_len=floats_part1[2],
-            acAB_rad=floats_part1[3],
-            acAB_Vx2nextdot=floats_part1[4],
-            acAB_next_num=next_num,
-            acAB_next_dot=next_dot,
-            acAB_type_dot=uint8_part1[0],
-            acAB_clockwise_WP=uint8_part1[1],
-            acAB_R_WP=r_wp[0],
-            acAB_type_WP=uint8_part2[0],
-            acAB_Num_type_WP=uint8_part2[1],
-            acAB_dL_WP=dl_wp[0],
-            acAB_Vx_type=uint8_part3[0],
-            acAB_TTC_Fault_Mode=uint8_part3[1],
-            acAB_deltaY_ctrl=uint8_part3[2],
-            acAB_turn_type=uint8_part3[3],
-            acAB_Inv_type=uint8_part3[4],
-            acAB_type_line=uint8_part3[5]
+            acAB_lon=values[0],
+            acAB_lat=values[1],
+            acAB_psi=values[2],
+            acAB_alt=values[3],
+            acAB_len=values[4],
+            acAB_rad=values[5],
+            acAB_Vx2nextdot=values[6],
+            acAB_next_num=values[7],
+            acAB_next_dot=values[8],
+            acAB_type_dot=values[9],
+            acAB_clockwise_WP=values[10],
+            acAB_R_WP=values[11],
+            acAB_type_WP=values[12],
+            acAB_Num_type_WP=values[13],
+            acAB_dL_WP=values[14],
+            acAB_Vx_type=values[15],
+            acAB_TTC_Fault_Mode=values[16],
+            acAB_deltaY_ctrl=values[17],
+            acAB_turn_type=values[18],
+            acAB_Inv_type=values[19],
+            acAB_type_line=values[20]
         )
 
     def to_bytes(self) -> bytes:
-        """编码为字节数据
-        
-        总计87字节，按照interface.h第261-283行的字段顺序编码，使用pragma pack(1) 1字节对齐
-        直接按照字段顺序打包，不分组
-        """
-        # 格式字符串：< (小端序) + dd (2*double=16) + 15f (15*float=60) + bb (2*int8=2) + 9B (9*uint8=9)
-        # 总计：16 + 60 + 2 + 9 = 87字节
-        
-        return struct.pack('<dd15fbb9B',
-            # 2*real_T (16字节)
+        """编码为 pack(1) C 结构对应的 56 字节布局。"""
+        return struct.pack(_LINESTRUC_FORMAT,
             self.acAB_lon,
             self.acAB_lat,
-            # 15*real32_T (60字节)
             self.acAB_psi,
             self.acAB_alt,
             self.acAB_len,
             self.acAB_rad,
             self.acAB_Vx2nextdot,
-            self.acAB_R_WP,
-            self.acAB_dL_WP,
-            0.0,  # padding1 (对应floats[6])
-            0.0,  # padding2 (对应floats[7])
-            0.0,  # padding3 (对应floats[8])
-            0.0,  # padding4 (对应floats[9])
-            0.0,  # padding5 (对应floats[10])
-            0.0,  # padding6 (对应floats[11])
-            0.0,  # padding7 (对应floats[12])
-            # 2*int8_T (2字节)
             self.acAB_next_num,
             self.acAB_next_dot,
-            # 9*uint8_T (9字节)
             self.acAB_type_dot,
             self.acAB_clockwise_WP,
+            self.acAB_R_WP,
             self.acAB_type_WP,
             self.acAB_Num_type_WP,
+            self.acAB_dL_WP,
             self.acAB_Vx_type,
             self.acAB_TTC_Fault_Mode,
             self.acAB_deltaY_ctrl,
@@ -1514,6 +1606,27 @@ class ExtY_FCS_LINESTRUC_acAB_T:
 
     def to_json(self) -> dict:
         return {
+            'acAB_lon': float(self.acAB_lon),
+            'acAB_lat': float(self.acAB_lat),
+            'acAB_psi': float(self.acAB_psi),
+            'acAB_alt': float(self.acAB_alt),
+            'acAB_len': float(self.acAB_len),
+            'acAB_rad': float(self.acAB_rad),
+            'acAB_Vx2nextdot': float(self.acAB_Vx2nextdot),
+            'acAB_next_num': self.acAB_next_num,
+            'acAB_next_dot': self.acAB_next_dot,
+            'acAB_type_dot': self.acAB_type_dot,
+            'acAB_clockwise_WP': self.acAB_clockwise_WP,
+            'acAB_R_WP': float(self.acAB_R_WP),
+            'acAB_type_WP': self.acAB_type_WP,
+            'acAB_Num_type_WP': self.acAB_Num_type_WP,
+            'acAB_dL_WP': float(self.acAB_dL_WP),
+            'acAB_Vx_type': self.acAB_Vx_type,
+            'acAB_TTC_Fault_Mode': self.acAB_TTC_Fault_Mode,
+            'acAB_deltaY_ctrl': self.acAB_deltaY_ctrl,
+            'acAB_turn_type': self.acAB_turn_type,
+            'acAB_Inv_type': self.acAB_Inv_type,
+            'acAB_type_line': self.acAB_type_line,
             'lon': float(self.acAB_lon),
             'lat': float(self.acAB_lat),
             'psi': float(self.acAB_psi),
@@ -1647,170 +1760,6 @@ class ExtU_FCS_T:
         
     def to_json(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
-
-
-# ================================================================
-# LiDAR障碍物接口结构体定义
-# ================================================================
-
-@dataclass
-class ObstacleInfo_T:
-    """障碍物信息"""
-    # 位置信息 (ENU坐标系, 单位: m)
-    position_x: real32_T = 0.0  # 东向
-    position_y: real32_T = 0.0  # 北向
-    position_z: real32_T = 0.0  # 天向
-    
-    # 尺寸信息 (单位: m)
-    size_x: real32_T = 0.0
-    size_y: real32_T = 0.0
-    size_z: real32_T = 0.0
-    
-    # 高度范围 (单位: m)
-    height_min: real32_T = 0.0
-    height_max: real32_T = 0.0
-    
-    # 距离与方位角
-    distance: real32_T = 0.0
-    azimuth: real32_T = 0.0
-    
-    # 置信度评估
-    confidence: real32_T = 0.0
-    
-    # 点云统计
-    point_count: int32_T = 0
-    density: real32_T = 0.0
-    
-    @classmethod
-    def from_bytes(cls, data: bytes) -> 'ObstacleInfo_T':
-        """从字节数据解析障碍物信息"""
-        # 总共 11个float32 + 1个int32 + 1个float32 = 52字节
-        fmt = '<fffffffffff i f'  # 11 floats + 1 int + 1 float
-        if len(data) < 52:
-            return cls()
-        
-        values = struct.unpack(fmt, data[:52])
-        return cls(
-            position_x=values[0],
-            position_y=values[1],
-            position_z=values[2],
-            size_x=values[3],
-            size_y=values[4],
-            size_z=values[5],
-            height_min=values[6],
-            height_max=values[7],
-            distance=values[8],
-            azimuth=values[9],
-            confidence=values[10],
-            point_count=values[11],
-            density=values[12]
-        )
-
-
-# 最大障碍物数量
-MAX_OBSTACLES = 50
-
-
-@dataclass
-class ObstacleOutput_T:
-    """障碍物输出数组"""
-    obstacle_count: int32_T = 0
-    obstacles: List[ObstacleInfo_T] = field(default_factory=list)
-    timestamp_sec: real_T = 0.0
-    timestamp_us: uint64_T = 0
-    frame_id: int32_T = 0
-    input_point_count: int32_T = 0
-    filtered_point_count: int32_T = 0
-
-    @classmethod
-    def from_bytes(cls, data: bytes) -> 'ObstacleOutput_T':
-        """从字节数据解析"""
-        # 结构: obstacle_count(4) + obstacles数组(52*50=2600) + frame_info 等
-        # 只有当数据长度足够时才进行完整解析
-        if len(data) < 20:  # 最小安全长度
-            return cls()
-        
-        offset = 0
-        
-        # 解析obstacle_count
-        obstacle_count = struct.unpack('<i', data[offset:offset+4])[0]
-        offset += 4
-        
-        # 障碍物数组位于偏移 4 处，固定大小 50 * 52 = 2600 字节
-        obstacles_start = 4
-        obstacles_size = 50 * 52 # MAX_OBSTACLES = 50, sizeof(ObstacleInfo_T) = 52
-        
-        # 时间戳和帧信息位于数组之后
-        # 4 + 2600 = 2604
-        info_offset = obstacles_start + obstacles_size
-        
-        # 检查数据长度是否足够包含尾部信息 (2604 + 8+8+4+4+4 = 2632)
-        if len(data) < info_offset + 28:
-            # 如果数据不够长
-             pass
-
-        # 解析障碍物
-        obstacles = []
-        max_valid = min(obstacle_count, 50)
-        
-        curr_obs_offset = obstacles_start
-        for i in range(max_valid):
-            if curr_obs_offset + 52 <= len(data):
-                obs = ObstacleInfo_T.from_bytes(data[curr_obs_offset : curr_obs_offset+52])
-                obstacles.append(obs)
-            curr_obs_offset += 52
-            
-        # 解析尾部信息 (时间戳等)
-        timestamp_sec = 0.0
-        timestamp_us = 0
-        frame_id = 0
-        input_point_count = 0
-        filtered_point_count = 0
-
-        if len(data) >= info_offset + 28:
-             off = info_offset
-             timestamp_sec = struct.unpack('<d', data[off:off+8])[0]
-             off += 8
-             timestamp_us = struct.unpack('<Q', data[off:off+8])[0]
-             off += 8
-             frame_id = struct.unpack('<i', data[off:off+4])[0]
-             off += 4
-             input_point_count = struct.unpack('<i', data[off:off+4])[0]
-             off += 4
-             filtered_point_count = struct.unpack('<i', data[off:off+4])[0]
-             off += 4
-
-        return cls(
-            obstacle_count=obstacle_count,
-            obstacles=obstacles,
-            timestamp_sec=timestamp_sec,
-            timestamp_us=timestamp_us,
-            frame_id=frame_id,
-            input_point_count=input_point_count,
-            filtered_point_count=filtered_point_count
-        )
-    
-    def to_json(self) -> dict:
-        return {
-            'obstacle_count': self.obstacle_count,
-            'obstacles': [obstacle.__dict__ for obstacle in self.obstacles[:self.obstacle_count]],
-            'timestamp_sec': self.timestamp_sec,
-            'frame_id': self.frame_id
-        }
-
-
-@dataclass
-class SystemStatus_T:
-    """系统状态"""
-    is_running: uint8_T = 0
-    lidar_connected: uint8_T = 0
-    imu_data_valid: uint8_T = 0
-    motion_comp_active: uint8_T = 0
-    error_code: int32_T = 0
-    error_message: str = ""
-    total_frames: int32_T = 0
-    total_obstacles: int32_T = 0
-    avg_processing_time_ms: real32_T = 0.0
 
 
 # ================================================================
@@ -1959,6 +1908,7 @@ class GCSTelemetry_T:
 
     def to_json(self) -> dict:
         """将遥测数据转换为JSON格式"""
+        local_path_json = [p.to_json() for p in self.local_path]
         return {
             'seq_id': self.seq_id,
             'timestamp': self.timestamp,
@@ -1969,7 +1919,8 @@ class GCSTelemetry_T:
             'global_path_count': self.global_path_count,
             'global_path': [p.to_json() for p in self.global_path],
             'local_traj_count': self.local_traj_count,
-            'local_path': [p.to_json() for p in self.local_path],
+            'local_path': local_path_json,
+            'local_traj': local_path_json,
             'obstacle_count': self.obstacle_count,
             'obstacles': [o.to_json() for o in self.obstacles]
         }
@@ -2105,10 +2056,9 @@ class NCLinkProtocolParser:
         self.fcs_gncbus: Optional[ExtY_FCS_GNCBUS_T] = None
         self.avoiflag: Optional[ExtY_FCS_AVOIFLAG_T] = None
         self.fcs_datafutaba: Optional[ExtY_FCS_DATAFUTABA_T] = None
+        self.fcs_datagcs: Optional[ExtY_FCS_DATAGCS_T] = None
         self.fcs_esc: Optional[ExtY_FCS_ESC_T] = None
         self.fcs_param: Optional[ExtY_FCS_PARAM_T] = None
-        self.obstacles: Optional[ObstacleOutput_T] = None
-        self.system_status: Optional[SystemStatus_T] = None
         self.gcs_telemetry: Optional[GCSTelemetry_T] = None
     
     def feed_data(self, data: bytes, port_type: PortType = PortType.PORT_18504_RECEIVE) -> List[dict]:
@@ -2292,22 +2242,16 @@ class NCLinkProtocolParser:
             message['data'] = self.avoiflag.to_json()
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_DATAGCS:
-            # 0x46: Futaba遥控数据（地面站发送数据）
+            # 0x46: 地面站发送数据 (GCS Telemetry)
             try:
-                self.fcs_datafutaba = ExtY_FCS_DATAFUTABA_T.from_bytes(payload)
-                message['type'] = 'fcs_datafutaba'
-                message['data'] = self.fcs_datafutaba.to_json()
+                self.fcs_datagcs = ExtY_FCS_DATAGCS_T.from_bytes(payload)
+                message['type'] = 'fcs_datagcs'
+                message['data'] = self.fcs_datagcs.to_json()
             except Exception as e:
-                print(f"[协议解析] ⚠ ExtY_FCS_DATAFUTABA_T解析失败: {e}")
-                message['type'] = 'fcs_datafutaba'
-                message['data'] = {
-                    'Tele_ftb_Roll': 0,
-                    'Tele_ftb_Pitch': 0,
-                    'Tele_ftb_Yaw': 0,
-                    'Tele_ftb_Col': 0,
-                    'Tele_ftb_Switch': 0,
-                    'Tele_ftb_com_Ftb_fail': 0
-                }
+                print(f"[协议解析] ⚠ ExtY_FCS_DATAGCS_T解析失败: {e}")
+                self.fcs_datagcs = ExtY_FCS_DATAGCS_T()
+                message['type'] = 'fcs_datagcs'
+                message['data'] = self.fcs_datagcs.to_json()
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_LINESTRUC_AIM2AB:
             # 0x47: aim2AB航迹线结构
@@ -2376,26 +2320,10 @@ class NCLinkProtocolParser:
                 }
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_ESC:
-            # 0x4B: 电机参数
-            self.fcs_esc = ExtY_FCS_ESC_T.from_bytes(payload)
-            message['type'] = 'fcs_esc'
-            message['data'] = {
-                'error_counts': [
-                    self.fcs_esc.esc1_error_count, self.fcs_esc.esc2_error_count,
-                    self.fcs_esc.esc3_error_count, self.fcs_esc.esc4_error_count,
-                    self.fcs_esc.esc5_error_count, self.fcs_esc.esc6_error_count
-                ],
-                'rpms': [
-                    self.fcs_esc.esc1_rpm, self.fcs_esc.esc2_rpm,
-                    self.fcs_esc.esc3_rpm, self.fcs_esc.esc4_rpm,
-                    self.fcs_esc.esc5_rpm, self.fcs_esc.esc6_rpm
-                ],
-                'power_ratings': [
-                    self.fcs_esc.esc1_power_rating_pct, self.fcs_esc.esc2_power_rating_pct,
-                    self.fcs_esc.esc3_power_rating_pct, self.fcs_esc.esc4_power_rating_pct,
-                    self.fcs_esc.esc5_power_rating_pct, self.fcs_esc.esc6_power_rating_pct
-                ]
-            }
+            # 0x4B: 机载当前未使用，保留识别但不进入记录链。
+            message['type'] = 'ignored_obsolete_fcs_esc'
+            message['data'] = {}
+            message['skip_recording'] = True
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_PARAM:
             # 0x49: 飞控参数
@@ -2411,56 +2339,6 @@ class NCLinkProtocolParser:
                     'param_value': 0.0,
                     'param_min': 0.0,
                     'param_max': 0.0
-                }
-        
-        # ============ 雷达数据包解析 (0x50-0x53) ============
-        elif func_code == NCLINK_RECEIVE_LIDAR_OBSTACLES:
-            # 0x50: 雷达障碍物数组输出
-            try:
-                obstacle_output = ObstacleOutput_T.from_bytes(payload)
-                message['type'] = 'lidar_obstacles'
-                message['data'] = obstacle_output.to_json()
-            except Exception as e:
-                print(f"[协议解析] ⚠ ObstacleOutput_T解析失败: {e}")
-                message['type'] = 'lidar_obstacles'
-                message['data'] = {
-                    'obstacle_count': 0,
-                    'obstacles': [],
-                    'error': str(e)
-                }
-        
-        elif func_code == NCLINK_RECEIVE_LIDAR_PERF:
-            # 0x52: 雷达性能统计
-            try:
-                from .lidar_imu_protocol import PerformanceMetrics_T
-                perf_metrics = PerformanceMetrics_T.from_bytes(payload)
-                message['type'] = 'lidar_performance'
-                message['data'] = perf_metrics.to_dict()
-            except Exception as e:
-                print(f"[协议解析] ⚠ PerformanceMetrics_T解析失败: {e}")
-                message['type'] = 'lidar_performance'
-                message['data'] = {
-                    'processing_time_ms': 0,
-                    'frame_rate': 0,
-                    'error': str(e)
-                }
-        
-        elif func_code == NCLINK_RECEIVE_LIDAR_STATUS:
-            # 0x53: 雷达系统状态
-            try:
-                from .lidar_imu_protocol import SystemStatus_T
-                system_status = SystemStatus_T.from_bytes(payload)
-                message['type'] = 'lidar_status'
-                message['data'] = system_status.to_dict()
-            except Exception as e:
-                print(f"[协议解析] ⚠ SystemStatus_T解析失败: {e}")
-                message['type'] = 'lidar_status'
-                message['data'] = {
-                    'is_running': False,
-                    'lidar_connected': False,
-                    'imu_data_valid': False,
-                    'motion_comp_active': False,
-                    'error': str(e)
                 }
         
         # ============ 规划系统数据包解析 (0x70-0x71) ============
@@ -2480,6 +2358,10 @@ class NCLinkProtocolParser:
                 message['type'] = 'planning_telemetry_error'
                 message['data'] = {'error': str(e)}
         
+        elif func_code == 0x00 and len(payload) == 0:
+            message['type'] = 'heartbeat_ack'
+            message['data'] = {}
+
         else:
             # 未知功能码
             message['type'] = 'unknown'
@@ -2501,14 +2383,14 @@ __all__ = [
     'BUFFER_SIZE_MAX', 'NCLinkProtocolParser',
     'ExtY_FCS_PWMS_T', 'ExtY_FCS_STATES_T', 'ExtY_FCS_DATACTRL_T',
     'ExtY_FCS_GNCBUS_T', 'ExtY_FCS_AVOIFLAG_T', 'ExtY_FCS_ESC_T',
-    'ExtY_FCS_PARAM_T', 'ObstacleOutput_T', 'SystemStatus_T',
+    'ExtY_FCS_PARAM_T',
     'GCSTelemetry_T', 'ExtY_FCS_LINESTRUC_ac_aim2AB_T', 'ExtY_FCS_LINESTRUC_acAB_T',
     'NCLinkFrame', 'encode_command_packet',
     'encode_takeoff_command', 'encode_land_command',
     'encode_hover_command', 'encode_rtl_command',
-    'encode_lidar_avoidance_command', 'encode_gcs_command',
+    'encode_gcs_command',
     'encode_waypoints_upload', 'CmdIdx', 'PortType',
-    'RECEIVE_PORT', 'SEND_ONLY_PORT', 'LIDAR_SEND_PORT',
+    'RECEIVE_PORT', 'SEND_ONLY_PORT',
     'PLANNING_SEND_PORT', 'PLANNING_RECV_PORT'
 ]
 
@@ -2633,27 +2515,27 @@ def encode_extu_fcs_from_dict(pids_data: dict, cmd_idx: int = 0, cmd_mission: in
     # 从pids_data字典中获取30个PID参数值，如果没有则使用默认值
     pid_values = [
         # 1. Ail (7)
-        float(pids_data.get('fKaPHI', 0.5)),      # F_KaPHI
-        float(pids_data.get('fKaP', 0.2)),        # F_KaP
-        float(pids_data.get('fKaY', 0.143)),      # F_KaY
+        float(pids_data.get('fKaPHI', 0.8)),      # F_KaPHI
+        float(pids_data.get('fKaP', 0.3)),        # F_KaP
+        float(pids_data.get('fKaY', 0.3)),      # F_KaY
         float(pids_data.get('fIaY', 0.005)),      # F_IaY
         float(pids_data.get('fKaVy', 2.0)),       # F_KaVy
         float(pids_data.get('fIaVy', 0.4)),       # F_IaVy
         float(pids_data.get('fKaAy', 0.28)),      # F_KaAy
         
         # 2. Ele (7)
-        float(pids_data.get('fKeTHETA', 0.5)),    # F_KeTHETA
-        float(pids_data.get('fKeQ', 0.2)),         # F_KeQ
-        float(pids_data.get('fKeX', 0.201)),       # F_KeX
+        float(pids_data.get('fKeTHETA', 0.8)),    # F_KeTHETA
+        float(pids_data.get('fKeQ', 0.3)),         # F_KeQ
+        float(pids_data.get('fKeX', 0.3)),       # F_KeX
         float(pids_data.get('fIeX', 0.01)),       # F_IeX
         float(pids_data.get('fKeVx', 2.0)),       # F_KeVx
         float(pids_data.get('fIeVx', 0.4)),       # F_IeVx
         float(pids_data.get('fKeAx', 0.55)),       # F_KeAx
         
         # 3. Rud (4)
-        float(pids_data.get('fKrR', 0.2)),        # F_KrR
-        float(pids_data.get('fIrR', 0.01)),       # F_IrR
-        float(pids_data.get('fKrAy', 0.1)),       # F_KrAy
+        float(pids_data.get('fKrR', 1.0)),        # F_KrR
+        float(pids_data.get('fIrR', 0.4)),       # F_IrR
+        float(pids_data.get('fKrAy', 0.0)),       # F_KrAy
         float(pids_data.get('fKrPSI', 1.0)),      # F_KrPSI
         
         # 4. H (5)
@@ -2661,14 +2543,14 @@ def encode_extu_fcs_from_dict(pids_data: dict, cmd_idx: int = 0, cmd_mission: in
         float(pids_data.get('fIcH', 0.015)),       # F_IcH
         float(pids_data.get('fKcHdot', 0.5)),      # F_KcHdot
         float(pids_data.get('fIcHdot', 0.05)),      # F_IcHdot
-        float(pids_data.get('fKcAz', 0.15)),       # F_KcAz
+        float(pids_data.get('fKcAz', 0.5)),       # F_KcAz
         
         # 5. RPM (2)
         float(pids_data.get('fIgRPM', 0.0)),        # F_IgRPM
-        float(pids_data.get('fKgRPM', 0.01)),       # F_KgRPM
+        float(pids_data.get('fKgRPM', 0.0)),       # F_KgRPM
         
         # 6. Scale (1)
-        float(pids_data.get('fScale_factor', 1.0)),  # F_Scale_factor
+        float(pids_data.get('fScale_factor', 0.3)),  # F_Scale_factor
         
         # 7. New Params (4)
         float(pids_data.get('XaccLMT', 1.0)),       # XaccLMT
@@ -2803,12 +2685,6 @@ def encode_rtl_command() -> bytes:
     """编码返航命令"""
     return encode_command_packet(NCLINK_SEND_EXTU_FCS, 
                              struct.pack('!i', CmdIdx.CMD_RETURN_TO_HOME))
-
-
-def encode_lidar_avoidance_command(enable: bool = True) -> bytes:
-    """编码避障开关命令"""
-    cmd = CmdIdx.CMD_PLAN_ON if enable else CmdIdx.CMD_PLAN_OFF
-    return encode_command_packet(NCLINK_SEND_EXTU_FCS, struct.pack('!i', cmd))
 
 
 # ================================================================
