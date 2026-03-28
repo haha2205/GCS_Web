@@ -9,6 +9,10 @@ export function useWebSocket(url) {
   const connected = ref(false)
   const connecting = ref(false)
   const error = ref(null)
+  const reconnectEnabled = ref(true)
+  const reconnectAttempts = ref(0)
+  let reconnectTimer = null
+  let manualDisconnect = false
   
   // KPI 数据状态
   const kpiData = ref({
@@ -31,6 +35,7 @@ export function useWebSocket(url) {
   
   // 手动清理函数，由调用者在组件的 onUnmounted 中调用
   function cleanup() {
+    reconnectEnabled.value = false
     disconnect()
   }
   
@@ -41,6 +46,13 @@ export function useWebSocket(url) {
     if (connected.value || connecting.value) {
       console.warn('WebSocket 已连接或正在连接中')
       return
+    }
+
+    manualDisconnect = false
+    reconnectEnabled.value = true
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
     }
     
     connecting.value = true
@@ -54,6 +66,7 @@ export function useWebSocket(url) {
         connected.value = true
         connecting.value = false
         error.value = null
+        reconnectAttempts.value = 0
         
         if (openHandler) {
           openHandler()
@@ -83,16 +96,18 @@ export function useWebSocket(url) {
         console.log('WebSocket 连接已关闭, code:', event.code)
         connected.value = false
         connecting.value = false
+        ws.value = null
         
         if (closeHandler) {
           closeHandler(event)
         }
+
+        scheduleReconnect()
       }
       
       ws.value.onerror = (event) => {
         console.error('WebSocket 错误:', event)
         error.value = event
-        connecting.value = false
         
         if (errorHandler) {
           errorHandler(event)
@@ -108,6 +123,24 @@ export function useWebSocket(url) {
       }
     }
   }
+
+  function scheduleReconnect() {
+    if (!reconnectEnabled.value || manualDisconnect) {
+      return
+    }
+
+    if (reconnectTimer || connected.value || connecting.value) {
+      return
+    }
+
+    reconnectAttempts.value += 1
+    const delay = Math.min(5000, 500 * Math.pow(2, reconnectAttempts.value - 1))
+
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      connect()
+    }, delay)
+  }
   
   /**
    * 处理 KPI 数据更新
@@ -117,7 +150,7 @@ export function useWebSocket(url) {
       kpiData.value = {
         timestamp: messageData.timestamp,
         dimensions: messageData.data.dimensions || {},
-        overallScore: messageData.data.overallScore
+        overallScore: messageData.data.overallScore ?? messageData.data.overall_score ?? null
       }
       console.log('[WebSocket] KPI数据已更新:', kpiData.value)
     }
@@ -161,12 +194,18 @@ export function useWebSocket(url) {
    * 断开连接
    */
   function disconnect() {
+    manualDisconnect = true
+    reconnectEnabled.value = false
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
     if (ws.value) {
       ws.value.close()
       ws.value = null
-      connected.value = false
-      connecting.value = false
     }
+    connected.value = false
+    connecting.value = false
   }
   
   /**

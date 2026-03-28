@@ -1,50 +1,5 @@
 <template>
-  <div class="three-drone-view" ref="container">
-    <!-- 视图控制模式切换 -->
-    <div class="view-controls">
-      <button
-        v-for="viewMode in viewModes"
-        :key="viewMode.id"
-        class="view-mode-btn"
-        :class="{ active: currentViewMode === viewMode.id }"
-        @click="switchViewMode(viewMode.id)"
-        :title="viewMode.name"
-      >
-        {{ viewMode.icon }}
-      </button>
-    </div>
-
-    <!-- 信息显示开关 -->
-    <div class="info-toggle">
-      <button 
-        class="toggle-btn" 
-        @click="showInfo = !showInfo"
-        :class="{ active: showInfo }"
-      >
-        {{ showInfo ? '📊' : '📉' }}
-      </button>
-    </div>
-
-    <!-- 场景信息面板（可隐藏） -->
-    <div v-if="showInfo" class="scene-info">
-      <div class="info-item">
-        <span class="label">高度</span>
-        <span class="value">{{ (droneStore.fcsStates?.states_height || droneStore.planningTelemetry?.currentPosZ || 0).toFixed(1) }}m</span>
-      </div>
-      <div class="info-item">
-        <span class="label">俯仰</span>
-        <span class="value">{{ formatAngle(props.pitch) }}°</span>
-      </div>
-      <div class="info-item">
-        <span class="label">横滚</span>
-        <span class="value">{{ formatAngle(props.roll) }}°</span>
-      </div>
-      <div class="info-item">
-        <span class="label">航向</span>
-        <span class="value">{{ formatAngle(props.yaw) }}°</span>
-      </div>
-    </div>
-  </div>
+  <div class="three-drone-view" ref="container"></div>
 </template>
 
 <script setup>
@@ -74,14 +29,6 @@ const props = defineProps({
 // Refs
 const container = ref(null)
 const currentViewMode = ref('chase')
-const showInfo = ref(false)
-
-// 视图模式定义
-const viewModes = [
-  { id: 'chase', name: '跟随模式', icon: '✈️' },
-  { id: 'topdown', name: '上帝视角', icon: '📷' },
-  { id: 'fpv', name: '第一人称', icon: '👁️' }
-]
 
 // Three.js 对象
 let scene, camera, renderer, controls
@@ -91,14 +38,26 @@ let groundShadow = null
 let trajectoryLine = null  // 历史轨迹
 let globalPathMesh = null    // 全局路径 Mesh (Tube)
 let localTrajMesh = null    // 局部轨迹 Mesh (Tube)
+let globalPathMarker = null
+let localTrajMarker = null
 let globalPathMaterial = null
 let localTrajMaterial = null
-let lidarObstacleMeshes = []  // 雷达障碍物 Mesh 数组
+let obstacleMeshes = []
 let horizonRing = null        // 空间姿态环
 let thrustPillars = []         // 推力柱数组
 let historyPoints = []
 const maxHistoryPoints = 500
 const maxTrajectoryPoints = 500  // 轨迹最大点数
+const renderDelayMs = 120
+const poseBuffer = []
+const renderedPose = {
+  x: 0,
+  y: 0,
+  z: 0,
+  pitch: 0,
+  roll: 0,
+  yaw: 0,
+}
 
 const sceneData = ref({
   pitch: props.pitch,
@@ -106,41 +65,43 @@ const sceneData = ref({
   yaw: props.yaw
 })
 
-// 模拟电机PWM数据（1000-2000）
-const motorPwmData = ref([1100, 1150, 1200, 1180, 1120, 1160])
+// 电机PWM历史值（当前协议下为0~1的归一化比值）
+const motorPwmData = ref([0, 0, 0, 0, 0, 0])
 
-// 格式化角度显示
-const formatAngle = (angle) => {
-  return (angle * 180 / Math.PI).toFixed(1)
+const toRadians = (value) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) {
+    return 0
+  }
+  return THREE.MathUtils.degToRad(numeric)
 }
 
-// 统一的障碍物数据源 (Planning优于Lidar)
+const scenePose = computed(() => {
+  const actualPose = droneStore.actualPose || {}
+  const flight = droneStore.realtimeViews?.flightState || {}
+  const rawFlight = flight.raw || {}
+  return {
+    timestamp: Number(actualPose.timestamp ?? droneStore.realtimeViews?.updatedAt) || Date.now(),
+    x: Number.isFinite(Number(actualPose.x)) ? Number(actualPose.x) : 0,
+    y: Number.isFinite(Number(actualPose.y)) ? Number(actualPose.y) : 0,
+    z: Number.isFinite(Number(actualPose.z)) ? Number(actualPose.z) : (Number(flight.height) || 0),
+    pitch: toRadians(actualPose.pitch ?? rawFlight.states_theta ?? flight.theta ?? props.pitch),
+    roll: toRadians(actualPose.roll ?? rawFlight.states_phi ?? flight.phi ?? props.roll),
+    yaw: toRadians(actualPose.yaw ?? rawFlight.states_psi ?? flight.psi ?? props.yaw)
+  }
+})
+
+// 当前障碍物数据源仅使用规划遥测派生结果
 const activeObstacles = computed(() => {
-  // 1. 优先检查规划遥测中的障碍物 (Object3d_T)
-  // center: {x,y,z}, size: {x,y,z}, velocity: {x,y,z}
-  // 或者直接是对象数组: [{cx, cy, cz, sx, sy, sz, ...}]
   if (droneStore.obstacles && droneStore.obstacles.length > 0) {
     return droneStore.obstacles.map(o => ({
-      x: o.cx || o.center?.x || 0,
-      y: o.cy || o.center?.y || 0,
-      z: o.cz || o.center?.z || 0,
-      sx: o.sx || o.size?.x || 1.0,
-      sy: o.sy || o.size?.y || 1.0,
-      sz: o.sz || o.size?.z || 1.0,
+      x: o.cx ?? o.center?.x ?? 0,
+      y: o.cy ?? o.center?.y ?? 0,
+      z: o.cz ?? o.center?.z ?? 0,
+      sx: o.sx ?? o.size?.x ?? 1.0,
+      sy: o.sy ?? o.size?.y ?? 1.0,
+      sz: o.sz ?? o.size?.z ?? 1.0,
       type: 'planning'
-    }))
-  } 
-  
-  // 2. 其次检查雷达接口数据
-  if (droneStore.lidarObstacles && droneStore.lidarObstacles.length > 0) {
-    return droneStore.lidarObstacles.map(o => ({
-       x: Number(o.position_x) || 0,
-       y: Number(o.position_y) || 0,
-       z: Number(o.position_z) || 0,
-       sx: Number(o.size_x) || 1.0,
-       sy: Number(o.size_y) || 1.0,
-       sz: Number(o.size_z) || 1.0,
-       type: 'lidar'
     }))
   }
   
@@ -155,42 +116,20 @@ watch(() => droneStore.pwms, (newPwms) => {
   }
 }, { deep: true })
 
-// 切换视图模式
-const switchViewMode = (mode) => {
-  currentViewMode.value = mode
-  
-  if (!camera || !controls) return
-
-  switch (mode) {
-    case 'chase':
-      // 优先从 fcsStates 获取高度，如果没有则尝试从 planningTelemetry 获取
-      // 注意：fcsStates 使用 states_height，planningTelemetry 使用 currentPosZ
-      let chaseAltitude = 0;
-      if (droneStore.fcsStates && typeof droneStore.fcsStates.states_height === 'number' && droneStore.fcsStates.states_height !== 0) {
-        chaseAltitude = droneStore.fcsStates.states_height;
-      } else if (droneStore.planningTelemetry && typeof droneStore.planningTelemetry.currentPosZ === 'number') {
-        chaseAltitude = droneStore.planningTelemetry.currentPosZ;
-      }
-      
-      const offset = new THREE.Vector3(-10, 5, 10)
-      camera.position.copy(droneGroup.position.clone().add(offset))
-      controls.target.copy(droneGroup.position)
-      break
-      
-    case 'topdown':
-      controls.target.set(0, 0, 0)
-      camera.position.set(0, 60, 0)
-      camera.lookAt(0, 0, 0)
-      break
-      
-    case 'fpv':
-      const forward = new THREE.Vector3(0, 2, 15)
-      forward.applyEuler(droneGroup.rotation)
-      camera.position.copy(droneGroup.position.clone().add(forward))
-      controls.target.copy(droneGroup.position.clone().add(forward))
-      break
+watch(scenePose, (sample) => {
+  if (!sample) {
+    return
   }
-}
+  const previous = poseBuffer[poseBuffer.length - 1]
+  if (previous && previous.timestamp === sample.timestamp) {
+    poseBuffer[poseBuffer.length - 1] = { ...sample }
+  } else {
+    poseBuffer.push({ ...sample })
+  }
+  while (poseBuffer.length > 24) {
+    poseBuffer.shift()
+  }
+}, { deep: true, immediate: true })
 
 // 初始化 Three.js 场景
 const initScene = () => {
@@ -444,11 +383,11 @@ const updateThrustPillars = () => {
   if (thrustPillars.length < 6) return;
 
   for (let i = 0; i < 6; i++) {
-    const pwm = pwmData[i] || 1000;
+    const pwm = Number(pwmData[i]) || 0;
     const pillar = thrustPillars[i];
     
-    // 1. 归一化 (0.0 ~ 1.0)，假设PWM范围1000-2000
-    const ratio = Math.max(0, Math.min(1, (pwm - 1000) / 1000))
+    // 当前实机协议直接给出0.0~1.0附近的推力比值
+    const ratio = Math.max(0, Math.min(1, pwm))
     
     // 2. 调整长度
     const scale = Math.max(0.1, ratio * 3)  // 最长3米
@@ -527,17 +466,7 @@ const createHistoryTrail = () => {
   trajectoryLine = new THREE.Line(histGeometry, histMaterial)
   trajectoryLine.frustumCulled = false
   scene.add(trajectoryLine)
-  
-  // 预填充历史轨迹点
-  for (let i = 0; i < maxHistoryPoints; i++) {
-    const t = i / maxHistoryPoints * Math.PI * 4
-    historyPoints.push({
-      x: Math.sin(t) * 15,
-      y: 5 + Math.sin(t * Math.PI * 2) * 3,
-      z: Math.cos(t) * 15
-    })
-  }
-  
+
   updateHistoryTrail()
 }
 
@@ -563,141 +492,194 @@ const createLocalTraj = () => {
   })
 }
 
+const buildPathVectors = (pathPoints) => {
+  const rawPoints = toRaw(pathPoints || [])
+  const vectors = []
+  const count = Math.min(rawPoints.length, maxTrajectoryPoints)
+
+  for (let i = 0; i < count; i++) {
+    const point = toRaw(rawPoints[i])
+    let px = 0
+    let py = 0
+    let pz = 0
+
+    if (Array.isArray(point)) {
+      px = Number(point[0])
+      py = Number(point[1])
+      pz = Number(point[2])
+    } else {
+      px = Number(point.x)
+      py = Number(point.y)
+      pz = Number(point.z)
+    }
+
+    if (Number.isNaN(px) || Number.isNaN(py) || Number.isNaN(pz)) {
+      continue
+    }
+
+    vectors.push(new THREE.Vector3(px, pz, -py))
+  }
+
+  return vectors
+}
+
+const createPathMarker = (vector, color, radius) => {
+  const geometry = new THREE.SphereGeometry(radius, 24, 24)
+  const material = new THREE.MeshPhongMaterial({
+    color,
+    emissive: color,
+    emissiveIntensity: 0.35,
+    transparent: true,
+    opacity: 0.95,
+    depthWrite: false
+  })
+  const mesh = new THREE.Mesh(geometry, material)
+  mesh.position.copy(vector)
+  return mesh
+}
+
+const clearGlobalPath = () => {
+  if (!scene || !globalPathMesh) return
+  scene.remove(globalPathMesh)
+  if (globalPathMesh.geometry) globalPathMesh.geometry.dispose()
+  if (globalPathMesh.material) globalPathMesh.material.dispose()
+  globalPathMesh = null
+}
+
+const clearGlobalPathMarker = () => {
+  if (!scene || !globalPathMarker) return
+  scene.remove(globalPathMarker)
+  if (globalPathMarker.geometry) globalPathMarker.geometry.dispose()
+  if (globalPathMarker.material) globalPathMarker.material.dispose()
+  globalPathMarker = null
+}
+
+const clearLocalTraj = () => {
+  if (!scene || !localTrajMesh) return
+  scene.remove(localTrajMesh)
+  if (localTrajMesh.geometry) localTrajMesh.geometry.dispose()
+  if (localTrajMesh.material) localTrajMesh.material.dispose()
+  localTrajMesh = null
+}
+
+const clearLocalTrajMarker = () => {
+  if (!scene || !localTrajMarker) return
+  scene.remove(localTrajMarker)
+  if (localTrajMarker.geometry) localTrajMarker.geometry.dispose()
+  if (localTrajMarker.material) localTrajMarker.material.dispose()
+  localTrajMarker = null
+}
+
 // 更新全局路径 (TubeGeometry)
 const updateGlobalPath = (pathPoints) => {
   if (!scene) return; 
-  if (!pathPoints || pathPoints.length === 0) return
-  
-  const rawPoints = toRaw(pathPoints)
-  // [DEBUG] 打印原始数据的第一个点，检查结构
-  console.log('[ThreeJS] rawPoints[0]:', rawPoints[0]);
-
-  const vectors = []
-  const count = Math.min(rawPoints.length, maxTrajectoryPoints)
-  
-  for (let i = 0; i < count; i++) {
-    const point = toRaw(rawPoints[i])
-    let px = 0, py = 0, pz = 0
-    
-    // 强制类型转换，防止 undefined 或 string
-    if (Array.isArray(point)) {
-      px = Number(point[0]); 
-      py = Number(point[1]); 
-      pz = Number(point[2]);
-    } else {
-      px = Number(point.x);
-      py = Number(point.y);
-      pz = Number(point.z);
-    }
-
-    // 检查 NaN (关键!)
-    if (isNaN(px) || isNaN(py) || isNaN(pz)) {
-        console.warn(`[ThreeJS] Point ${i} is Invalid (NaN):`, point);
-        continue;
-    }
-
-    // ENU (东-北-天) -> ThreeJS (X, Y, Z)
-    // 假设 y 是北(North), z 是天(Up)
-    // ThreeJS: x=East, y=Up, z=-North
-    vectors.push(new THREE.Vector3(px, pz, -py))
+  if (!pathPoints || pathPoints.length === 0) {
+    clearGlobalPath()
+    clearGlobalPathMarker()
+    return
   }
+  
+  const vectors = buildPathVectors(pathPoints)
   
   if (vectors.length < 2) {
-      console.warn('[ThreeJS] 有效点数少于2个，无法绘制路径');
+      clearGlobalPath()
+      clearGlobalPathMarker()
+      if (vectors.length === 1) {
+        globalPathMarker = createPathMarker(vectors[0], 0x3288fa, 0.75)
+        globalPathMarker.renderOrder = 8
+        scene.add(globalPathMarker)
+      }
       return;
   }
+
+  clearGlobalPathMarker()
 
   const startPoint = vectors[0];
   // console.log(`[ThreeJS Debug] Path Start: x=${startPoint.x.toFixed(1)}, y=${startPoint.y.toFixed(1)}, z=${startPoint.z.toFixed(1)}`);
   
   // 1. 清理旧模型
-  if (globalPathMesh) {
-    scene.remove(globalPathMesh)
-    if (globalPathMesh.geometry) globalPathMesh.geometry.dispose()
-  }
+  clearGlobalPath()
 
   // 2. 创建曲线
   const curve = new THREE.CatmullRomCurve3(vectors) 
 
   // 3. 创建管道几何体
-  // 半径设大一点 0.5 -> 1.0, 确保可见
-  const tubeGeometry = new THREE.TubeGeometry(curve, Math.max(2, vectors.length), 0.5, 8, false)
+  const tubeGeometry = new THREE.TubeGeometry(curve, Math.max(4, vectors.length * 4), 0.62, 10, false)
   
   // 4. 材质设置
   const material = new THREE.MeshPhongMaterial({
     color: 0x3288fa,
-    emissive: 0x0044aa, 
+    emissive: 0x0f4c81,
     specular: 0xffffff,
-    shininess: 30,
+    shininess: 24,
     transparent: true,
-    opacity: 0.9,
-    side: THREE.DoubleSide
+    opacity: 0.42,
+    side: THREE.DoubleSide,
+    depthWrite: false
   })
   
   globalPathMesh = new THREE.Mesh(tubeGeometry, material)
-  globalPathMesh.castShadow = true
+  globalPathMesh.castShadow = false
+  globalPathMesh.renderOrder = 4
   scene.add(globalPathMesh)
 }
 
 // 更新局部轨迹 (TubeGeometry)
 const updateLocalTraj = (trajPoints) => {
   if (!scene) return;
-  if (!trajPoints || trajPoints.length === 0) return
-  
-  const rawPoints = toRaw(trajPoints)
-  // console.log('[ThreeJS] 更新局部轨迹(Tube)，点数:', rawPoints.length);
-
-  const vectors = []
-  const count = Math.min(rawPoints.length, maxTrajectoryPoints)
-  
-  for (let i = 0; i < count; i++) {
-    const point = toRaw(rawPoints[i])
-    let px = 0, py = 0, pz = 0
-    if (Array.isArray(point)) {
-      px = point[0]; py = point[1]; pz = point[2];
-    } else {
-      px = Number(point.x) || 0;
-      py = Number(point.y) || 0;
-      pz = Number(point.z) || 0;
-    }
-    vectors.push(new THREE.Vector3(px, pz, -py))
+  if (!trajPoints || trajPoints.length === 0) {
+    clearLocalTraj()
+    clearLocalTrajMarker()
+    return
   }
   
-  if (vectors.length < 2) return
+  const vectors = buildPathVectors(trajPoints)
+  
+  if (vectors.length < 2) {
+    clearLocalTraj()
+    clearLocalTrajMarker()
+    if (vectors.length === 1) {
+      localTrajMarker = createPathMarker(vectors[0], 0x4caf50, 0.42)
+      localTrajMarker.renderOrder = 10
+      scene.add(localTrajMarker)
+    }
+    return
+  }
+
+  clearLocalTrajMarker()
 
   // 1. 清理旧模型
-  if (localTrajMesh) {
-    scene.remove(localTrajMesh)
-    if (localTrajMesh.geometry) localTrajMesh.geometry.dispose()
-  }
+  clearLocalTraj()
 
   const curve = new THREE.CatmullRomCurve3(vectors)
-  const tubeGeometry = new THREE.TubeGeometry(curve, Math.max(2, vectors.length * 4), 0.4, 8, false)
+  const tubeGeometry = new THREE.TubeGeometry(curve, Math.max(4, vectors.length * 4), 0.24, 10, false)
   
   const material = new THREE.MeshPhongMaterial({
     color: 0x4caf50,
-    emissive: 0x006600, // 绿色自发光
+    emissive: 0x0d5f2a,
     transparent: true,
-    opacity: 0.9,
-    side: THREE.DoubleSide
+    opacity: 0.96,
+    side: THREE.DoubleSide,
+    depthWrite: false
   })
   
   localTrajMesh = new THREE.Mesh(tubeGeometry, material)
   localTrajMesh.castShadow = true
+  localTrajMesh.renderOrder = 6
   scene.add(localTrajMesh)
 }
 
-// 更新雷达障碍物可视化
-const updateLidarVisualization = (obstacles) => {
+// 更新障碍物可视化
+const updateObstacleVisualization = (obstacles) => {
   if (!scene) return
   
   // 1. 清理旧障碍物
-  lidarObstacleMeshes.forEach(mesh => {
+  obstacleMeshes.forEach(mesh => {
     scene.remove(mesh)
     if (mesh.geometry) mesh.geometry.dispose()
     if (mesh.material) mesh.material.dispose()
   })
-  lidarObstacleMeshes = []
+  obstacleMeshes = []
 
   if (!obstacles || obstacles.length === 0) return
   
@@ -719,7 +701,7 @@ const updateLidarVisualization = (obstacles) => {
      const geometry = new THREE.BoxGeometry(sx, sz, sy); 
      
      const material = new THREE.MeshStandardMaterial({
-       color: obs.type === 'planning' ? 0xff00ff : 0xff3300,  // 规划障碍物为紫色，雷达为橙红
+       color: 0xff00ff,
        transparent: true,
        opacity: 0.6,
        roughness: 0.4,
@@ -736,7 +718,7 @@ const updateLidarVisualization = (obstacles) => {
      mesh.position.set(px, pz, -py);
      
      scene.add(mesh);
-     lidarObstacleMeshes.push(mesh);
+     obstacleMeshes.push(mesh);
   });
 }
 
@@ -796,22 +778,9 @@ const updateDropLine = () => {
 // 更新无人机姿态
 const updateDroneAttitude = () => {
   if (droneGroup) {
-    // 优先使用飞控实时回传的姿态数据
-    let pitch, roll, yaw;
-    
-    // 检查是否连接且状态有效
-    if (droneStore.connected && droneStore.fcsStates) {
-      // 注意：飞控数据通常是弧度，ThreeJS也需要弧度
-      // ExtY_FCS_STATES_T: states_theta(pitch), states_phi(roll), states_psi(yaw)
-      pitch = droneStore.fcsStates.states_theta || 0;
-      roll = droneStore.fcsStates.states_phi || 0;
-      yaw = droneStore.fcsStates.states_psi || 0;
-    } else {
-      // 未连接时使用传入的props（可能来自模拟或默认值）
-      pitch = props.pitch;
-      roll = props.roll;
-      yaw = props.yaw;
-    }
+    const pitch = renderedPose.pitch
+    const roll = renderedPose.roll
+    const yaw = renderedPose.yaw
 
     // 更新场景数据引用（用于可能的显示）
     sceneData.value.pitch = pitch;
@@ -821,16 +790,9 @@ const updateDroneAttitude = () => {
     const euler = new THREE.Euler(pitch, yaw, roll, 'XYZ')
     droneGroup.setRotationFromEuler(euler)
     
-    // 优先从 fcsStates 获取高度，如果没有则尝试从 planningTelemetry 获取
-    // 注意：fcsStates 使用 states_height，planningTelemetry 使用 currentPosZ
-    let altitude = 0;
-    if (droneStore.fcsStates && typeof droneStore.fcsStates.states_height === 'number' && droneStore.fcsStates.states_height !== 0) {
-      altitude = droneStore.fcsStates.states_height;
-    } else if (droneStore.planningTelemetry && typeof droneStore.planningTelemetry.currentPosZ === 'number') {
-      altitude = droneStore.planningTelemetry.currentPosZ;
-    }
-    
-    droneGroup.position.y = Math.max(0, altitude)
+    droneGroup.position.x = renderedPose.x
+    droneGroup.position.y = Math.max(0, renderedPose.z)
+    droneGroup.position.z = -renderedPose.y
     
     // 更新投影线
     updateDropLine()
@@ -859,6 +821,42 @@ const updateDroneAttitude = () => {
   }
 }
 
+const updateRenderPose = () => {
+  if (!poseBuffer.length) {
+    return
+  }
+
+  const targetTime = Date.now() - renderDelayMs
+  let currentSample = poseBuffer[0]
+  let nextSample = null
+
+  for (let index = 0; index < poseBuffer.length; index += 1) {
+    if (poseBuffer[index].timestamp <= targetTime) {
+      currentSample = poseBuffer[index]
+      nextSample = poseBuffer[index + 1] || null
+    } else {
+      nextSample = poseBuffer[index]
+      break
+    }
+  }
+
+  if (!nextSample || nextSample.timestamp <= currentSample.timestamp) {
+    Object.assign(renderedPose, currentSample)
+  } else {
+    const alpha = Math.min(1, Math.max(0, (targetTime - currentSample.timestamp) / (nextSample.timestamp - currentSample.timestamp)))
+    renderedPose.x = THREE.MathUtils.lerp(currentSample.x, nextSample.x, alpha)
+    renderedPose.y = THREE.MathUtils.lerp(currentSample.y, nextSample.y, alpha)
+    renderedPose.z = THREE.MathUtils.lerp(currentSample.z, nextSample.z, alpha)
+    renderedPose.pitch = THREE.MathUtils.lerp(currentSample.pitch, nextSample.pitch, alpha)
+    renderedPose.roll = THREE.MathUtils.lerp(currentSample.roll, nextSample.roll, alpha)
+    renderedPose.yaw = THREE.MathUtils.lerp(currentSample.yaw, nextSample.yaw, alpha)
+  }
+
+  while (poseBuffer.length > 2 && poseBuffer[1].timestamp <= targetTime) {
+    poseBuffer.shift()
+  }
+}
+
 // 动画循环
 const animate = () => {
   requestAnimationFrame(animate)
@@ -873,6 +871,9 @@ const animate = () => {
 
   // 更新控制器
   controls.update()
+
+  // 更新延迟平滑后的渲染姿态
+  updateRenderPose()
 
   // 更新无人机姿态
   updateDroneAttitude()
@@ -908,22 +909,27 @@ watch(() => props.yaw, (newVal) => {
 
 // 监听全局路径数据
 watch(() => droneStore.globalPath, (newPath) => {
-  if (newPath && newPath.length > 0) {
-    updateGlobalPath(newPath)
-  }
-}, { deep: true })
+  updateGlobalPath(newPath)
+}, { deep: true, immediate: true })
 
 // 监听局部轨迹数据
 watch(() => droneStore.localTraj, (newTraj) => {
-  if (newTraj && newTraj.length > 0) {
-    updateLocalTraj(newTraj)
-  }
-}, { deep: true })
+  updateLocalTraj(newTraj)
+}, { deep: true, immediate: true })
 
-// 监听统一后的障碍物数据 (Planning优于Lidar)
+watch(() => droneStore.trajectory, (newTrajectory) => {
+  historyPoints = (newTrajectory || []).slice(-maxHistoryPoints).map(point => ({
+    x: Number(point.x) || 0,
+    y: Number(point.z) || 0,
+    z: -(Number(point.y) || 0)
+  }))
+  updateHistoryTrail()
+}, { deep: true, immediate: true })
+
+// 监听规划遥测派生的障碍物数据
 watch(activeObstacles, (newObstacles) => {
-  updateLidarVisualization(newObstacles)
-}, { deep: true })
+  updateObstacleVisualization(newObstacles)
+}, { deep: true, immediate: true })
 
 // 生命周期钩子
 onMounted(() => {
@@ -963,9 +969,19 @@ onBeforeUnmount(() => {
     trajectoryLine.geometry.dispose()
     trajectoryLine.material.dispose()
   }
+
+  if (globalPathMarker) {
+    globalPathMarker.geometry.dispose()
+    globalPathMarker.material.dispose()
+  }
+
+  if (localTrajMarker) {
+    localTrajMarker.geometry.dispose()
+    localTrajMarker.material.dispose()
+  }
   
-  // 清理雷达障碍物
-  lidarObstacleMeshes.forEach(mesh => {
+  // 清理障碍物
+  obstacleMeshes.forEach(mesh => {
       if (mesh.geometry) mesh.geometry.dispose()
       if (mesh.material) mesh.material.dispose()
   })
@@ -979,48 +995,6 @@ onBeforeUnmount(() => {
   height: 100%;
   overflow: hidden;
   background: #050508;
-}
-
-/* 视图控制按钮 */
-.view-controls {
-  position: absolute;
-  top: 20px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  gap: 12px;
-  z-index: 100;
-  background: rgba(15, 15, 20, 0.9);
-  padding: 10px 20px;
-  border-radius: 8px;
-  border: 1px solid #2a2a2a;
-  backdrop-filter: blur(10px);
-}
-
-.view-mode-btn {
-  width: 40px;
-  height: 40px;
-  background: rgba(50, 136, 250, 0.15);
-  border: 1px solid rgba(50, 136, 250, 0.3);
-  border-radius: 6px;
-  color: #fff;
-  font-size: 18px;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.view-mode-btn:hover {
-  background: rgba(50, 136, 250, 0.3);
-  transform: scale(1.1);
-}
-
-.view-mode-btn.active {
-  background: rgba(50, 136, 250, 0.4);
-  border-color: #3288fa;
-  box-shadow: 0 0 10px rgba(50, 136, 250, 0.4);
 }
 
 /* 信息开关 */

@@ -1,9 +1,9 @@
 <template>
   <div class="home-view">
     <ThreeDroneView
-      :pitch="droneStore.fcsStates?.pitch ?? 0"
-      :roll="droneStore.fcsStates?.roll ?? 0"
-      :yaw="droneStore.fcsStates?.yaw ?? 0"
+      :pitch="droneStore.fcsStates?.states_theta ?? 0"
+      :roll="droneStore.fcsStates?.states_phi ?? 0"
+      :yaw="droneStore.fcsStates?.states_psi ?? 0"
     />
   </div>
 </template>
@@ -15,7 +15,6 @@ import ThreeDroneView from '@/components/ThreeDroneView.vue'
 
 const droneStore = useDroneStore()
 
-// 初始化时自动连接 WebSocket
 onMounted(() => {
   if (!droneStore.isConnected) {
     droneStore.connect()
@@ -25,8 +24,12 @@ onMounted(() => {
 
 <style scoped>
 .home-view {
+  position: relative;
   width: 100%;
   height: 100%;
-  background: #0a0a0a;
+  background:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.18), transparent 28%),
+    radial-gradient(circle at 80% 12%, rgba(34, 197, 94, 0.1), transparent 20%),
+    linear-gradient(180deg, #06111f 0%, #091827 42%, #0b1220 100%);
 }
 </style>

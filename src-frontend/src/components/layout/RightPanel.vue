@@ -1,7 +1,7 @@
 <template>
   <div class="right-sidebar-content">
     <div class="panel-content">
-      <RightMonitorTabsPanel />
+      <RightMonitorTabsPanel :show-control-panel="showControlPanel" :show-system-panel="showSystemPanel" />
     </div>
   </div>
 </template>
@@ -10,20 +10,20 @@
 import RightMonitorTabsPanel from './RightMonitorTabsPanel.vue'
 
 // 接收props而不是内部管理状态
-const props = defineProps({
+defineProps({
   isMaximized: {
+    type: Boolean,
+    default: false
+  },
+  showControlPanel: {
+    type: Boolean,
+    default: true
+  },
+  showSystemPanel: {
     type: Boolean,
     default: false
   }
 })
-
-// 定义emits
-const emit = defineEmits(['toggle-maximize', 'toggle-hide'])
-
-const splitPanel = () => {
-  // 拆分面板的功能可以在这里实现
-  console.log('Split panel clicked')
-}
 </script>
 
 <style scoped>
@@ -34,6 +34,7 @@ const splitPanel = () => {
   display: flex !important;
   flex-direction: column !important;
   overflow: hidden !important;
+  background: linear-gradient(180deg, #f8fbff 0%, #eef4fb 100%);
 }
 
 .maximized .right-sidebar-content {

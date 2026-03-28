@@ -3,7 +3,35 @@
  * 提供 RESTful API 调用接口
  */
 
-const API_BASE_URL = 'http://localhost:8000'
+function normalizeBaseUrl(url) {
+  return url ? url.replace(/\/$/, '') : ''
+}
+
+function getDefaultBackendBaseUrl() {
+  const browserHost = typeof window !== 'undefined' ? window.location.hostname : ''
+
+  if (browserHost === 'localhost' || browserHost === '127.0.0.1') {
+    return 'http://localhost:8000'
+  }
+
+  return 'http://192.168.16.13:8000'
+}
+
+export function getBackendBaseUrl() {
+  const envBaseUrl = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL)
+  if (envBaseUrl) {
+    return envBaseUrl
+  }
+
+  return getDefaultBackendBaseUrl()
+}
+
+export function buildApiUrl(endpoint = '') {
+  const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`
+  return `${getBackendBaseUrl()}${normalizedEndpoint}`
+}
+
+const API_BASE_URL = getBackendBaseUrl()
 
 /**
  * 通用 API 请求封装
@@ -150,6 +178,33 @@ export const recordingApi = {
 }
 
 /**
+ * 在线实验上下文 API
+ */
+export const experimentApi = {
+  /**
+   * 获取实验矩阵
+   */
+  getPlan: async () => {
+    return await apiRequest('/api/experiment/plan')
+  },
+
+  /**
+   * 获取当前运行时上下文
+   */
+  getRuntime: async () => {
+    return await apiRequest('/api/experiment/runtime')
+  },
+
+  /**
+   * 选择当前实验 case
+   * @param {object} payload - {case_id}
+   */
+  selectCase: async (payload) => {
+    return await apiRequest('/api/experiment/select-case', payload, 'POST')
+  }
+}
+
+/**
  * DSM报告生成 API
  */
 export const dsmApi = {
@@ -205,7 +260,7 @@ export const replayApi = {
     const formData = new FormData()
     formData.append('file', file)
     
-    const url = `${API_BASE_URL}/api/replay/upload`
+    const url = buildApiUrl('/api/replay/upload')
     const options = {
       method: 'POST'
     }
@@ -261,6 +316,7 @@ export default {
   connection: connectionApi,
   log: logApi,
   recording: recordingApi,
+  experiment: experimentApi,
   dsm: dsmApi,
   replay: replayApi,
   udp: udpApi,
@@ -274,6 +330,8 @@ export const apiGetRecordingSessions = () => recordingApi.getSessions()
 export const apiStartRecording = (config) => recordingApi.startRecording(config)
 export const apiStopRecording = () => recordingApi.stopRecording()
 export const apiGetRecordingStatus = () => recordingApi.getStatus()
+export const apiGetExperimentPlan = () => experimentApi.getPlan()
+export const apiGetExperimentRuntime = () => experimentApi.getRuntime()
 export const apiGenerateDSMReport = (config) => dsmApi.generateReport(config)
 export const apiGetDSMConfig = () => dsmApi.getConfig()
 export const apiUpdateDSMConfig = (config) => dsmApi.updateConfig(config)

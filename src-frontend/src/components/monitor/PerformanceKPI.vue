@@ -126,11 +126,11 @@ const getRMSEClass = computed(() => {
 
 <style scoped>
 .kpi-panel {
-  background: rgba(20, 20, 25, 0.8);
+  background: var(--surface-elevated);
   border-radius: 8px;
   padding: 16px;
   margin-bottom: 16px;
-  border: 1px solid #333;
+  border: 1px solid var(--border-light);
 }
 
 .kpi-header {
@@ -139,7 +139,7 @@ const getRMSEClass = computed(() => {
   align-items: center;
   margin-bottom: 16px;
   padding-bottom: 12px;
-  border-bottom: 1px solid #333;
+  border-bottom: 1px solid var(--border-light);
 }
 
 .kpi-title {
@@ -148,7 +148,7 @@ const getRMSEClass = computed(() => {
   gap: 8px;
   font-size: 14px;
   font-weight: 600;
-  color: #ffffff;
+  color: var(--text-primary);
 }
 
 .dimension-icon {
@@ -185,14 +185,15 @@ const getRMSEClass = computed(() => {
 }
 
 .metric-item {
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--panel-muted);
   padding: 12px;
   border-radius: 6px;
+  border: 1px solid var(--border-light);
 }
 
 .metric-label {
   font-size: 11px;
-  color: #888;
+  color: var(--text-tertiary);
   margin-bottom: 6px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -201,7 +202,7 @@ const getRMSEClass = computed(() => {
 .metric-value {
   font-size: 18px;
   font-weight: bold;
-  color: #ffffff;
+  color: var(--text-primary);
   font-family: 'Courier New', monospace;
 }
 

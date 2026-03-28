@@ -6,120 +6,87 @@
         v-for="mode in modes"
         :key="mode.id"
         class="icon-btn"
-        :class="{ active: activeModes.includes(mode.id) }"
+        :class="{ active: activeMode === mode.id || (mode.id === 'workbench' && workbenchVisible) }"
         @click="toggleMode(mode.id)"
         :title="mode.label"
       >
         <span class="icon">{{ mode.icon }}</span>
-        <span v-if="activeModes.includes(mode.id)" class="active-indicator"></span>
+        <span v-if="activeMode === mode.id || (mode.id === 'workbench' && workbenchVisible)" class="active-indicator"></span>
       </div>
     </div>
     
-    <!-- 2. 内容抽屉（自适应高度和宽度）-->
-    <div class="drawer-content" v-if="activeModes.length > 0">
-      <TransitionGroup name="slide-in">
+    <!-- 2. 内容抽屉（统一单面板切换） -->
+    <div class="drawer-content" v-if="activeMode">
+      <transition name="slide-in" mode="out-in">
         <ConfigModule
-          v-if="activeModes.includes('config')"
+          v-if="activeMode === 'config'"
           key="config"
-          :style="panelFlexStyle"
           :closePanel="() => closePanel('config')"
         />
         <CommandModule
-          v-if="activeModes.includes('command')"
+          v-else-if="activeMode === 'command'"
           key="command"
-          :style="panelFlexStyle"
           :closePanel="() => closePanel('command')"
         />
-        <MissionModule
-          v-if="activeModes.includes('mission')"
-          key="mission"
-          :style="panelFlexStyle"
-          :closePanel="() => closePanel('mission')"
-        />
         <ParamsModule
-          v-if="activeModes.includes('params')"
+          v-else
           key="params"
-          :style="panelFlexStyle"
           :closePanel="() => closePanel('params')"
         />
-        <ModulesModule
-          v-if="activeModes.includes('modules')"
-          key="modules"
-          :style="panelFlexStyle"
-          :closePanel="() => closePanel('modules')"
-        />
-        <ReplayModule
-          v-if="activeModes.includes('replay')"
-          key="replay"
-          :style="panelFlexStyle"
-          :closePanel="() => closePanel('replay')"
-        />
-      </TransitionGroup>
+      </transition>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import ConfigModule from './LeftConfigPanel.vue'
 import CommandModule from './LeftCommandPanel.vue'
-import MissionModule from './LeftMissionPanel.vue'
 import ParamsModule from './LeftParamsPanel.vue'
-import ModulesModule from './LeftModulesPanel.vue'
-import ReplayModule from './LeftReplayPanel.vue'
 
 const modes = [
   { id: 'config', icon: '⚙️', label: '配置' },
+  { id: 'workbench', icon: '🧪', label: '实验工作台' },
   { id: 'command', icon: '🚀', label: '飞控指令' },
-  { id: 'mission', icon: '📍', label: '任务' },
-  { id: 'params', icon: '🔧', label: '参数配置' },
-  { id: 'modules', icon: '📦', label: '模块' },
-  { id: 'replay', icon: '🎬', label: '回放日志' }
+  { id: 'params', icon: '🔧', label: '参数配置' }
 ]
 
-// 改为数组以支持多个面板同时打开，最多3个
-const activeModes = ref([])
-
-// 计算各个面板的flex值，实现动态高度分配
-const panelFlexStyle = computed(() => {
-  const count = activeModes.value.length
-  if (count === 1) {
-    return { flex: '1' }
-  } else if (count === 2) {
-    return { flex: '1' }
-  } else {
-    // 3个面板时，每个占1份，平均分配高度
-    return { flex: '1' }
-  }
-})
+const activeMode = ref('command')
+const workbenchVisible = ref(false)
 
 function toggleMode(mode) {
-  const index = activeModes.value.indexOf(mode)
-  const count = activeModes.value.length
-  
-  if (index > -1) {
-    // 如果已打开，则关闭
-    activeModes.value.splice(index, 1)
-  } else {
-    // 未打开，则添加（最多3个面板）
-    if (count < 3) {
-      activeModes.value.push(mode)
-    } else {
-      alert('最多只能同时显示3个面板')
-    }
+  if (mode === 'workbench') {
+    workbenchVisible.value = !workbenchVisible.value
+    window.dispatchEvent(new CustomEvent('toggle-workbench', {
+      detail: { visible: workbenchVisible.value }
+    }))
+    return
   }
+
+  activeMode.value = activeMode.value === mode ? null : mode
 }
 
 function closePanel(mode) {
-  const index = activeModes.value.indexOf(mode)
-  if (index > -1) {
-    activeModes.value.splice(index, 1)
+  if (activeMode.value === mode) {
+    activeMode.value = null
   }
 }
 
 // 导出关闭方法供子组件调用
 defineExpose({
   closePanel
+})
+
+const syncWorkbenchVisibility = (event) => {
+  workbenchVisible.value = !!event.detail?.visible
+}
+
+onMounted(() => {
+  window.addEventListener('workbench-visibility-change', syncWorkbenchVisibility)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('workbench-visibility-change', syncWorkbenchVisibility)
 })
 </script>
 
@@ -135,8 +102,8 @@ defineExpose({
 /* ==================== 侧边导航条 ==================== */
 .sidebar-icons {
   width: 60px;
-  background: rgba(20, 20, 20, 0.95);
-  border: 1px solid #333333;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--border-color);
   border-radius: 8px 0 0 8px;
   display: flex;
   flex-direction: column;
@@ -160,11 +127,11 @@ defineExpose({
 }
 
 .icon-btn:hover {
-  background: rgba(50, 136, 250, 0.2);
+  background: rgba(37, 99, 235, 0.1);
 }
 
 .icon-btn.active {
-  background: rgba(50, 136, 250, 0.3);
+  background: rgba(37, 99, 235, 0.14);
 }
 
 .icon {
@@ -178,29 +145,26 @@ defineExpose({
   transform: translateY(-50%);
   width: 3px;
   height: 24px;
-  background: #3288fa;
+  background: var(--accent-color);
   border-radius: 0 2px 2px 0;
 }
 
 /* ==================== 内容抽屉 ==================== */
 .drawer-content {
-  /* 宽度自适应，根据容器最小宽度和最大宽度 */
-  min-width: 280px;
-  max-width: 360px;
-  /* 高度100%，继承父容器的高度 */
+  min-width: 320px;
+  width: 320px;
+  max-width: 320px;
   height: 100%;
-  /* 使用flex布局来管理多个面板 */
   display: flex;
   flex-direction: column;
-  gap: 8px;
   padding: 8px;
-  background: rgba(25, 25, 25, 0.95);
-  border: 1px solid #333333;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--border-color);
   border-left: none;
   border-radius: 8px;
-  overflow: hidden;  /* 抽屉容器不滚动，由子面板内部滚动 */
+  overflow: hidden;
   backdrop-filter: blur(10px);
-  box-shadow: 4px 0 12px rgba(0, 0, 0, 0.3);
+  box-shadow: 4px 0 18px rgba(15, 23, 42, 0.08);
 }
 
 /* ==================== 滚动条样式 ==================== */
@@ -209,24 +173,23 @@ defineExpose({
 }
 
 .drawer-content::-webkit-scrollbar-track {
-  background: rgba(30, 30, 30, 0.5);
+  background: rgba(226, 232, 240, 0.8);
 }
 
 .drawer-content::-webkit-scrollbar-thumb {
-  background: #3288fa;
+  background: rgba(37, 99, 235, 0.45);
   border-radius: 3px;
 }
 
 .drawer-content::-webkit-scrollbar-thumb:hover {
-  background: #2676ea;
+  background: rgba(37, 99, 235, 0.72);
 }
 
 /* ==================== 动态加载的面板样式 ==================== */
 .drawer-content > * {
-  /* 动态加载的面板都需要这些基础样式 */
   min-height: 0;
   overflow: hidden;
-  height: 100%;  /* 确保面板占满可用高度 */
+  height: 100%;
 }
 
 /* ==================== 过渡动画 ==================== */
