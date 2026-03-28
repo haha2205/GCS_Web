@@ -15,10 +15,6 @@ from .nclink_protocol import (
     NCLINK_GCS_TELEMETRY,  # 导入功能码常量
     GCSTelemetry_T,        # 导入遥测数据结构体
 )
-from .lidar_imu_protocol import (
-    NCLINK_RECEIVE_LIDAR_OBSTACLES, # 导入雷达功能码
-    ObstacleOutput_T       # 导入雷达数据结构体
-)
 # 导入config模块：直接导入（main.py已将src-python添加到sys.path）
 from config import config
 
@@ -331,17 +327,6 @@ class NCLinkFrame:
                 return result
             else:
                 logger.error("[parse_frame] 遥测数据解析失败")
-        
-        elif func_code == NCLINK_RECEIVE_LIDAR_OBSTACLES:
-            obstacles = ObstacleOutput_T.from_bytes(payload)
-            if obstacles:
-                logger.debug(f"[parse_frame] 雷达障碍物解析成功: {obstacles.obstacle_count}个")
-                result = obstacles.to_dict() if hasattr(obstacles, 'to_dict') else obstacles.__dict__
-                result['type'] = 'lidar_obstacles'
-                result['func_code'] = func_code
-                return result
-            else:
-                logger.error("[parse_frame] 雷达障碍物解析失败")
 
         return None
     

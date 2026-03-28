@@ -2,7 +2,6 @@
 CSV数据记录辅助函数（完整版）
 基于interface.h中完整的ExtY_FCS_T结构体定义
 实现"宽表"格式的CSV记录（不带category列）
-总列数：221列（重新核对后）
 """
 
 from typing import Dict, Any
@@ -20,10 +19,10 @@ COL_TIMESTAMP = 1
 COL_PWMS = 8
 COL_STATES = 12
 COL_DATACTRL = 53
-COL_GNCBUS = 73     # Was 75, removed mode_horiz/token_horiz
+COL_GNCBUS = 73     
 COL_AVOIFLAG = 3
 COL_FUTABA = 6
-COL_GCS = 4         # Was 11, fixed to match ExtY_FCS_DATAGCS_T
+COL_GCS = 4        
 COL_AC_AIM2AB = 21 
 COL_AC_AB = 21      
 COL_PARAM = 26
@@ -71,6 +70,26 @@ def _safe_str(value, default=""):
         return str(value)
     except (TypeError, ValueError):
         return default
+
+
+def _get_value(data: Dict[str, Any], *candidates, default=0):
+    """按候选路径获取字段，兼容扁平和嵌套 payload。"""
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            if candidate in data:
+                return data.get(candidate, default)
+            continue
+
+        current = data
+        matched = True
+        for key in candidate:
+            if not isinstance(current, dict) or key not in current:
+                matched = False
+                break
+            current = current[key]
+        if matched:
+            return current
+    return default
 
 
 # ==================== 表头定义 ====================
@@ -455,78 +474,80 @@ def _format_datactrl_row(timestamp: str, datactrl_data: Dict[str, Any]) -> str:
     # PWMS + STATES为空 (20列)
     row.extend([""] * (OFFSET_DATACTRL - 1))
     
-    # Helper to get value regardless of structure
-    def get_val(key):
-        return datactrl_data.get(key, 0)
+    def get_val(flat_key, *path):
+        candidates = [flat_key]
+        if path:
+            candidates.append(path)
+        return _get_value(datactrl_data, *candidates, default=0)
 
     # ailOutLoop
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_dY_delta')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_dY2Vy')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_var')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_delta')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_P')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_Int')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_D')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_ail_ffc')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_dY_delta', 'ailOutLoop', 'dY_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_dY2Vy', 'ailOutLoop', 'Vy_dY2Vy')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_var', 'ailOutLoop', 'Vy_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_delta', 'ailOutLoop', 'Vy_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_P', 'ailOutLoop', 'Vy_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_Int', 'ailOutLoop', 'Vy_Int')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_Vy_D', 'ailOutLoop', 'Vy_D')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailOutLoop_ail_ffc', 'ailOutLoop', 'ail_ffc')):.4f}")
     
     # ailInLoop
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_ail_trim')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_trim')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_var')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_delta_phi')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_P')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_D')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_ail_fbc')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_ail_law_out')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_ail_trim', 'ailInLoop', 'ail_trim')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_trim', 'ailInLoop', 'phi_trim')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_var', 'ailInLoop', 'phi_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_delta_phi', 'ailInLoop', 'delta_phi')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_P', 'ailInLoop', 'phi_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_phi_D', 'ailInLoop', 'phi_D')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_ail_fbc', 'ailInLoop', 'ail_fbc')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_ailInLoop_ail_law_out', 'ailInLoop', 'ail_law_out')):.4f}")
 
     # eleOutLoop
-    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_dX_delta')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_dX2Vx')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_var')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_delta')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_P')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_Int')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_D')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_ele_ffc')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_dX_delta', 'eleOutLoop', 'dX_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_dX2Vx', 'eleOutLoop', 'Vx_dX2Vx')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_var', 'eleOutLoop', 'Vx_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_delta', 'eleOutLoop', 'Vx_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_P', 'eleOutLoop', 'Vx_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_Int', 'eleOutLoop', 'Vx_Int')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_Vx_D', 'eleOutLoop', 'Vx_D')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_eleOutLoop_ele_ffc', 'eleOutLoop', 'ele_ffc')):.4f}")
 
     # EleInLoop
-    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_trim')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_ele_trim')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_var')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_delta_theta')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_P')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_D')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_ele_fbc')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_ele_law_out')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_trim', 'EleInLoop', 'theta_trim')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_ele_trim', 'EleInLoop', 'ele_trim')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_var', 'EleInLoop', 'theta_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_delta_theta', 'EleInLoop', 'delta_theta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_P', 'EleInLoop', 'theta_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_theta_D', 'EleInLoop', 'theta_D')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_ele_fbc', 'EleInLoop', 'ele_fbc')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_EleInLoop_ele_law_out', 'EleInLoop', 'ele_law_out')):.4f}")
 
     # RudOutLoop
-    row.append(f"{_safe_float(get_val('dataCtrl_n_RudOutLoop_psi_dy')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_RudOutLoop_psi_delta')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_RudOutLoop_R_dPsi2R')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_RudOutLoop_psi_dy', 'RudOutLoop', 'psi_dy')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_RudOutLoop_psi_delta', 'RudOutLoop', 'psi_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_RudOutLoop_R_dPsi2R', 'RudOutLoop', 'R_dPsi2R')):.4f}")
 
     # rudInLoop
-    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_rud_trim')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_R_var')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_dR_delta')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_R_P')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_R_Int')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_rud_fbc')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_rud_law_out')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_rud_trim', 'rudInLoop', 'rud_trim')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_R_var', 'rudInLoop', 'R_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_dR_delta', 'rudInLoop', 'dR_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_R_P', 'rudInLoop', 'R_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_R_Int', 'rudInLoop', 'R_Int')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_rud_fbc', 'rudInLoop', 'rud_fbc')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_rudInLoop_rud_law_out', 'rudInLoop', 'rud_law_out')):.4f}")
 
     # colOutLoop
-    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_H_delta')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_dH2Vz')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_var')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_delta')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_P')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_Int')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_D')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_col_fbc')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_H_delta', 'colOutLoop', 'H_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_dH2Vz', 'colOutLoop', 'Hdot_dH2Vz')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_var', 'colOutLoop', 'Hdot_var')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_delta', 'colOutLoop', 'Hdot_delta')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_P', 'colOutLoop', 'Hdot_P')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_Int', 'colOutLoop', 'Hdot_Int')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_Hdot_D', 'colOutLoop', 'Hdot_D')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colOutLoop_col_fbc', 'colOutLoop', 'col_fbc')):.4f}")
 
     # colInLoop
-    row.append(f"{_safe_float(get_val('dataCtrl_n_colInLoop_col_Vx')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_colInLoop_col_law')):.4f}")
-    row.append(f"{_safe_float(get_val('dataCtrl_n_colInLoop_col_law_out')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colInLoop_col_Vx', 'colInLoop', 'col_Vx')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colInLoop_col_law', 'colInLoop', 'col_law')):.4f}")
+    row.append(f"{_safe_float(get_val('dataCtrl_n_colInLoop_col_law_out', 'colInLoop', 'col_law_out')):.4f}")
     
     # 其他全部为空
     fill_count = TOTAL_COLUMNS - len(row)
@@ -542,111 +563,99 @@ def _format_gncbus_row(timestamp: str, gncbus_data: Dict[str, Any]) -> str:
     # 前面为空
     row.extend([""] * (OFFSET_GNCBUS - 1))
     
-    # TokenMode (17)
-    token_mode = gncbus_data.get('TokenMode', {})
-    row.append(str(token_mode.get('OnSky', 0)))
-    row.append(str(token_mode.get('Ctrl_Mode', 0)))
-    row.append(str(token_mode.get('Pre_CMD', 0)))
-    row.append(str(token_mode.get('rud_state', 0)))
-    row.append(str(token_mode.get('ail_state', 0)))
-    row.append(str(token_mode.get('ele_state', 0)))
-    row.append(str(token_mode.get('col_state', 0)))
-    row.append(str(token_mode.get('nav_guid', 0)))
-    row.append(str(token_mode.get('cmd_guid', 0)))
-    row.append(str(token_mode.get('mode_guid', 0)))
-    row.append(str(token_mode.get('step_guid', 0)))
-    row.append(str(token_mode.get('mode_nav', 0)))
-    row.append(str(token_mode.get('token_nav', 0)))
-    row.append(str(token_mode.get('step_nav', 0)))
-    row.append(str(token_mode.get('mode_vert', 0)))
-    row.append(str(token_mode.get('token_vert', 0)))
-    row.append(str(token_mode.get('step_vert', 0)))
-    
-    # FtbOpt (10)
-    ftb_opt = gncbus_data.get('FtbOpt', {})
-    row.append(f"{_safe_float(ftb_opt.get('ele_opt')):.4f}")
-    row.append(f"{_safe_float(ftb_opt.get('ail_opt')):.4f}")
-    row.append(f"{_safe_float(ftb_opt.get('rud_opt')):.4f}")
-    row.append(f"{_safe_float(ftb_opt.get('col_opt')):.4f}")
-    row.append(f"{_safe_float(ftb_opt.get('R_opt')):.4f}")
-    row.append(f"{_safe_float(ftb_opt.get('Vx_opt')):.4f}")
-    row.append(f"{_safe_float(ftb_opt.get('Vy_opt')):.4f}")
-    row.append(f"{_safe_float(ftb_opt.get('coldt_opt')):.4f}")
-    row.append(f"{_safe_float(ftb_opt.get('col0_opt')):.4f}")
-    row.append(str(ftb_opt.get('Ftb_Switch', 0)))
-    
-    # SrcValue (2)
-    src_value = gncbus_data.get('SrcValue', {})
-    row.append(str(src_value.get('ac_SrcCmdV', 0)))
-    row.append(str(src_value.get('SrcV_fus', 0)))
-    
-    # MixValue (10)
-    mix_value = gncbus_data.get('MixValue', {})
-    row.append(f"{_safe_float(mix_value.get('col_mix')):.4f}")
-    row.append(f"{_safe_float(mix_value.get('phi_mix')):.4f}")
-    row.append(f"{_safe_float(mix_value.get('Vx_mix')):.4f}")
-    row.append(f"{_safe_float(mix_value.get('dX_mix')):.4f}")
-    row.append(f"{_safe_float(mix_value.get('theta_mix')):.4f}")
-    row.append(f"{_safe_float(mix_value.get('Vy_mix')):.4f}")
-    row.append(f"{_safe_float(mix_value.get('dY_mix')):.4f}")
-    row.append(f"{_safe_float(mix_value.get('psi_mix')):.4f}")
-    row.append(f"{_safe_float(mix_value.get('Hdot_mix')):.4f}")
-    row.append(f"{_safe_float(mix_value.get('height_mix')):.4f}")
-    
-    # CmdValue (7)
-    cmd_value = gncbus_data.get('CmdValue', {})
-    row.append(f"{_safe_float(cmd_value.get('phi_cmd')):.4f}")
-    row.append(f"{_safe_float(cmd_value.get('Hdot_cmd')):.4f}")
-    row.append(f"{_safe_float(cmd_value.get('R_cmd')):.4f}")
-    row.append(f"{_safe_float(cmd_value.get('psi_cmd')):.4f}")
-    row.append(f"{_safe_float(cmd_value.get('Vx_cmd')):.4f}")
-    row.append(f"{_safe_float(cmd_value.get('Vy_cmd')):.4f}")
-    row.append(f"{_safe_float(cmd_value.get('height_cmd')):.4f}")
-    
-    # VarValue (4)
-    var_value = gncbus_data.get('VarValue', {})
-    row.append(f"{_safe_float(var_value.get('psi_var')):.4f}")
-    row.append(f"{_safe_float(var_value.get('height_var')):.4f}")
-    row.append(f"{_safe_float(var_value.get('dX_var')):.4f}")
-    row.append(f"{_safe_float(var_value.get('dY_var')):.4f}")
-    
-    # TrimValue (3)
-    trim_value = gncbus_data.get('TrimValue', {})
-    row.append(f"{_safe_float(trim_value.get('Vx_trim')):.4f}")
-    row.append(f"{_safe_float(trim_value.get('col_trim')):.4f}")
-    row.append(f"{_safe_float(trim_value.get('col_autotrim')):.4f}")
-    
-    # ParamsLMT (10)
-    params_lmt = gncbus_data.get('ParamsLMT', {})
-    row.append(f"{_safe_float(params_lmt.get('Vx_LMT')):.4f}")
-    row.append(f"{_safe_float(params_lmt.get('Vy_LMT')):.4f}")
-    row.append(f"{_safe_float(params_lmt.get('R_LMT')):.4f}")
-    row.append(f"{_safe_float(params_lmt.get('Hdot_ILmt')):.4f}")
-    row.append(f"{_safe_float(params_lmt.get('Hdot_UpLMT')):.4f}")
-    row.append(f"{_safe_float(params_lmt.get('Hdot_DownLMT')):.4f}")
-    row.append(f"{_safe_float(params_lmt.get('R_FLYTURN')):.4f}")
-    row.append(f"{_safe_float(params_lmt.get('R_unit')):.4f}")
-    row.append(f"{_safe_float(params_lmt.get('Hdot_unit')):.4f}")
-    row.append(f"{_safe_float(params_lmt.get('Vx_unit')):.4f}")
-    row.append(f"{_safe_float(params_lmt.get('Vy_unit')):.4f}")
-    
-    # AcValue (4)
-    ac_value = gncbus_data.get('AcValue', {})
-    row.append(f"{_safe_float(ac_value.get('ac_dY')):.4f}")
-    row.append(f"{_safe_float(ac_value.get('ac_dX')):.4f}")
-    row.append(f"{_safe_float(ac_value.get('ac_dPsi')):.4f}")
-    row.append(f"{_safe_float(ac_value.get('ac_dL')):.4f}")
-    
-    # HoverValue (3)
-    hover_value = gncbus_data.get('HoverValue', {})
-    row.append(f"{_safe_float(hover_value.get('lon_hov')):.8f}")
-    row.append(f"{_safe_float(hover_value.get('lat_hov')):.8f}")
-    row.append(str(hover_value.get('IsHovStatus_hov', 0)))
-    
-    # HomeValue (2)
-    home_value = gncbus_data.get('HomeValue', {})
-    row.append(f"{_safe_float(home_value.get('lon_home')):.8f}")
-    row.append(f"{_safe_float(home_value.get('lat_home')):.8f}")
+    def flat_or_nested(flat_key, group_key=None, nested_key=None, default=0):
+        if flat_key in gncbus_data:
+            return gncbus_data.get(flat_key, default)
+        if group_key:
+            group = gncbus_data.get(group_key, {}) or {}
+            if nested_key in group:
+                return group.get(nested_key, default)
+        return default
+
+    token_mode = gncbus_data.get('TokenMode', {}) or {}
+    row.append(str(flat_or_nested('GNCBus_TokenMode_OnSky', 'TokenMode', 'OnSky', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_Ctrl_Mode', 'TokenMode', 'Ctrl_Mode', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_Pre_CMD', 'TokenMode', 'Pre_CMD', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_rud_state', 'TokenMode', 'rud_state', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_ail_state', 'TokenMode', 'ail_state', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_ele_state', 'TokenMode', 'ele_state', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_col_state', 'TokenMode', 'col_state', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_nav_guid', 'TokenMode', 'nav_guid', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_cmd_guid', 'TokenMode', 'cmd_guid', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_mode_guid', 'TokenMode', 'mode_guid', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_step_guid', 'TokenMode', 'step_guid', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_mode_nav', 'TokenMode', 'mode_nav', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_token_nav', 'TokenMode', 'token_nav', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_step_nav', 'TokenMode', 'step_nav', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_mode_vert', 'TokenMode', 'mode_vert', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_token_vert', 'TokenMode', 'token_vert', 0)))
+    row.append(str(flat_or_nested('GNCBus_TokenMode_step_vert', 'TokenMode', 'step_vert', 0)))
+
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_FtbOpt_ele_opt', 'FtbOpt', 'ele_opt')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_FtbOpt_ail_opt', 'FtbOpt', 'ail_opt')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_FtbOpt_rud_opt', 'FtbOpt', 'rud_opt')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_FtbOpt_col_opt', 'FtbOpt', 'col_opt')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_FtbOpt_R_opt', 'FtbOpt', 'R_opt')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_FtbOpt_Vx_opt', 'FtbOpt', 'Vx_opt')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_FtbOpt_Vy_opt', 'FtbOpt', 'Vy_opt')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_FtbOpt_coldt_opt', 'FtbOpt', 'coldt_opt')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_FtbOpt_col0_opt', 'FtbOpt', 'col0_opt')):.4f}")
+    row.append(str(flat_or_nested('GNCBus_FtbOpt_Ftb_Switch', 'FtbOpt', 'Ftb_Switch', 0)))
+
+    row.append(str(flat_or_nested('GNCBus_SrcValue_ac_SrcCmdV', 'SrcValue', 'ac_SrcCmdV', 0)))
+    row.append(str(flat_or_nested('GNCBus_SrcValue_SrcV_fus', 'SrcValue', 'SrcV_fus', 0)))
+
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_MixValue_col_mix', 'MixValue', 'col_mix')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_MixValue_phi_mix', 'MixValue', 'phi_mix')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_MixValue_Vx_mix', 'MixValue', 'Vx_mix')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_MixValue_dX_mix', 'MixValue', 'dX_mix')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_MixValue_theta_mix', 'MixValue', 'theta_mix')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_MixValue_Vy_mix', 'MixValue', 'Vy_mix')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_MixValue_dY_mix', 'MixValue', 'dY_mix')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_MixValue_psi_mix', 'MixValue', 'psi_mix')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_MixValue_Hdot_mix', 'MixValue', 'Hdot_mix')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_MixValue_height_mix', 'MixValue', 'height_mix')):.4f}")
+
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_CmdValue_phi_cmd', 'CmdValue', 'phi_cmd')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_CmdValue_Hdot_cmd', 'CmdValue', 'Hdot_cmd')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_CmdValue_R_cmd', 'CmdValue', 'R_cmd')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_CmdValue_psi_cmd', 'CmdValue', 'psi_cmd')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_CmdValue_Vx_cmd', 'CmdValue', 'Vx_cmd')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_CmdValue_Vy_cmd', 'CmdValue', 'Vy_cmd')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_CmdValue_height_cmd', 'CmdValue', 'height_cmd')):.4f}")
+
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_VarValue_psi_var', 'VarValue', 'psi_var')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_VarValue_height_var', 'VarValue', 'height_var')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_VarValue_dX_var', 'VarValue', 'dX_var')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_VarValue_dY_var', 'VarValue', 'dY_var')):.4f}")
+
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_TrimValue_Vx_trim', 'TrimValue', 'Vx_trim')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_TrimValue_col_trim', 'TrimValue', 'col_trim')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_TrimValue_col_autotrim', 'TrimValue', 'col_autotrim')):.4f}")
+
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_ParamsLMT_Vx_LMT', 'ParamsLMT', 'Vx_LMT')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_ParamsLMT_Vy_LMT', 'ParamsLMT', 'Vy_LMT')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_ParamsLMT_R_LMT', 'ParamsLMT', 'R_LMT')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_ParamsLMT_Hdot_ILmt', 'ParamsLMT', 'Hdot_ILmt')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_ParamsLMT_Hdot_UpLMT', 'ParamsLMT', 'Hdot_UpLMT')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_ParamsLMT_Hdot_DownLMT', 'ParamsLMT', 'Hdot_DownLMT')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_ParamsLMT_R_FLYTURN', 'ParamsLMT', 'R_FLYTURN')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_ParamsLMT_R_unit', 'ParamsLMT', 'R_unit')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_ParamsLMT_Hdot_unit', 'ParamsLMT', 'Hdot_unit')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_ParamsLMT_Vx_unit', 'ParamsLMT', 'Vx_unit')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_ParamsLMT_Vy_unit', 'ParamsLMT', 'Vy_unit')):.4f}")
+
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_AcValue_ac_dY', 'AcValue', 'ac_dY')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_AcValue_ac_dX', 'AcValue', 'ac_dX')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_AcValue_ac_dPsi', 'AcValue', 'ac_dPsi')):.4f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_AcValue_ac_dL', 'AcValue', 'ac_dL')):.4f}")
+
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_HoverValue_lon_hov', 'HoverValue', 'lon_hov')):.8f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_HoverValue_lat_hov', 'HoverValue', 'lat_hov')):.8f}")
+    row.append(str(flat_or_nested('GNCBus_HoverValue_IsHovStatus_hov', 'HoverValue', 'IsHovStatus_hov', 0)))
+
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_HomeValue_lon_home', 'HomeValue', 'lon_home')):.8f}")
+    row.append(f"{_safe_float(flat_or_nested('GNCBus_HomeValue_lat_home', 'HomeValue', 'lat_home')):.8f}")
     
     # 其他全部为空
     fill_count = TOTAL_COLUMNS - len(row)
@@ -658,35 +667,85 @@ def _format_gncbus_row(timestamp: str, gncbus_data: Dict[str, Any]) -> str:
 def _format_voiflag_row(timestamp: str, data: Dict[str, Any]) -> str:
     row = [timestamp]
     row.extend([""] * (OFFSET_AVOIFLAG - 1))
-    row.extend(["0"] * COL_AVOIFLAG)
+    row.append(str(int(bool(data.get('AvoiFlag_LaserRadar_Enabled', data.get('laser_radar_enabled', 0))))))
+    row.append(str(int(bool(data.get('AvoiFlag_AvoidanceFlag', data.get('avoidance_flag', 0))))))
+    row.append(str(int(bool(data.get('AvoiFlag_GuideFlag', data.get('guide_flag', 0))))))
     row.extend([""] * (TOTAL_COLUMNS - len(row)))
     return ",".join(row)
 
 def _format_futaba_row(timestamp: str, data: Dict[str, Any]) -> str:
     row = [timestamp]
     row.extend([""] * (OFFSET_FUTABA - 1))
-    row.extend(["0"] * COL_FUTABA)
+    row.append(str(_safe_int(data.get('Tele_ftb_Roll', data.get('roll', 0)))))
+    row.append(str(_safe_int(data.get('Tele_ftb_Pitch', data.get('pitch', 0)))))
+    row.append(str(_safe_int(data.get('Tele_ftb_Yaw', data.get('yaw', 0)))))
+    row.append(str(_safe_int(data.get('Tele_ftb_Col', data.get('col', 0)))))
+    row.append(str(_safe_int(data.get('Tele_ftb_Switch', data.get('switch', 0)))))
+    row.append(str(_safe_int(data.get('Tele_ftb_com_Ftb_fail', data.get('ftb_fail', 0)))))
     row.extend([""] * (TOTAL_COLUMNS - len(row)))
     return ",".join(row)
 
 def _format_gcs_row(timestamp: str, data: Dict[str, Any]) -> str:
     row = [timestamp]
     row.extend([""] * (OFFSET_GCS - 1))
-    row.extend(["0"] * COL_GCS)
+    row.append(str(_safe_int(data.get('Tele_GCS_CmdIdx', data.get('CmdIdx', 0)))))
+    row.append(str(_safe_int(data.get('Tele_GCS_Mission', data.get('Mission', 0)))))
+    row.append(f"{_safe_float(data.get('Tele_GCS_Val', data.get('Val', 0.0))):.4f}")
+    row.append(str(_safe_int(data.get('Tele_GCS_com_GCS_fail', data.get('fail', 0)))))
     row.extend([""] * (TOTAL_COLUMNS - len(row)))
     return ",".join(row)
 
 def _format_aim2ab_row(timestamp: str, data: Dict[str, Any]) -> str:
     row = [timestamp]
     row.extend([""] * (OFFSET_AC_AIM2AB - 1))
-    row.extend(["0"] * COL_AC_AIM2AB)
+    row.append(f"{_safe_float(data.get('ac_aim2AB_lon', data.get('lon', 0.0))):.8f}")
+    row.append(f"{_safe_float(data.get('ac_aim2AB_lat', data.get('lat', 0.0))):.8f}")
+    row.append(f"{_safe_float(data.get('ac_aim2AB_psi', data.get('psi', 0.0))):.4f}")
+    row.append(f"{_safe_float(data.get('ac_aim2AB_alt', data.get('alt', 0.0))):.4f}")
+    row.append(f"{_safe_float(data.get('ac_aim2AB_len', data.get('len', 0.0))):.4f}")
+    row.append(f"{_safe_float(data.get('ac_aim2AB_rad', data.get('rad', 0.0))):.4f}")
+    row.append(f"{_safe_float(data.get('ac_aim2AB_Vx2nextdot', data.get('Vx2nextdot', 0.0))):.4f}")
+    row.append(str(_safe_int(data.get('ac_aim2AB_next_num', data.get('next_num', 0)))))
+    row.append(str(_safe_int(data.get('ac_aim2AB_next_dot', data.get('next_dot', 0)))))
+    row.append(str(_safe_int(data.get('ac_aim2AB_type_dot', data.get('type_dot', 0)))))
+    row.append(str(_safe_int(data.get('ac_aim2AB_clockwise_WP', data.get('clockwise_WP', 0)))))
+    row.append(f"{_safe_float(data.get('ac_aim2AB_R_WP', data.get('R_WP', 0.0))):.4f}")
+    row.append(str(_safe_int(data.get('ac_aim2AB_type_WP', data.get('type_WP', 0)))))
+    row.append(str(_safe_int(data.get('ac_aim2AB_Num_type_WP', data.get('Num_type_WP', 0)))))
+    row.append(f"{_safe_float(data.get('ac_aim2AB_dL_WP', data.get('dL_WP', 0.0))):.4f}")
+    row.append(str(_safe_int(data.get('ac_aim2AB_Vx_type', data.get('Vx_type', 0)))))
+    row.append(str(_safe_int(data.get('ac_aim2AB_TTC_Fault_Mode', data.get('TTC_Fault_Mode', 0)))))
+    row.append(str(_safe_int(data.get('ac_aim2AB_deltaY_ctrl', data.get('deltaY_ctrl', 0)))))
+    row.append(str(_safe_int(data.get('ac_aim2AB_turn_type', data.get('turn_type', 0)))))
+    row.append(str(_safe_int(data.get('ac_aim2AB_Inv_type', data.get('Inv_type', 0)))))
+    row.append(str(_safe_int(data.get('ac_aim2AB_type_line', data.get('type_line', 0)))))
     row.extend([""] * (TOTAL_COLUMNS - len(row)))
     return ",".join(row)
 
 def _format_acab_row(timestamp: str, data: Dict[str, Any]) -> str:
     row = [timestamp]
     row.extend([""] * (OFFSET_AC_AB - 1))
-    row.extend(["0"] * COL_AC_AB)
+    row.append(f"{_safe_float(data.get('acAB_lon', data.get('lon', 0.0))):.8f}")
+    row.append(f"{_safe_float(data.get('acAB_lat', data.get('lat', 0.0))):.8f}")
+    row.append(f"{_safe_float(data.get('acAB_psi', data.get('psi', 0.0))):.4f}")
+    row.append(f"{_safe_float(data.get('acAB_alt', data.get('alt', 0.0))):.4f}")
+    row.append(f"{_safe_float(data.get('acAB_len', data.get('len', 0.0))):.4f}")
+    row.append(f"{_safe_float(data.get('acAB_rad', data.get('rad', 0.0))):.4f}")
+    row.append(f"{_safe_float(data.get('acAB_Vx2nextdot', data.get('Vx2nextdot', 0.0))):.4f}")
+    row.append(str(_safe_int(data.get('acAB_next_num', data.get('next_num', 0)))))
+    row.append(str(_safe_int(data.get('acAB_next_dot', data.get('next_dot', 0)))))
+    row.append(str(_safe_int(data.get('acAB_type_dot', data.get('type_dot', 0)))))
+    row.append(str(_safe_int(data.get('acAB_clockwise_WP', data.get('clockwise_WP', 0)))))
+    row.append(f"{_safe_float(data.get('acAB_R_WP', data.get('R_WP', 0.0))):.4f}")
+    row.append(str(_safe_int(data.get('acAB_type_WP', data.get('type_WP', 0)))))
+    row.append(str(_safe_int(data.get('acAB_Num_type_WP', data.get('Num_type_WP', 0)))))
+    row.append(f"{_safe_float(data.get('acAB_dL_WP', data.get('dL_WP', 0.0))):.4f}")
+    row.append(str(_safe_int(data.get('acAB_Vx_type', data.get('Vx_type', 0)))))
+    row.append(str(_safe_int(data.get('acAB_TTC_Fault_Mode', data.get('TTC_Fault_Mode', 0)))))
+    row.append(str(_safe_int(data.get('acAB_deltaY_ctrl', data.get('deltaY_ctrl', 0)))))
+    row.append(str(_safe_int(data.get('acAB_turn_type', data.get('turn_type', 0)))))
+    row.append(str(_safe_int(data.get('acAB_Inv_type', data.get('Inv_type', 0)))))
+    row.append(str(_safe_int(data.get('acAB_type_line', data.get('type_line', 0)))))
     row.extend([""] * (TOTAL_COLUMNS - len(row)))
     return ",".join(row)
 
@@ -714,10 +773,47 @@ def _format_param_row(timestamp: str, param_data: Dict[str, Any]) -> str:
     row.extend([""] * fill_count)
     return ",".join(row)
 
-def _format_esc_row(timestamp: str, data: Dict[str, Any]) -> str:
+
+def _format_esc_row(timestamp: str, esc_data: Dict[str, Any]) -> str:
+    """Format ESC data row (18 columns)."""
     row = [timestamp]
     row.extend([""] * (OFFSET_ESC - 1))
-    row.extend(["0"] * COL_ESC)
+
+    for i in range(1, 7):
+        row.append(str(_safe_int(esc_data.get(f'esc{i}_error_count', 0))))
+    for i in range(1, 7):
+        row.append(str(_safe_int(esc_data.get(f'esc{i}_rpm', 0))))
+    for i in range(1, 7):
+        row.append(str(_safe_int(esc_data.get(f'esc{i}_power_rating_pct', 0))))
+
     row.extend([""] * (TOTAL_COLUMNS - len(row)))
     return ",".join(row)
+
+
+def update_cache_and_get_line(data_type: str, data: Dict[str, Any], cache_list: list) -> str:
+    """
+    更新缓存并返回合并后的CSV行 (Stateful Recording)
+    """
+    try:
+        timestamp = _safe_str(data.get('timestamp', datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]))
+        
+        # 1. 始终更新时间戳
+        if len(cache_list) > 0:
+            cache_list[0] = timestamp
+        
+        # 2. 生成该类型的"稀疏行" (仅包含当前帧的数据)
+        row_str = get_data_for_type(data_type, data)
+        parts = row_str.split(',')
+        
+        # 3. 将新数据合并入缓存（"Last Known Value" 策略）
+        # 遍历新生成的行，只有当某个字段非空时，才更新缓存
+        # 这样可以保留其他包（如 states, pwms）的历史值，实现"宽行"填满
+        count = min(len(parts), len(cache_list))
+        for i in range(1, count):  # 跳过索引0 (timestamp已处理)
+            if parts[i] != "":
+                cache_list[i] = parts[i]
+                
+        return ",".join(cache_list)
+    except Exception as e:
+        return ",".join(cache_list)
 

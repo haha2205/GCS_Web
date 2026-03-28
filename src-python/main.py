@@ -12,16 +12,18 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 import asyncio
+import csv
 import logging
 from datetime import datetime
 from pydantic import BaseModel
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
 from typing import Dict, Any, Optional
 import json
 import time
-import math
+import uuid
+import re
+from collections import defaultdict, deque
 
 from protocol.protocol_parser import UDPHandler, NCLinkUDPServerProtocol
 from protocol.nclink_protocol import (
@@ -33,16 +35,25 @@ from protocol.nclink_protocol import (
     NCLINK_SEND_EXTU_FCS,
     NCLINK_GCS_COMMAND
 )
-from config import config, Config
+from config import config
 from websocket.websocket_manager import WebSocketManager
-from recorder import RawDataRecorder
+from recorder import RawDataRecorder, build_event_stream_paths, normalize_session_meta_for_thesis
+from recorder.data_recorder import EVENT_HEADERS
+from export import SessionStandardizer
+from analysis import SessionDsmWorker, SessionEvaluationWorker, SessionOptimizationWorker
 from calculator import RealTimeCalculator
 from config import MappingConfig
-from dsm import DSMGenerator
+from experiment import (
+    ExperimentCaseManager,
+    FlightTaskTracker,
+    ScenarioResolver,
+    build_task_snapshot,
+    choose_candidate,
+    derive_figure_semantics,
+)
 from recorder.csv_helper_full import (
     get_full_header, get_data_for_type
 )
-from replayer import Replayer
 
 # ================================================================
 # 数据模型
@@ -60,6 +71,29 @@ class ConnectionConfig(BaseModel):
     planningSendPort: int = 18510
     planningRecvPort: int = 18511
 
+
+def _build_fixed_connection_config() -> ConnectionConfig:
+    """Return the only supported deployment topology for the current GCS setup."""
+    udp_config = config.get_udp_config()
+    return ConnectionConfig(
+        protocol="udp",
+        listenAddress=udp_config.listen_host,
+        hostPort=udp_config.listen_port,
+        remoteIp=udp_config.target_ip,
+        commandRecvPort=udp_config.target_port,
+        sendOnlyPort=18506,
+        lidarSendPort=18507,
+        planningSendPort=18510,
+        planningRecvPort=18511,
+    )
+
+
+def _reset_connection_config() -> ConnectionConfig:
+    """Keep runtime state aligned with the fixed deployment topology."""
+    global connection_config
+    connection_config = _build_fixed_connection_config()
+    return connection_config
+
 class LogConfig(BaseModel):
     """数据记录配置"""
     autoRecord: bool = False
@@ -75,29 +109,58 @@ class RecordingConfig(BaseModel):
     """录制配置"""
     session_id: str = ""
     auto_start: bool = False
-    base_directory: str = "data"
+    base_directory: str = ""
+    case_id: str = ""
+    plan_case_id: str = ""
+    repeat_index: Optional[int] = None
+    scenario_id: str = ""
+    notes: str = ""
+    figure_run_id: str = ""
+    figure_batch_id: str = ""
+    figure_batch_group: str = ""
+    experiment_type: str = ""
+    chapter_target: str = ""
+    law_validation_scope: str = ""
 
-class DSMReportRequest(BaseModel):
-    """DSM报告生成请求"""
-    session_id: str
-    base_directory: str = "data"
+
+class ExperimentCaseSelection(BaseModel):
+    """实验 case 选择配置"""
+    case_id: str = ""
+
+
+class DsmAnalysisRequest(BaseModel):
+    """DSM 分析请求"""
+    session_id: str = ""
+    session_dir: str = ""
     start_time: Optional[float] = None
     end_time: Optional[float] = None
-    output_format: str = "json"  # json or csv_matrix
 
-class ReplayControlRequest(BaseModel):
-    """回放控制请求"""
-    action: str  # load, play, pause, seek, set_speed, stop
-    file_path: Optional[str] = None
-    progress_percent: Optional[float] = None
-    speed: Optional[float] = None
+
+class EvaluationAnalysisRequest(BaseModel):
+    """架构评估请求"""
+    session_id: str = ""
+    session_dir: str = ""
+    baseline_profile_id: str = ""
+    candidate_profile_id: str = ""
+
+
+class OptimizationAnalysisRequest(BaseModel):
+    """架构优化请求"""
+    session_id: str = ""
+    session_dir: str = ""
+    baseline_profile_id: str = ""
+    current_profile_id: str = ""
+    pop_size: int = 40
+    n_gen: int = 40
+    seed: int = 42
+
 
 # ================================================================
 # 全局配置和日志管理
 # ================================================================
 
 # 全局连接配置
-connection_config = ConnectionConfig()
+connection_config = _build_fixed_connection_config()
 
 # 日志管理
 log_config = LogConfig()
@@ -144,54 +207,522 @@ udp_handler = None
 udp_server_started = False
 
 # 指令发送状态跟踪
-command_send_count = 0
-last_valid_cmd_idx = 0
 command_send_lock = None
+COMMAND_SEND_MIN_INTERVAL_SEC = 0.5
+CMD_IDX_REPEAT_COUNT = 3
+CMD_IDX_RESET_TO_ZERO = True
+command_last_send_at = {
+    'flight_control': 0.0,
+    'planning': 0.0,
+}
+command_channel_busy = {
+    'flight_control': False,
+    'planning': False,
+}
 
 # PID参数缓存（用于cmd_idx指令，保持PID参数不变）
 cached_pid_params = {
-    'fKaPHI': 0.5, 'fKaP': 0.2, 'fKaY': 0.143, 'fIaY': 0.005,
+    'fKaPHI': 0.8, 'fKaP': 0.3, 'fKaY': 0.3, 'fIaY': 0.005,
     'fKaVy': 2.0, 'fIaVy': 0.4, 'fKaAy': 0.28,
-    'fKeTHETA': 0.5, 'fKeQ': 0.2, 'fKeX': 0.201, 'fIeX': 0.01,
+    'fKeTHETA': 0.8, 'fKeQ': 0.3, 'fKeX': 0.3, 'fIeX': 0.01,
     'fKeVx': 2.0, 'fIeVx': 0.4, 'fKeAx': 0.55,
-    'fKrR': 0.2, 'fIrR': 0.01, 'fKrAy': 0.1, 'fKrPSI': 1.0,
+    'fKrR': 1.0, 'fIrR': 0.4, 'fKrAy': 0.0, 'fKrPSI': 1.0,
     'fKcH': 0.36, 'fIcH': 0.015, 'fKcHdot': 0.5, 'fIcHdot': 0.05,
-    'fKcAz': 0.15, 'fIgRPM': 0.0, 'fKgRPM': 0.01, 'fScale_factor': 1.0
+    'fKcAz': 0.5, 'fIgRPM': 0.0, 'fKgRPM': 0.0, 'fScale_factor': 0.3,
+    'XaccLMT': 1.0, 'YaccLMT': 1.0, 'Hground': 0.4, 'AutoTakeoffHcmd': 10.0
 }
 
 # 数据处理模块
 recorder = None  # RawDataRecorder实例
 calculator = RealTimeCalculator()  # 实时计算引擎
 mapping_config = MappingConfig()  # 映射配置
-dsm_generator = DSMGenerator(mapping_config)  # DSM生成器
-replayer = None  # Replayer实例（数据回放引擎）
-
-# 回放数据缓存（用于变量分析功能）
-replay_df_cache = None
-
-# 变量分类映射（基于 ExtY_FCS_T 结构）
-VARIABLE_CATEGORIES = {
-    'PWMS': ['pwm_'],
-    'STATES': ['states_'],
-    'DATACTRL': ['ctrl_', 'est_', 'ref_'],
-    'GNCBUS': ['GNCBus_', 'pos_', 'vel_', 'euler_'],
-    'AVOIFLAG': ['AvoiFlag_'],
-    'DATAFUTABA': ['Tele_ftb_'],
-    'DATAGCS': ['Tele_GCS_'],
-    'PARAM': ['param'],
-    'ESC': ['esc']
-}
+dsm_worker = SessionDsmWorker(mapping_config=mapping_config)
+evaluation_worker = SessionEvaluationWorker()
+optimization_worker = SessionOptimizationWorker()
 
 # 初始化指令发送锁
 command_send_lock = asyncio.Lock()
 
+
+def _resolve_command_channel(command_type: str) -> Optional[str]:
+    """Map command types to the outbound hardware channel that needs throttling."""
+    if command_type in {'cmd_idx', 'cmd_mission'}:
+        return 'flight_control'
+    if command_type in {'gcs_command', 'waypoints_upload'}:
+        return 'planning'
+    return None
+
+
+async def _check_command_send_rate(command_type: str) -> Optional[dict]:
+    """Reserve the outbound channel and reject overlapping or too-fast requests."""
+    channel = _resolve_command_channel(command_type)
+    if not channel:
+        return None
+
+    async with command_send_lock:
+        if command_channel_busy.get(channel):
+            logger.warning(f"发送通道忙，已拦截 {command_type} -> {channel}")
+            return {
+                "type": "command_response",
+                "command": command_type,
+                "status": "rate_limited",
+                "message": "上一条同通道指令仍在发送，请等待当前发送窗口结束后重试",
+                "timestamp": int(time.time() * 1000)
+            }
+
+        now = time.monotonic()
+        last_sent = command_last_send_at.get(channel, 0.0)
+        elapsed = now - last_sent
+
+        if elapsed < COMMAND_SEND_MIN_INTERVAL_SEC:
+            retry_after_ms = max(1, int((COMMAND_SEND_MIN_INTERVAL_SEC - elapsed) * 1000))
+            logger.warning(
+                f"发送过快，已拦截 {command_type} -> {channel}，"
+                f"距上次发送仅 {elapsed * 1000:.0f}ms，需至少间隔 500ms"
+            )
+            return {
+                "type": "command_response",
+                "command": command_type,
+                "status": "rate_limited",
+                "message": f"发送过快，请至少间隔500ms，建议 {retry_after_ms}ms 后重试",
+                "timestamp": int(time.time() * 1000)
+            }
+
+        command_channel_busy[channel] = True
+
+    return None
+
+
+async def _mark_command_sent(channel: Optional[str]) -> None:
+    if not channel:
+        return
+
+    async with command_send_lock:
+        command_last_send_at[channel] = time.monotonic()
+
+
+async def _release_command_channel(channel: Optional[str]) -> None:
+    if not channel:
+        return
+
+    async with command_send_lock:
+        command_channel_busy[channel] = False
+
 # 录制状态
 recording_active = False
 current_session_id = None
+THESIS_PRIMARY_PLAN_FILENAMES = (
+    'generated_research_logic_plan_20260323.csv',
+    'generated_research_logic_plan.csv',
+    'thesis_research_logic_plan.csv',
+)
+DEFAULT_THESIS_PRIMARY_PLAN_FILENAME = THESIS_PRIMARY_PLAN_FILENAMES[0]
+SESSION_ID_SCHEMA = 'YYYYMMDD_HHMMSS_CASE_XXX_APOLLO_RXX'
+SESSION_ID_PATTERN = re.compile(
+    r'^(?P<timestamp>\d{8}_\d{6})_(?P<plan_case_id>CASE_[A-Z0-9_]+)_APOLLO_R(?P<repeat_index>\d{2})$'
+)
+experiment_plan_path = os.path.join(current_dir, 'experiment', DEFAULT_THESIS_PRIMARY_PLAN_FILENAME)
+experiment_plan_source_kind = 'missing'
+architecture_config_dir = os.path.join(current_dir, 'experiment', 'architecture_configs')
+experiment_plan_cases = []
+experiment_case_lookup = {}
+selected_plan_case_id = None
+current_experiment_runtime = {}
+last_standardization_result = None
+last_dsm_result = None
+last_evaluation_result = None
+last_optimization_result = None
+task_tracker = FlightTaskTracker(confirm_threshold=3)
+scenario_resolver = ScenarioResolver()
+experiment_case_manager = ExperimentCaseManager(experiment_plan_path, architecture_config_dir)
 
-# 回放状态
-replay_active = False
-current_replay_file = None
+
+def _resolve_experiment_plan_source() -> tuple[str, str]:
+    experiment_dir = os.path.join(current_dir, 'experiment')
+    env_plan_path = str(os.getenv('APOLLO_THESIS_PLAN_PATH', '') or '').strip()
+    candidate_paths = []
+
+    if env_plan_path:
+        candidate_paths.append((env_plan_path, 'thesis_primary'))
+
+    for filename in THESIS_PRIMARY_PLAN_FILENAMES:
+        candidate_paths.append((os.path.join(experiment_dir, filename), 'thesis_primary'))
+
+    for candidate_path, source_kind in candidate_paths:
+        if os.path.exists(candidate_path):
+            return candidate_path, source_kind
+
+    return os.path.join(experiment_dir, DEFAULT_THESIS_PRIMARY_PLAN_FILENAME), 'missing'
+
+
+def _load_bundled_experiment_plan():
+    global experiment_plan_cases, experiment_case_lookup, experiment_plan_path, experiment_plan_source_kind
+    experiment_plan_path, experiment_plan_source_kind = _resolve_experiment_plan_source()
+    experiment_case_manager.plan_path = experiment_plan_path
+    if not os.path.exists(experiment_plan_path):
+        logger.warning(
+            "未找到 thesis 主实验方案文件，请将正式方案放入固定路径: %s",
+            experiment_plan_path,
+        )
+        experiment_plan_cases = []
+        experiment_case_lookup = {}
+        return
+    try:
+        experiment_case_manager.reload()
+        experiment_plan_cases = experiment_case_manager.cases
+        experiment_case_lookup = experiment_case_manager.case_lookup
+        logger.info(
+            "已加载 thesis 主实验方案: %s cases, source=%s",
+            len(experiment_plan_cases),
+            experiment_plan_path,
+        )
+        logger.info(
+            "已加载架构配置包: logical_functions=%s hardware=%s profiles=%s",
+            len(experiment_case_manager.architecture_bundle.logical_functions) if experiment_case_manager.architecture_bundle else 0,
+            len(experiment_case_manager.architecture_bundle.hardware_resources) if experiment_case_manager.architecture_bundle else 0,
+            len(experiment_case_manager.architecture_bundle.allocation_profiles) if experiment_case_manager.architecture_bundle else 0,
+        )
+    except Exception as exc:
+        logger.error(f"加载在线实验方案失败: {exc}")
+        experiment_plan_cases = []
+        experiment_case_lookup = {}
+
+
+def _find_experiment_case(case_id: Optional[str] = None):
+    experiment_case_manager.selected_case_id = selected_plan_case_id
+    return experiment_case_manager.find_case(case_id)
+
+
+def _serialize_experiment_case(planned_case) -> dict:
+    return experiment_case_manager.serialize_case(planned_case)
+
+
+def _build_recording_meta_patch(
+    planned_case = None,
+    case_id: Optional[str] = None,
+    repeat_index: Optional[int] = None,
+    scenario_id: Optional[str] = None,
+    notes: str = '',
+    *,
+    experiment_type: Optional[str] = None,
+    figure_run_id: Optional[str] = None,
+    figure_batch_id: Optional[str] = None,
+    figure_batch_group: Optional[str] = None,
+    chapter_target: Optional[str] = None,
+    law_validation_scope: Optional[str] = None,
+    analysis_run_id: Optional[str] = None,
+) -> dict:
+    patch = experiment_case_manager.build_recording_meta_patch(
+        planned_case,
+        case_id=case_id,
+        repeat_index=repeat_index,
+        scenario_id=scenario_id,
+        notes=notes,
+        experiment_type=experiment_type,
+        figure_run_id=figure_run_id,
+        figure_batch_id=figure_batch_id,
+        figure_batch_group=figure_batch_group,
+        chapter_target=chapter_target,
+        law_validation_scope=law_validation_scope,
+        analysis_run_id=analysis_run_id,
+    )
+    patch['experiment_plan_source'] = experiment_plan_source_kind
+    patch['experiment_plan_path'] = experiment_plan_path
+    patch['session_id_schema'] = SESSION_ID_SCHEMA
+    return patch
+
+
+def _sanitize_session_id_token(value: Optional[object], fallback: str) -> str:
+    text = str(value or '').strip()
+    if not text:
+        text = fallback
+    sanitized = ''.join(ch if ch.isalnum() else '_' for ch in text)
+    sanitized = sanitized.strip('_')
+    return sanitized or fallback
+
+
+def _normalize_plan_case_id(value: Optional[object]) -> str:
+    token = _sanitize_session_id_token(value, 'CASE_ADHOC').upper()
+    if not token.startswith('CASE_'):
+        token = f'CASE_{token}'
+    return token
+
+
+def _normalize_repeat_index(value: Optional[object]) -> int:
+    try:
+        if value is None or value == '':
+            return 0
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _parse_session_id(session_id: str) -> Optional[dict]:
+    match = SESSION_ID_PATTERN.match(str(session_id or '').strip())
+    if not match:
+        return None
+    return {
+        'timestamp': match.group('timestamp'),
+        'plan_case_id': match.group('plan_case_id'),
+        'repeat_index': int(match.group('repeat_index')),
+    }
+
+
+def _validate_session_id_contract(
+    session_id: str,
+    *,
+    plan_case_id: Optional[str] = None,
+    repeat_index: Optional[int] = None,
+) -> dict:
+    parsed = _parse_session_id(session_id)
+    if parsed is None:
+        raise ValueError(f'session_id 必须符合 {SESSION_ID_SCHEMA}')
+
+    expected_plan_case_id = _normalize_plan_case_id(plan_case_id) if plan_case_id else None
+    if expected_plan_case_id and parsed['plan_case_id'] != expected_plan_case_id:
+        raise ValueError(
+            f"session_id 中的 case 段为 {parsed['plan_case_id']}，但 plan_case_id 为 {expected_plan_case_id}"
+        )
+
+    if repeat_index is not None:
+        expected_repeat_index = _normalize_repeat_index(repeat_index)
+        if parsed['repeat_index'] != expected_repeat_index:
+            raise ValueError(
+                f"session_id 中的 repeat 段为 R{parsed['repeat_index']:02d}，但 repeat_index 为 R{expected_repeat_index:02d}"
+            )
+
+    return parsed
+
+
+def _build_session_id(
+    planned_case = None,
+    *,
+    case_id: Optional[str] = None,
+    repeat_index: Optional[int] = None,
+    is_auto: bool = False,
+) -> str:
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    del is_auto
+    case_token = _normalize_plan_case_id(getattr(planned_case, 'case_id', None) or case_id or selected_plan_case_id)
+    resolved_repeat_index = _normalize_repeat_index(
+        getattr(planned_case, 'repeat_index', None) if planned_case is not None else repeat_index
+    )
+    return f'{timestamp}_{case_token}_APOLLO_R{resolved_repeat_index:02d}'
+
+
+def _build_contract_event(
+    *,
+    session_id: Optional[str],
+    case_id: Optional[str],
+    event_type: str,
+    event_source: str,
+    event_level: str = 'info',
+    event_value: object = '',
+    event_detail: str = '',
+    mission_phase: str = '',
+    scenario_id: str = '',
+    architecture_id: str = '',
+    effective_task: str = '',
+    scenario_evidence_tags = None,
+) -> dict:
+    return {
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
+        'session_id': session_id or '',
+        'case_id': case_id or '',
+        'mission_phase': mission_phase,
+        'scenario_id': scenario_id,
+        'architecture_id': architecture_id,
+        'effective_task': effective_task,
+        'scenario_evidence_tags': list(scenario_evidence_tags or []),
+        'event_type': event_type,
+        'event_source': event_source,
+        'event_level': event_level,
+        'event_value': event_value,
+        'event_detail': event_detail,
+    }
+
+
+def _append_session_event(session_info: Optional[dict], event: dict) -> None:
+    session_dir = (session_info or {}).get('data_directory')
+    if not session_dir:
+        return
+    event_paths = build_event_stream_paths(session_dir)
+    event_row = [
+        event.get('timestamp', ''),
+        event.get('session_id', ''),
+        event.get('case_id', ''),
+        event.get('event_type', ''),
+        event.get('event_source', ''),
+        event.get('event_level', 'info'),
+        event.get('event_value', ''),
+        event.get('event_detail', ''),
+        event.get('mission_phase', ''),
+        event.get('scenario_id', ''),
+        event.get('architecture_id', ''),
+        event.get('effective_task', ''),
+        '|'.join(event.get('scenario_evidence_tags', [])),
+    ]
+    for event_path in dict.fromkeys(event_paths.values()):
+        os.makedirs(os.path.dirname(event_path), exist_ok=True)
+        write_header = not os.path.exists(event_path) or os.path.getsize(event_path) == 0
+        with open(event_path, 'a', encoding='utf-8', newline='') as handle:
+            writer = csv.writer(handle)
+            if write_header:
+                writer.writerow(EVENT_HEADERS)
+            writer.writerow(event_row)
+
+
+def _record_session_event(session_info: Optional[dict], event: dict) -> None:
+    if recorder and getattr(recorder, 'is_recording', False):
+        recorder.record_event(event)
+        return
+    _append_session_event(session_info, event)
+
+
+def _build_runtime_event_defaults(session_info: Optional[dict] = None) -> dict:
+    runtime_context = {}
+    if recorder and isinstance(getattr(recorder, 'runtime_context', None), dict):
+        runtime_context = recorder.runtime_context
+    elif session_info and isinstance(session_info.get('runtime_context'), dict):
+        runtime_context = session_info.get('runtime_context', {})
+
+    task_context = runtime_context.get('task', {}) if isinstance(runtime_context, dict) else {}
+    scenario_context = runtime_context.get('scenario', {}) if isinstance(runtime_context, dict) else {}
+    architecture_context = runtime_context.get('architecture', {}) if isinstance(runtime_context, dict) else {}
+
+    return {
+        'mission_phase': task_context.get('phase', ''),
+        'scenario_id': scenario_context.get('scenario_id', 'scenario_default'),
+        'architecture_id': architecture_context.get('architecture_id', ''),
+        'effective_task': task_context.get('task_name', ''),
+        'scenario_evidence_tags': scenario_context.get('heuristic_tags', []),
+    }
+
+
+def _record_pipeline_stage_event(session_info: Optional[dict], stage_name: str, stage_result: Optional[dict]) -> None:
+    runtime_defaults = _build_runtime_event_defaults(session_info)
+    status = _map_pipeline_stage_status((stage_result or {}).get('status', 'waiting')) if isinstance(stage_result, dict) else 'waiting'
+    detail_parts = []
+    if isinstance(stage_result, dict):
+        error_message = stage_result.get('error') or stage_result.get('error_message')
+        if error_message:
+            detail_parts.append(str(error_message))
+        summary = stage_result.get('summary') or {}
+        if isinstance(summary, dict) and summary:
+            detail_parts.append(json.dumps(summary, ensure_ascii=False, separators=(',', ':')))
+
+    event_level = 'info'
+    if status == 'blocked':
+        event_level = 'warning'
+    elif status == 'failed':
+        event_level = 'error'
+
+    _record_session_event(
+        session_info,
+        _build_contract_event(
+            session_id=(session_info or {}).get('session_id'),
+            case_id=(session_info or {}).get('case_id'),
+            event_type='pipeline_status_change',
+            event_source=stage_name,
+            event_level=event_level,
+            event_value=status,
+            event_detail=' | '.join(detail_parts) if detail_parts else f'{stage_name} -> {status}',
+            **runtime_defaults,
+        ),
+    )
+
+
+def _build_ad_hoc_runtime_payload(task_snapshot, scenario_context, session_meta: Optional[dict] = None, case_id: Optional[str] = None):
+    candidate = choose_candidate(task_snapshot, scenario_context, None)
+    session_meta = dict(session_meta or {})
+    figure_semantics = derive_figure_semantics(
+        None,
+        case_id=case_id or session_meta.get('plan_case_id') or session_meta.get('case_id'),
+        experiment_type=session_meta.get('experiment_type'),
+        figure_run_id=session_meta.get('figure_run_id'),
+        figure_batch_id=session_meta.get('figure_batch_id'),
+        figure_batch_group=session_meta.get('figure_batch_group'),
+        chapter_target=session_meta.get('chapter_target'),
+        law_validation_scope=session_meta.get('law_validation_scope'),
+    )
+    return {
+        'case': {
+            'case_id': session_meta.get('plan_case_id') or selected_plan_case_id or '',
+            'repeat_index': session_meta.get('repeat_index'),
+            'duration_sec': None,
+            'evaluation_window_sec': None,
+            'recording_case_id': getattr(recorder, 'case_id', None) if recorder else None,
+            **figure_semantics,
+        },
+        'task': {
+            'planned_cmd_idx': task_snapshot.desired_cmd_id,
+            'effective_cmd_idx': task_snapshot.effective_cmd_id,
+            'mission_id': task_snapshot.mission_id,
+            'task_name': task_snapshot.display_name,
+            'task_group': task_snapshot.task_group,
+            'phase': task_snapshot.mission_phase,
+            'source': task_snapshot.source,
+        },
+        'scenario': {
+            'scenario_id': scenario_context.scenario_id,
+            'display_name': scenario_context.display_name,
+            'source': scenario_context.source,
+            'confidence': scenario_context.confidence,
+            'environment_class': scenario_context.environment_class,
+            'disturbance_tags': list(scenario_context.disturbance_tags),
+            'heuristic_tags': list(scenario_context.heuristic_tags),
+        },
+        'architecture': {
+            'architecture_id': candidate.architecture_id,
+            'display_name': candidate.display_name,
+            'mapping_profile': candidate.mapping_profile,
+            'adaptation_mode': candidate.adaptation_mode,
+            'focus': candidate.focus,
+        },
+        'figure_semantics': figure_semantics,
+        'architecture_profiles': experiment_case_manager.list_architecture_profiles(),
+        'trigger_policy': '',
+    }
+
+
+def _refresh_experiment_runtime(message: Optional[dict] = None, latest_metrics: Optional[dict] = None, planned_case = None) -> dict:
+    global current_experiment_runtime
+
+    if message and isinstance(message, dict):
+        task_snapshot = build_task_snapshot(message.get('type', ''), message.get('data', {}) or {}, task_tracker)
+    else:
+        task_snapshot = task_tracker.update()
+
+    active_case = planned_case or _find_experiment_case(getattr(recorder, 'plan_case_id', None) if recorder else None)
+    session_meta = getattr(recorder, 'session_meta_patch', {}) if recorder else {}
+    scenario_context = scenario_resolver.resolve(
+        case_row=_serialize_experiment_case(active_case) if active_case is not None else None,
+        session_meta=session_meta,
+        latest_metrics=latest_metrics or {},
+    )
+
+    if active_case is not None:
+        runtime_payload = experiment_case_manager.build_runtime_payload(
+            active_case,
+            task_snapshot,
+            scenario_context,
+            recording_case_id=getattr(recorder, 'case_id', None) if recorder else None,
+        )
+    else:
+        runtime_payload = _build_ad_hoc_runtime_payload(
+            task_snapshot,
+            scenario_context,
+            session_meta=session_meta,
+            case_id=getattr(recorder, 'case_id', None) if recorder else None,
+        )
+
+    current_experiment_runtime = runtime_payload
+    if recorder:
+        recorder.set_runtime_context(runtime_payload)
+    return runtime_payload
+
+
+_load_bundled_experiment_plan()
 
 # ================================================================
 # 全面的数据记录功能
@@ -263,9 +794,935 @@ def sample_trajectory_points(points: list, step: int = 1) -> list:
     return points[::step]
 
 
+BROADCAST_INTERVALS = {
+    'fcs_states': 0.05,
+    'fcs_pwms': 0.05,
+    'fcs_datactrl': 0.05,
+    'fcs_gncbus': 0.05,
+    'fcs_esc': 0.10,
+    'fcs_datagcs': 0.10,
+    'fcs_param': 0.20,
+    'fcs_line_aim2ab': 0.10,
+    'fcs_line_ab': 0.10,
+    'avoiflag': 0.10,
+    'planning_telemetry': 0.10,
+}
+
+VIEW_INTERVALS = {
+    'flight_state_update': 0.10,
+    'planning_state_update': 0.10,
+    'system_performance_update': 0.50,
+    'experiment_context_update': 0.50,
+    'capture_overview_update': 1.00,
+    'data_quality_update': 1.00,
+    'window_metrics_record': 1.00,
+}
+
+WS_SOURCE = 'apollo_backend'
+WS_SCHEMA_VERSION = 'v1.0'
+
+capture_stats = {
+    'recent_packets': defaultdict(lambda: deque(maxlen=120)),
+    'family_last_ts': {},
+    'family_packet_counts': defaultdict(int),
+    'parse_error_count': 0,
+    'window_missing_count': 0,
+    'last_packet_ts': None,
+    'last_error': ''
+}
+
+REQUIRED_STANDARD_FILES = ['fcs_telemetry', 'planning_telemetry', 'radar_data', 'bus_traffic']
+OPTIONAL_STANDARD_FILES = ['camera_data']
+ALL_STANDARD_FILES = REQUIRED_STANDARD_FILES + OPTIONAL_STANDARD_FILES
+
+
+def _normalize_listen_ports() -> list:
+    """构建实际监听端口列表，优先覆盖协议定义端口，保留历史联调端口。"""
+    ports = [
+        connection_config.sendOnlyPort,
+        connection_config.lidarSendPort,
+        connection_config.planningRecvPort,
+    ]
+
+    if connection_config.hostPort not in ports:
+        ports.append(connection_config.hostPort)
+
+    seen = set()
+    ordered_ports = []
+    for port in ports:
+        if port and port not in seen:
+            seen.add(port)
+            ordered_ports.append(port)
+    return ordered_ports
+
+
+def _should_broadcast_packet(msg_type: str, func_code: int, current_time: float) -> bool:
+    """按协议包类型控制广播频率，保证监控流畅且不过载。"""
+    key = msg_type or f'func_{func_code:02X}'
+    interval = BROADCAST_INTERVALS.get(msg_type)
+
+    if interval is None and func_code:
+        if 0x41 <= func_code <= 0x44:
+            interval = 0.05
+        elif 0x45 <= func_code <= 0x4B:
+            interval = 0.10
+        elif 0x50 <= func_code <= 0x53:
+            interval = 0.10
+        else:
+            interval = 0.0
+
+    if interval is None:
+        interval = 0.0
+
+    if interval <= 0:
+        return True
+
+    last_time = last_broadcast_times.get(key, 0)
+    if current_time - last_time < interval:
+        return False
+
+    last_broadcast_times[key] = current_time
+    return True
+
+
+def _should_emit_named_update(update_type: str, current_time: float) -> bool:
+    interval = VIEW_INTERVALS.get(update_type, 0.0)
+    if interval <= 0:
+        return True
+    last_time = last_broadcast_times.get(update_type, 0.0)
+    if current_time - last_time < interval:
+        return False
+    last_broadcast_times[update_type] = current_time
+    return True
+
+
+def _build_recording_status_payload(is_active: bool, session_id: Optional[str], session_info: Optional[dict] = None) -> dict:
+    timestamp = int(time.time() * 1000)
+    case_id = (session_info or {}).get('case_id')
+    duration_sec = 0.0
+    if is_active and session_info and session_info.get('start_time'):
+        duration_sec = max(0.0, time.time() - float(session_info.get('start_time')))
+    elif session_info:
+        duration_sec = float(session_info.get('duration') or 0.0)
+
+    return _build_ws_payload(
+        'recording_status',
+        session_id=session_id,
+        case_id=case_id,
+        timestamp=timestamp,
+        data={
+            'recording': is_active,
+            'duration_sec': round(duration_sec, 3),
+            'output_dir': (session_info or {}).get('data_directory', ''),
+            'bytes_written': (session_info or {}).get('total_bytes', 0),
+            'last_error': capture_stats.get('last_error', '')
+        },
+        extra={
+            'is_active': is_active,
+            'session_info': session_info,
+            'experiment_context': current_experiment_runtime,
+            'pipeline_status': _build_pipeline_status_data(is_active, session_info, last_standardization_result, last_dsm_result, last_evaluation_result, last_optimization_result),
+        }
+    )
+
+
+def _worker_status(result, default: str = 'waiting') -> str:
+    if isinstance(result, dict):
+        return result.get('status') or result.get('worker_status') or default
+    return default
+
+
+def _worker_error_code(result) -> str:
+    if isinstance(result, dict):
+        return result.get('error_code', '') or ''
+    return ''
+
+
+def _worker_error_message(result) -> str:
+    if isinstance(result, dict):
+        return result.get('error', '') or result.get('error_message', '') or ''
+    return ''
+
+
+def _map_pipeline_stage_status(value: Optional[str]) -> str:
+    normalized = str(value or '').strip().lower()
+    if normalized in {'running', 'ready', 'failed', 'blocked', 'waiting'}:
+        return normalized
+    if normalized in {'pending', 'planned'}:
+        return 'waiting'
+    return 'waiting'
+
+
+def _persist_pipeline_status(session_info: Optional[dict], pipeline_status: dict) -> None:
+    session_dir = (session_info or {}).get('data_directory')
+    if not session_dir:
+        return
+    analysis_dir = os.path.join(session_dir, 'analysis')
+    os.makedirs(analysis_dir, exist_ok=True)
+    with open(os.path.join(analysis_dir, 'pipeline_status.json'), 'w', encoding='utf-8') as handle:
+        json.dump(pipeline_status, handle, ensure_ascii=False, indent=2)
+    _persist_figure_batch_manifest(session_info, pipeline_status)
+
+
+def _collect_figure_context(session_info: Optional[dict], session_meta: Optional[dict] = None) -> dict:
+    session_info = dict(session_info or {})
+    session_meta = dict(session_meta or {})
+
+    runtime_context = {}
+    if isinstance(session_meta.get('runtime_context'), dict):
+        runtime_context = session_meta.get('runtime_context', {})
+    elif isinstance(session_info.get('runtime_context'), dict):
+        runtime_context = session_info.get('runtime_context', {})
+
+    case_context = runtime_context.get('case', {}) if isinstance(runtime_context, dict) else {}
+    figure_context = runtime_context.get('figure_semantics', {}) if isinstance(runtime_context, dict) else {}
+    if not figure_context and isinstance(case_context, dict):
+        figure_context = {
+            'figure_run_id': case_context.get('figure_run_id'),
+            'figure_batch_id': case_context.get('figure_batch_id'),
+            'figure_batch_group': case_context.get('figure_batch_group'),
+            'figure_ledger_range': case_context.get('figure_ledger_range'),
+            'experiment_type': case_context.get('experiment_type'),
+            'chapter_target': case_context.get('chapter_target'),
+            'law_validation_scope': case_context.get('law_validation_scope'),
+        }
+
+    return {
+        'figure_run_id': session_meta.get('figure_run_id') or figure_context.get('figure_run_id') or session_info.get('figure_run_id') or '',
+        'figure_batch_id': session_meta.get('figure_batch_id') or figure_context.get('figure_batch_id') or session_info.get('figure_batch_id') or '',
+        'figure_batch_group': session_meta.get('figure_batch_group') or figure_context.get('figure_batch_group') or session_info.get('figure_batch_group') or '',
+        'figure_ledger_range': session_meta.get('figure_ledger_range') or figure_context.get('figure_ledger_range') or session_info.get('figure_ledger_range') or '',
+        'experiment_type': session_meta.get('experiment_type') or figure_context.get('experiment_type') or session_info.get('experiment_type') or '',
+        'chapter_target': session_meta.get('chapter_target') or figure_context.get('chapter_target') or session_info.get('chapter_target') or '',
+        'law_validation_scope': session_meta.get('law_validation_scope') or figure_context.get('law_validation_scope') or session_info.get('law_validation_scope') or '',
+        'analysis_run_id': session_meta.get('analysis_run_id') or session_info.get('analysis_run_id') or session_info.get('session_id') or '',
+    }
+
+
+def _build_figure_batch_manifest(session_info: Optional[dict], pipeline_status: Optional[dict] = None) -> Optional[dict]:
+    session_dir = (session_info or {}).get('data_directory')
+    if not session_dir:
+        return None
+
+    meta_path = os.path.join(session_dir, 'session_meta.json')
+    session_meta = {}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as handle:
+                session_meta = json.load(handle)
+        except Exception:
+            session_meta = {}
+
+    merged_figure_context = _collect_figure_context(session_info, session_meta)
+
+    analysis_dir = os.path.join(session_dir, 'analysis')
+    artifact_paths = {
+        'pipeline_status': os.path.join(analysis_dir, 'pipeline_status.json'),
+        'dsm_report': os.path.join(analysis_dir, 'dsm_report.json'),
+        'evaluation_result': os.path.join(analysis_dir, 'evaluation_result.json'),
+        'optimization_result': os.path.join(analysis_dir, 'optimization_result.json'),
+        'optimization_comparison': os.path.join(analysis_dir, 'optimization_comparison.json'),
+        'pareto_front': os.path.join(analysis_dir, 'pareto_front.csv'),
+    }
+    existing_artifact_paths = {
+        key: path for key, path in artifact_paths.items() if os.path.exists(path)
+    }
+
+    effective_pipeline_status = pipeline_status or {}
+    figure_asset_status = str(effective_pipeline_status.get('figure_asset_status') or '').strip().lower()
+    if not figure_asset_status:
+        figure_asset_status = 'ready' if (
+            effective_pipeline_status.get('standard_files_status') == 'ready'
+            and effective_pipeline_status.get('evaluation_status') == 'ready'
+            and effective_pipeline_status.get('optimization_status') == 'ready'
+        ) else 'blocked'
+    figure_asset_ready = figure_asset_status == 'ready'
+
+    return {
+        'session_id': (session_info or {}).get('session_id') or session_meta.get('session_id') or os.path.basename(session_dir),
+        'case_id': (session_info or {}).get('case_id') or session_meta.get('case_id') or '',
+        'plan_case_id': (session_info or {}).get('plan_case_id') or session_meta.get('plan_case_id') or '',
+        **merged_figure_context,
+        'figure_asset_status': figure_asset_status,
+        'figure_asset_ready': figure_asset_ready,
+        'pipeline_status': effective_pipeline_status,
+        'artifact_paths': existing_artifact_paths,
+        'generated_at': int(time.time() * 1000),
+    }
+
+
+def _persist_figure_batch_manifest(session_info: Optional[dict], pipeline_status: Optional[dict] = None) -> None:
+    session_dir = (session_info or {}).get('data_directory')
+    if not session_dir:
+        return
+
+    manifest = _build_figure_batch_manifest(session_info, pipeline_status)
+    if manifest is None:
+        return
+
+    analysis_dir = os.path.join(session_dir, 'analysis')
+    os.makedirs(analysis_dir, exist_ok=True)
+    manifest_path = os.path.join(analysis_dir, 'figure_batch_manifest.json')
+    with open(manifest_path, 'w', encoding='utf-8') as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2)
+
+
+def _update_session_meta_status(
+    session_info: Optional[dict],
+    *,
+    standardization_result = None,
+    dsm_result = None,
+    evaluation_result = None,
+    optimization_result = None,
+) -> None:
+    session_dir = (session_info or {}).get('data_directory')
+    if not session_dir:
+        return
+    meta_path = os.path.join(session_dir, 'session_meta.json')
+    if not os.path.exists(meta_path):
+        return
+    try:
+        with open(meta_path, 'r', encoding='utf-8') as handle:
+            meta = json.load(handle)
+    except Exception:
+        meta = {}
+
+    pipeline = _build_pipeline_status_data(
+        False,
+        session_info,
+        standardization_result,
+        dsm_result,
+        evaluation_result,
+        optimization_result,
+    )
+    meta.update({
+        'contract_version': pipeline.get('contract_version', 'v1.0'),
+        'platform_type': meta.get('platform_type') or 'apollo_online',
+        'record_start_ts': meta.get('record_start_ts', meta.get('start_ts')),
+        'record_stop_ts': meta.get('record_stop_ts', meta.get('end_ts')),
+        'standardization_status': pipeline.get('standardization', 'waiting'),
+        'dsm_status': pipeline.get('dsm', 'waiting'),
+        'evaluation_status': pipeline.get('evaluation', 'waiting'),
+        'optimization_status': pipeline.get('optimization', 'waiting'),
+        'figure_asset_status': pipeline.get('figure_asset_status', 'blocked'),
+        'figure_asset_ready': pipeline.get('figure_asset_ready', False),
+        'figure_batch_manifest_path': os.path.join(session_dir, 'analysis', 'figure_batch_manifest.json'),
+    })
+    if isinstance(evaluation_result, dict):
+        meta['baseline_allocation_id'] = evaluation_result.get('baseline_allocation_id', meta.get('baseline_allocation_id', ''))
+        meta['candidate_allocation_id'] = evaluation_result.get('candidate_allocation_id', meta.get('candidate_allocation_id', ''))
+    if isinstance(optimization_result, dict):
+        meta['baseline_allocation_id'] = optimization_result.get('baseline_allocation_id', meta.get('baseline_allocation_id', ''))
+        meta['current_allocation_id'] = optimization_result.get('current_allocation_id', meta.get('current_allocation_id', ''))
+        meta['recommended_allocation_id'] = optimization_result.get('recommended_allocation_id', meta.get('recommended_allocation_id', ''))
+    meta['session_directory'] = session_dir
+    meta = normalize_session_meta_for_thesis(meta)
+    with open(meta_path, 'w', encoding='utf-8') as handle:
+        json.dump(meta, handle, ensure_ascii=False, indent=2)
+
+
+def _build_pipeline_status_data(is_active: bool, session_info: Optional[dict], standardization_result = None, dsm_result = None, evaluation_result = None, optimization_result = None) -> dict:
+    file_status = {}
+    required_files = list(REQUIRED_STANDARD_FILES)
+    optional_files = list(OPTIONAL_STANDARD_FILES)
+    effective_input_weights = {}
+    if isinstance(standardization_result, dict):
+        file_status = standardization_result.get('file_status', {})
+        required_files = list(standardization_result.get('required_files') or required_files)
+        optional_files = list(standardization_result.get('optional_files') or optional_files)
+        effective_input_weights = dict(standardization_result.get('effective_input_weights') or {})
+    elif standardization_result is not None:
+        file_status = getattr(standardization_result, 'file_status', {}) or {}
+        required_files = list(getattr(standardization_result, 'required_files', required_files) or required_files)
+        optional_files = list(getattr(standardization_result, 'optional_files', optional_files) or optional_files)
+        effective_input_weights = dict(getattr(standardization_result, 'effective_input_weights', {}) or {})
+
+    standard_files_ready = all(
+        file_status.get(key) == 'ready'
+        for key in required_files
+    ) if file_status else False
+    real_input_files_ready = any(
+        file_status.get(key) == 'ready'
+        for key in [*required_files, *optional_files]
+    ) if file_status else False
+    standard_files_empty = any(
+        file_status.get(key) == 'empty'
+        for key in ALL_STANDARD_FILES
+    ) if file_status else False
+    optional_files_empty = any(
+        file_status.get(key) == 'empty'
+        for key in optional_files
+    ) if file_status else False
+
+    standardization_success = True
+    if isinstance(standardization_result, dict):
+        standardization_success = bool(standardization_result.get('success', True))
+    standardization_failed = any(value == 'failed' for value in file_status.values()) if file_status else False
+
+    standardization_stage = 'waiting'
+    if isinstance(standardization_result, dict):
+        if standardization_failed or not standardization_success:
+            standardization_stage = 'failed'
+        elif real_input_files_ready:
+            standardization_stage = 'ready'
+        else:
+            standardization_stage = 'waiting'
+    elif is_active:
+        standardization_stage = 'waiting'
+    elif session_info:
+        standardization_stage = 'waiting'
+
+    def _map_status(value: Optional[str]) -> str:
+        if value == 'ready':
+            return 'ready'
+        if value == 'empty':
+            return 'empty'
+        if value == 'failed':
+            return 'failed'
+        return 'missing'
+
+    dsm_status = 'waiting'
+    if isinstance(dsm_result, dict):
+        dsm_status = _map_pipeline_stage_status(dsm_result.get('status', dsm_status))
+    elif is_active:
+        dsm_status = 'waiting'
+    elif session_info and not real_input_files_ready:
+        dsm_status = 'blocked'
+
+    evaluation_status = 'waiting'
+    if isinstance(evaluation_result, dict):
+        evaluation_status = _map_pipeline_stage_status(evaluation_result.get('status', evaluation_status))
+    elif dsm_status in {'failed', 'blocked'}:
+        evaluation_status = 'blocked'
+
+    optimization_status = 'waiting'
+    if isinstance(optimization_result, dict):
+        optimization_status = _map_pipeline_stage_status(optimization_result.get('status', optimization_status))
+    elif evaluation_status in {'failed', 'blocked'}:
+        optimization_status = 'blocked'
+
+    if real_input_files_ready and standardization_success and evaluation_status == 'ready' and optimization_status == 'ready':
+        figure_asset_status = 'ready'
+    elif any(status == 'failed' for status in [dsm_status, evaluation_status, optimization_status]) or standardization_failed:
+        figure_asset_status = 'failed'
+    elif any(status == 'blocked' for status in [dsm_status, evaluation_status, optimization_status]) or (session_info and not real_input_files_ready):
+        figure_asset_status = 'blocked'
+    else:
+        figure_asset_status = 'waiting'
+
+    payload = {
+        'contract_version': 'v1.0',
+        'raw_recording': 'running' if is_active else ('ready' if session_info else 'waiting'),
+        'standardization': standardization_stage,
+        'dsm': dsm_status,
+        'evaluation': evaluation_status,
+        'optimization': optimization_status,
+        'archive': 'waiting',
+        'last_error_code': _worker_error_code(optimization_result) or _worker_error_code(evaluation_result) or _worker_error_code(dsm_result),
+        'last_error_message': _worker_error_message(optimization_result) or _worker_error_message(evaluation_result) or _worker_error_message(dsm_result),
+        'expected_standard_files': list(ALL_STANDARD_FILES),
+        'required_standard_files': list(required_files),
+        'optional_standard_files': list(optional_files),
+        'real_input_files_ready': sorted([key for key, value in file_status.items() if value == 'ready']),
+        'ready_standard_files': sorted([key for key, value in file_status.items() if value == 'ready']),
+        'empty_standard_files': sorted([key for key, value in file_status.items() if value == 'empty']),
+        'optional_empty_standard_files': sorted([key for key in optional_files if file_status.get(key) == 'empty']),
+        'failed_standard_files': sorted([key for key, value in file_status.items() if value == 'failed']),
+        'effective_input_weights': effective_input_weights,
+    }
+
+    payload.update({
+        'raw_recording_status': 'running' if is_active else ('ready' if session_info else 'waiting'),
+        'standard_files_status': (
+            'ready'
+            if real_input_files_ready and standardization_success
+            else ('empty' if standard_files_empty else ('missing' if session_info else 'waiting'))
+        ),
+        'standard_files_completeness': (
+            'complete'
+            if standard_files_ready
+            else ('partial' if real_input_files_ready else ('empty' if standard_files_empty else ('missing' if session_info else 'waiting')))
+        ),
+        'optional_inputs_status': 'empty' if optional_files_empty else 'ready',
+        'dsm_status': dsm_status,
+        'evaluation_status': evaluation_status,
+        'optimization_status': optimization_status,
+        'archive_status': payload['archive'],
+        'figure_asset_status': figure_asset_status,
+        'figure_asset_ready': (
+            figure_asset_status == 'ready'
+        ),
+        'figure_batch_manifest_path': (
+            os.path.join((session_info or {}).get('data_directory', ''), 'analysis', 'figure_batch_manifest.json')
+            if session_info and session_info.get('data_directory') else ''
+        ),
+        'standard_files': {
+            'fcsTelemetry': _map_status(file_status.get('fcs_telemetry')),
+            'planningTelemetry': _map_status(file_status.get('planning_telemetry')),
+            'radarData': _map_status(file_status.get('radar_data')),
+            'busTraffic': _map_status(file_status.get('bus_traffic')),
+            'cameraData': _map_status(file_status.get('camera_data')),
+        },
+    })
+    return payload
+
+
+def _build_pipeline_status_payload(is_active: bool, session_id: Optional[str], session_info: Optional[dict], standardization_result = None, dsm_result = None, evaluation_result = None, optimization_result = None) -> dict:
+    return _build_ws_payload(
+        'pipeline_status_update',
+        session_id=session_id,
+        case_id=(session_info or {}).get('case_id') if session_info else None,
+        data=_build_pipeline_status_data(is_active, session_info, standardization_result, dsm_result, evaluation_result, optimization_result),
+    )
+
+
+def _run_session_standardization(session_info: Optional[dict]) -> Optional[dict]:
+    if not session_info or not session_info.get('data_directory'):
+        return None
+
+    result = SessionStandardizer(session_info['data_directory']).export()
+    return {
+        'session_dir': result.session_dir,
+        'success': result.success,
+        'standard_files': result.standard_files,
+        'file_status': result.file_status,
+        'generated_files': result.generated_files,
+        'missing_inputs': result.missing_inputs,
+        'notes': result.notes,
+        'required_files': result.required_files,
+        'optional_files': result.optional_files,
+        'configured_input_weights': result.configured_input_weights,
+        'effective_input_weights': result.effective_input_weights,
+    }
+
+
+def _standard_files_exist(session_dir: str) -> bool:
+    expected_files = {
+        'fcs_telemetry.csv': [
+            os.path.join(session_dir, 'records', 'fcs', 'fcs_telemetry.csv'),
+            os.path.join(session_dir, 'fcs_telemetry.csv'),
+            os.path.join(session_dir, 'analysis', 'standardized', 'fcs_telemetry.csv'),
+        ],
+        'planning_telemetry.csv': [
+            os.path.join(session_dir, 'records', 'planning', 'planning_telemetry.csv'),
+            os.path.join(session_dir, 'planning_telemetry.csv'),
+            os.path.join(session_dir, 'analysis', 'standardized', 'planning_telemetry.csv'),
+        ],
+        'radar_data.csv': [
+            os.path.join(session_dir, 'records', 'lidar', 'radar_data.csv'),
+            os.path.join(session_dir, 'radar_data.csv'),
+            os.path.join(session_dir, 'analysis', 'standardized', 'radar_data.csv'),
+        ],
+        'bus_traffic.csv': [
+            os.path.join(session_dir, 'records', 'bus', 'bus_traffic.csv'),
+            os.path.join(session_dir, 'bus_traffic.csv'),
+            os.path.join(session_dir, 'analysis', 'standardized', 'bus_traffic.csv'),
+        ],
+    }
+    for candidates in expected_files.values():
+        file_path = next((candidate for candidate in candidates if os.path.exists(candidate)), None)
+        if not file_path:
+            continue
+        with open(file_path, 'r', encoding='utf-8', newline='') as csv_file:
+            next(csv_file, None)
+            if next(csv_file, None) is not None:
+                return True
+    return False
+
+
+def _run_session_dsm(session_info: Optional[dict], standardization_result = None, start_time: Optional[float] = None, end_time: Optional[float] = None) -> Optional[dict]:
+    if not session_info or not session_info.get('data_directory'):
+        return None
+
+    session_dir = session_info['data_directory']
+    dsm_input_ready = False
+    if isinstance(standardization_result, dict):
+        file_status = standardization_result.get('file_status', {}) or {}
+        monitored_files = [
+            *(standardization_result.get('required_files') or REQUIRED_STANDARD_FILES),
+            *(standardization_result.get('optional_files') or OPTIONAL_STANDARD_FILES),
+        ]
+        dsm_input_ready = any(file_status.get(key) == 'ready' for key in monitored_files)
+    else:
+        dsm_input_ready = _standard_files_exist(session_dir)
+
+    if not dsm_input_ready:
+        return {
+            'success': False,
+            'status': 'blocked',
+            'session_dir': session_dir,
+            'output_path': '',
+            'canonical_report_path': os.path.join(session_dir, 'analysis', 'dsm_report.json'),
+            'summary': {},
+            'error': '未检测到任何真实记录数据，DSM 未触发',
+            'start_time': start_time,
+            'end_time': end_time,
+        }
+
+    return dsm_worker.run_for_session(
+        session_dir,
+        start_time=start_time,
+        end_time=end_time,
+    ).as_dict()
+
+
+def _run_session_evaluation(session_info: Optional[dict], dsm_result = None, baseline_profile_id: Optional[str] = None, candidate_profile_id: Optional[str] = None) -> Optional[dict]:
+    if not session_info or not session_info.get('data_directory'):
+        return None
+
+    session_dir = session_info['data_directory']
+    if not isinstance(dsm_result, dict) or _map_pipeline_stage_status(dsm_result.get('status')) != 'ready':
+        return {
+            'success': False,
+            'status': 'blocked',
+            'session_dir': session_dir,
+            'output_path': '',
+            'canonical_report_path': os.path.join(session_dir, 'analysis', 'evaluation_result.json'),
+            'summary': {},
+            'error': 'DSM 未准备完成，Evaluation 未触发',
+            'error_code': 'EVAL_DSM_NOT_READY',
+            'request_id': str(uuid.uuid4()),
+            'session_id': (session_info or {}).get('session_id', os.path.basename(session_dir)),
+            'worker_name': 'evaluation_worker',
+            'worker_status': 'blocked',
+            'artifact_paths': {'evaluation_result': os.path.join(session_dir, 'analysis', 'evaluation_result.json')},
+            'summary_payload_type': 'evaluation_summary_update',
+            'summary_payload_path': os.path.join(session_dir, 'analysis', 'evaluation_result.json'),
+            'baseline_allocation_id': baseline_profile_id or '',
+            'candidate_allocation_id': candidate_profile_id or '',
+        }
+
+    session_meta = {}
+    meta_path = os.path.join(session_dir, 'session_meta.json')
+    if os.path.exists(meta_path):
+        with open(meta_path, 'r', encoding='utf-8') as handle:
+            session_meta = json.load(handle)
+
+    return evaluation_worker.run_for_session(
+        session_dir,
+        experiment_case_manager.architecture_bundle,
+        session_meta=session_meta,
+        baseline_profile_id=baseline_profile_id,
+        candidate_profile_id=candidate_profile_id,
+    ).as_dict()
+
+
+def _run_session_optimization(
+    session_info: Optional[dict],
+    evaluation_result = None,
+    baseline_profile_id: Optional[str] = None,
+    current_profile_id: Optional[str] = None,
+    pop_size: int = 40,
+    n_gen: int = 40,
+    seed: int = 42,
+) -> Optional[dict]:
+    if not session_info or not session_info.get('data_directory'):
+        return None
+
+    session_dir = session_info['data_directory']
+    if not isinstance(evaluation_result, dict) or _map_pipeline_stage_status(evaluation_result.get('status')) != 'ready':
+        return {
+            'success': False,
+            'status': 'blocked',
+            'session_dir': session_dir,
+            'output_path': '',
+            'canonical_report_path': os.path.join(session_dir, 'analysis', 'optimization_result.json'),
+            'summary': {},
+            'error': 'Evaluation 未准备完成，Optimization 未触发',
+            'error_code': 'OPT_EVAL_NOT_READY',
+            'request_id': str(uuid.uuid4()),
+            'session_id': (session_info or {}).get('session_id', os.path.basename(session_dir)),
+            'worker_name': 'optimization_worker',
+            'worker_status': 'blocked',
+            'artifact_paths': {'optimization_result': os.path.join(session_dir, 'analysis', 'optimization_result.json')},
+            'summary_payload_type': 'architecture_recommendation_update',
+            'summary_payload_path': os.path.join(session_dir, 'analysis', 'optimization_result.json'),
+            'baseline_allocation_id': baseline_profile_id or '',
+            'current_allocation_id': current_profile_id or '',
+            'recommended_allocation_id': '',
+        }
+
+    session_meta = {}
+    meta_path = os.path.join(session_dir, 'session_meta.json')
+    if os.path.exists(meta_path):
+        with open(meta_path, 'r', encoding='utf-8') as handle:
+            session_meta = json.load(handle)
+
+    return optimization_worker.run_for_session(
+        session_dir,
+        experiment_case_manager.architecture_bundle,
+        session_meta=session_meta,
+        baseline_profile_id=baseline_profile_id,
+        current_profile_id=current_profile_id,
+        pop_size=pop_size,
+        n_gen=n_gen,
+        seed=seed,
+    ).as_dict()
+
+
+def _build_dsm_summary_payload(session_id: Optional[str], session_info: Optional[dict], dsm_result: Optional[dict]) -> Optional[dict]:
+    if not dsm_result:
+        return None
+
+    summary = dsm_result.get('summary') or {}
+    figure_context = _collect_figure_context(session_info)
+    return _build_ws_payload(
+        'dsm_summary_update',
+        session_id=session_id,
+        case_id=(session_info or {}).get('case_id') if session_info else None,
+        data={
+            'node_count': summary.get('node_count'),
+            'edge_count': summary.get('edge_count'),
+            'cross_module_interactions': summary.get('cross_module_interactions'),
+            'total_bus_bytes': summary.get('total_bus_bytes'),
+            'avg_cross_latency': summary.get('avg_cross_latency'),
+            'global_stats_ready': summary.get('global_stats_ready', False),
+            'status': dsm_result.get('status', 'waiting'),
+            'output_path': dsm_result.get('output_path', ''),
+            'canonical_report_path': dsm_result.get('canonical_report_path', ''),
+            'error': dsm_result.get('error', ''),
+            **figure_context,
+        }
+    )
+
+
+def _build_evaluation_summary_payload(session_id: Optional[str], session_info: Optional[dict], evaluation_result: Optional[dict]) -> Optional[dict]:
+    if not evaluation_result:
+        return None
+
+    summary = evaluation_result.get('summary') or {}
+    figure_context = _collect_figure_context(session_info)
+    return _build_ws_payload(
+        'evaluation_summary_update',
+        session_id=session_id,
+        case_id=(session_info or {}).get('case_id') if session_info else None,
+        data={
+            'session_id': summary.get('session_id', session_id),
+            'baseline_allocation_id': summary.get('baseline_allocation_id', evaluation_result.get('baseline_allocation_id', '')),
+            'candidate_allocation_id': summary.get('candidate_allocation_id', evaluation_result.get('candidate_allocation_id', '')),
+            'final_composite_score': summary.get('final_composite_score'),
+            'constraint_violation_count': summary.get('constraint_violation_count'),
+            'domain_scores': summary.get('domain_scores', {}),
+            'baseline_delta': summary.get('baseline_delta', {}),
+            'evaluation_ready': summary.get('evaluation_ready', False),
+            'status': evaluation_result.get('status', 'waiting'),
+            'output_path': evaluation_result.get('output_path', ''),
+            'canonical_report_path': evaluation_result.get('canonical_report_path', ''),
+            'error': evaluation_result.get('error', ''),
+            'error_code': evaluation_result.get('error_code', ''),
+            'figure_batch_manifest_path': os.path.join((session_info or {}).get('data_directory', ''), 'analysis', 'figure_batch_manifest.json') if session_info else '',
+            **figure_context,
+        }
+    )
+
+
+def _build_architecture_recommendation_payload(session_id: Optional[str], session_info: Optional[dict], optimization_result: Optional[dict]) -> Optional[dict]:
+    if not optimization_result:
+        return None
+
+    summary = optimization_result.get('summary') or {}
+    figure_context = _collect_figure_context(session_info)
+    return _build_ws_payload(
+        'architecture_recommendation_update',
+        session_id=session_id,
+        case_id=(session_info or {}).get('case_id') if session_info else None,
+        data={
+            'session_id': summary.get('session_id', session_id),
+            'current_architecture': summary.get('current_architecture', {}),
+            'recommended_architecture': summary.get('recommended_architecture', {}),
+            'all_candidate_summaries': summary.get('all_candidate_summaries', []),
+            'predicted_score_delta': summary.get('predicted_score_delta'),
+            'predicted_cross_count_delta': summary.get('predicted_cross_count_delta'),
+            'predicted_power_delta': summary.get('predicted_power_delta'),
+            'constraint_pass': summary.get('constraint_pass', False),
+            'optimization_ready': summary.get('optimization_ready', False),
+            'status': optimization_result.get('status', 'waiting'),
+            'output_path': optimization_result.get('output_path', ''),
+            'canonical_report_path': optimization_result.get('canonical_report_path', ''),
+            'error': optimization_result.get('error', ''),
+            'error_code': optimization_result.get('error_code', ''),
+            'figure_batch_manifest_path': os.path.join((session_info or {}).get('data_directory', ''), 'analysis', 'figure_batch_manifest.json') if session_info else '',
+            **figure_context,
+        }
+    )
+
+
+def _build_figure_asset_status_payload(session_id: Optional[str], session_info: Optional[dict], pipeline_status: Optional[dict]) -> Optional[dict]:
+    if not session_info:
+        return None
+
+    manifest = _build_figure_batch_manifest(session_info, pipeline_status)
+    if manifest is None:
+        return None
+
+    return _build_ws_payload(
+        'figure_asset_status_update',
+        session_id=session_id,
+        case_id=(session_info or {}).get('case_id') if session_info else None,
+        data=manifest,
+    )
+
+
+def _build_ws_payload(message_type: str, data: Optional[dict] = None, session_id: Optional[str] = None,
+                      case_id: Optional[str] = None, timestamp: Optional[int] = None,
+                      extra: Optional[dict] = None) -> dict:
+    payload = {
+        'type': message_type,
+        'timestamp': timestamp if timestamp is not None else int(time.time() * 1000),
+        'session_id': session_id,
+        'case_id': case_id,
+        'source': WS_SOURCE,
+        'schema_version': WS_SCHEMA_VERSION,
+        'data': data or {}
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _infer_capture_family(msg_type: str) -> str:
+    if msg_type == 'planning_telemetry':
+        return 'planning_raw'
+    if msg_type.startswith('camera_') or msg_type.startswith('perception_'):
+        return 'perception_raw'
+    return 'flight_control_raw'
+
+
+def _update_capture_stats(message: dict, current_time: float):
+    msg_type = message.get('type', 'unknown')
+    family = _infer_capture_family(msg_type)
+    message_timestamp = int(message.get('timestamp', int(current_time * 1000)))
+    recent_packets = capture_stats['recent_packets'][family]
+    recent_packets.append(current_time)
+    while recent_packets and current_time - recent_packets[0] > 2.0:
+        recent_packets.popleft()
+
+    capture_stats['family_last_ts'][family] = message_timestamp
+    capture_stats['family_packet_counts'][family] += 1
+    capture_stats['last_packet_ts'] = message_timestamp
+
+    if msg_type == 'planning_telemetry':
+        radar_packets = capture_stats['recent_packets']['radar_raw']
+        radar_packets.append(current_time)
+        while radar_packets and current_time - radar_packets[0] > 2.0:
+            radar_packets.popleft()
+        capture_stats['family_last_ts']['radar_raw'] = message_timestamp
+        capture_stats['family_packet_counts']['radar_raw'] += 1
+
+    if msg_type == 'unknown':
+        capture_stats['parse_error_count'] += 1
+        capture_stats['last_error'] = f"unknown func=0x{message.get('func_code', 0):02X}"
+
+
+def _get_capture_rate_hz(family: str, current_time: float) -> float:
+    recent_packets = capture_stats['recent_packets'][family]
+    while recent_packets and current_time - recent_packets[0] > 2.0:
+        recent_packets.popleft()
+    if not recent_packets:
+        return 0.0
+    window_span = max(current_time - recent_packets[0], 1.0)
+    return round(len(recent_packets) / window_span, 2)
+
+
+def _build_capture_overview_payload(current_time: float) -> dict:
+    session_info = recorder.get_session_info() if recorder else None
+    return _build_ws_payload(
+        'capture_overview_update',
+        session_id=current_session_id,
+        case_id=getattr(recorder, 'case_id', None) if recorder else None,
+        data={
+            'recording': recording_active,
+            'enabled_ports': _normalize_listen_ports(),
+            'flight_control_rate_hz': _get_capture_rate_hz('flight_control_raw', current_time),
+            'planning_rate_hz': _get_capture_rate_hz('planning_raw', current_time),
+            'radar_rate_hz': _get_capture_rate_hz('radar_raw', current_time),
+            'perception_rate_hz': _get_capture_rate_hz('perception_raw', current_time),
+            'packet_counts': dict(capture_stats['family_packet_counts']),
+            'parse_error_count': capture_stats.get('parse_error_count', 0),
+            'last_packet_ts': capture_stats.get('last_packet_ts'),
+            'last_error': capture_stats.get('last_error', ''),
+            'output_dir': (session_info or {}).get('data_directory', ''),
+            'bytes_written': (session_info or {}).get('total_bytes', 0)
+        }
+    )
+
+
+def _build_data_quality_payload(current_time: float) -> dict:
+    current_time_ms = int(current_time * 1000)
+    flight_control_gap_ms = None
+    planning_gap_ms = None
+    radar_gap_ms = None
+
+    if capture_stats['family_last_ts'].get('flight_control_raw'):
+        flight_control_gap_ms = max(0, current_time_ms - capture_stats['family_last_ts']['flight_control_raw'])
+    if capture_stats['family_last_ts'].get('planning_raw'):
+        planning_gap_ms = max(0, current_time_ms - capture_stats['family_last_ts']['planning_raw'])
+    if capture_stats['family_last_ts'].get('radar_raw'):
+        radar_gap_ms = max(0, current_time_ms - capture_stats['family_last_ts']['radar_raw'])
+
+    radar_missing = _get_capture_rate_hz('radar_raw', current_time) <= 0
+    health_level = 'ok'
+    health_text = 'capture healthy'
+    if (flight_control_gap_ms and flight_control_gap_ms > 1000) or (planning_gap_ms and planning_gap_ms > 2000):
+        health_level = 'warning'
+        health_text = 'flight or planning stream gap detected'
+    elif radar_missing:
+        health_level = 'warning'
+        health_text = 'radar stream not connected'
+
+    return _build_ws_payload(
+        'data_quality_update',
+        session_id=current_session_id,
+        case_id=getattr(recorder, 'case_id', None) if recorder else None,
+        data={
+            'parse_error_count': capture_stats.get('parse_error_count', 0),
+            'window_missing_count': capture_stats.get('window_missing_count', 0),
+            'planning_gap_ms': planning_gap_ms,
+            'flight_control_gap_ms': flight_control_gap_ms,
+            'radar_gap_ms': radar_gap_ms,
+            'radar_missing': radar_missing,
+            'health_level': health_level,
+            'health_text': health_text
+        }
+    )
+
+
+def _extract_realtime_events(message: dict, views: dict) -> list:
+    events = []
+    msg_type = message.get('type', 'unknown')
+    payload = message.get('data', {}) or {}
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    if msg_type == 'avoiflag' and payload.get('AvoiFlag_AvoidanceFlag'):
+        events.append({
+            'timestamp': timestamp,
+            'event_type': 'avoidance_triggered',
+            'event_source': 'runtime_monitor',
+            'event_level': 'warning',
+            'event_value': 1,
+            'event_detail': '避障标志触发'
+        })
+
+    if msg_type == 'unknown':
+        events.append({
+            'timestamp': timestamp,
+            'event_type': 'protocol_error',
+            'event_source': 'protocol_parser',
+            'event_level': 'warning',
+            'event_value': message.get('func_code_hex', 'unknown'),
+            'event_detail': '收到未知功能字数据包'
+        })
+
+    return events
+
+
 # ================================================================
 # UDP数据处理回调
 # ================================================================
+
+# 记录上次广播时间，用于节流
+# Limit update rate to avoid overwhelming the frontend
+last_broadcast_times = {} 
 
 def on_udp_message_received(message: dict):
     """
@@ -275,89 +1732,138 @@ def on_udp_message_received(message: dict):
     3. 录制数据到CSV文件（如果启用）
     4. 记录UDP接收日志
     """
-    global recorder, recording_active
+    global recorder, recording_active, last_broadcast_times, current_session_id
     
     msg_type = message.get('type', 'unknown')
     func_code = message.get('func_code', 0)
     
-    # 添加调试日志：显示收到的所有消息类型
-    logger.info(f"[调试] 收到UDP消息: type='{msg_type}', func_code={func_code}")
+    # -------------------------------------------------------------------------
+    # 1. 日志输出优化 (针对0x40-0x4B高频FCS数据进行节流)
+    # -------------------------------------------------------------------------
+    current_time = time.time()
+    is_fcs_high_freq = 0x40 <= func_code <= 0x4B
+    
+    if is_fcs_high_freq:
+        # 对于高频FCS数据，大幅降低日志频率 (每2秒一次)
+        last_log_time = last_broadcast_times.get(f"log_fcs_{func_code}", 0)
+        if current_time - last_log_time >= 2.0:
+            # 只输出关键信息：类型和功能码，不通过日志打印详细内容
+            logger.info(f"[FCS-UDP] 接收高频数据(节流2s): type='{msg_type}', func=0x{func_code:02X}")
+            last_broadcast_times[f"log_fcs_{func_code}"] = current_time
+    else:
+        # 对于规划遥测(0x71)、雷达、指令回执等，保留详细流水日志
+        logger.info(f"[调试] 收到UDP消息: type='{msg_type}', func_code={func_code}")
+
+    _update_capture_stats(message, current_time)
+
+    if msg_type == 'heartbeat_ack':
+        logger.info("[UDP] 收到飞控回执/心跳包 func=0x00")
+        if _should_broadcast_packet(msg_type, func_code, current_time):
+            asyncio.create_task(manager.broadcast(_build_ws_payload(
+                'udp_data',
+                data=message,
+                session_id=current_session_id,
+                case_id=getattr(recorder, 'case_id', None) if recorder else None,
+                timestamp=message.get('timestamp', int(time.time() * 1000))
+            )))
+        return
+
+    if recording_active and recorder:
+        recorder.record_decoded_packet(message)
     
     # 分支1: 实时计算KPI
     kpi_result = calculator.process_packet(message)
+    views = kpi_result.get('views', {})
+    window_metrics = kpi_result.get('window_metrics', {})
+    case_id = getattr(recorder, 'case_id', None) if recorder else None
+    runtime_payload = _refresh_experiment_runtime(message, window_metrics)
     
-    # 广播KPI结果到前端
-    kpi_message = {
-        'type': 'kpi_update',
-        'timestamp': message.get('timestamp', int(time.time() * 1000)),
-        'data': kpi_result
-    }
-    asyncio.create_task(manager.broadcast(kpi_message))
+    # 广播KPI结果到前端 (Limit to 5Hz to reduce load)
+    current_time = time.time()
+    last_kpi_time = last_broadcast_times.get('kpi', 0)
+    
+    if current_time - last_kpi_time >= 0.2:  # 5Hz (200ms)
+        kpi_message = _build_ws_payload(
+            'kpi_update',
+            data=kpi_result,
+            session_id=current_session_id,
+            case_id=case_id,
+            timestamp=message.get('timestamp', int(time.time() * 1000))
+        )
+        asyncio.create_task(manager.broadcast(kpi_message))
+        last_broadcast_times['kpi'] = current_time
     
     # 分支2: 录制数据（冷流）- 统一使用RawDataRecorder
     # 检查全局录制状态
-    global recorder, recording_active
+    # global recorder, recording_active # Already declared
     
     # 支持左侧面板"配置自动录制" -> 如果启用，尝试确保recorder已启动
     if log_config.autoRecord:
          # 如果尚未激活录制，且没有手动录制正在进行
          if not recording_active and recorder is None:
              # 初始化自动录制会话
-             auto_session_id = f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+             planned_case = _find_experiment_case()
+             auto_session_id = _build_session_id(planned_case, is_auto=True)
              project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
              base_directory = os.path.join(project_root, 'Log', 'AutoDSM')
              
              try:
-                 recorder = RawDataRecorder(auto_session_id, base_directory)
+                 recorder = RawDataRecorder(
+                     auto_session_id,
+                     base_directory,
+                     plan_case_id=getattr(planned_case, 'case_id', None),
+                     session_meta_patch=_build_recording_meta_patch(
+                         planned_case,
+                         case_id=getattr(planned_case, 'case_id', None),
+                         repeat_index=getattr(planned_case, 'repeat_index', None),
+                         analysis_run_id=auto_session_id,
+                     ),
+                 )
+                 recorder.enabled_ports = _normalize_listen_ports()
+                 recorder.set_runtime_context(_refresh_experiment_runtime(latest_metrics={}, planned_case=planned_case))
                  recorder.start_recording()
                  recording_active = True
                  current_session_id = auto_session_id
                  logger.info(f"自动录制已启动: {auto_session_id}")
                  
                  # 广播状态
-                 asyncio.create_task(manager.broadcast({
-                    "type": "recording_status",
-                    "is_active": True,
-                    "session_id": current_session_id,
-                    "timestamp": int(time.time() * 1000)
-                }))
+                 asyncio.create_task(manager.broadcast(_build_recording_status_payload(True, current_session_id, recorder.get_session_info())))
              except Exception as e:
                  logger.error(f"无法启动自动录制: {e}")
 
-    # 只要recorder处于活动状态，就记录
+    # 只要recorder处于活动状态，就记录窗口指标和事件
     if recording_active and recorder:
-        recorder.record_decoded_packet(message)
+        if _should_emit_named_update('window_metrics_record', current_time):
+            recorder.record_window_metrics(window_metrics)
+        for event in _extract_realtime_events(message, views):
+            event['scenario_id'] = runtime_payload.get('scenario', {}).get('scenario_id', 'scenario_default')
+            recorder.record_event(event)
     
-    # 分支3: 广播原始数据到前端（默认广播）
+    # 分支3: 广播原始数据到前端（需节流）
     # 对于planning_telemetry类型，会在下面单独处理并广播包含轨迹的数据
-    ws_message = {
-        'type': 'udp_data',
-        'timestamp': message.get('timestamp', int(time.time() * 1000)),
-        'data': message
-    }
+    ws_message = _build_ws_payload(
+        'udp_data',
+        data=message,
+        session_id=current_session_id,
+        case_id=case_id,
+        timestamp=message.get('timestamp', int(time.time() * 1000))
+    )
     
+    # Identify message type and apply logging
     # 分支4: 根据消息类型处理
     if msg_type == 'fcs_states':
         data = message.get('data', {})
-        logger.info(f"[UDP] 飞行状态: 位置({data.get('latitude', 0):.6f}, {data.get('longitude', 0):.6f}), 高度{data.get('altitude', 0):.1f}m")
+        logger.debug(f"[UDP] 飞行状态: 位置({data.get('latitude', 0):.6f}, {data.get('longitude', 0):.6f}), 高度{data.get('altitude', 0):.1f}m")
     elif msg_type == 'planning_telemetry':
         data = message.get('data', {})
         logger.info(f"[UDP] ===== 规划遥测(0x71) =====")
-        logger.info(f"[UDP] 遥测序号: {data.get('seq_id', 0)}")
-        logger.info(f"[UDP] 时间戳: {data.get('timestamp', 0)}")
-        logger.info(f"[UDP] 当前位置: ({data.get('current_pos_x', 0):.2f}, {data.get('current_pos_y', 0):.2f}, {data.get('current_pos_z', 0):.2f}) m")
-        logger.info(f"[UDP] 当前速度: {data.get('current_vel', 0):.2f} m/s")
-        logger.info(f"[UDP] 更新标志: {data.get('update_flags', 0):02X} (全局路径={bool(data.get('update_flags', 0) & 0x01)}, 局部轨迹={bool(data.get('update_flags', 0) & 0x02)}, 障碍物={bool(data.get('update_flags', 0) & 0x04)})")
-        logger.info(f"[UDP] 系统状态: {data.get('status', 0)}")
-        logger.info(f"[UDP] 全局路径点数: {data.get('global_path_count', 0)}")
-        logger.info(f"[UDP] 局部轨迹点数: {data.get('local_traj_count', 0)}")
-        logger.info(f"[UDP] 障碍物数量: {data.get('obstacle_count', 0)}")
-        logger.info(f"[UDP] =======================")
+        # ... existing logging ...
         
         # 检查是否包含真实轨迹数据
         global_path_data = data.get('global_path', [])
         local_traj_data = data.get('local_path', [])
         
+        # Sampling logic for logging/display
         if global_path_data and len(global_path_data) > 0:
             # 调试模式：不采样，发送全部点
             sampled_global_path = global_path_data
@@ -379,38 +1885,77 @@ def on_udp_message_received(message: dict):
         ws_message['data'] = {
             **message.get('data', {}),
             'global_path': sampled_global_path,
+            'local_path': sampled_local_traj,
             'local_traj': sampled_local_traj
         }
         
         logger.info(f"[WebSocket] 准备发送规划遥测，包含global_path: {len(sampled_global_path)}点, local_traj: {len(sampled_local_traj)}点")
     elif msg_type == 'fcs_pwms':
-        logger.info(f"[UDP] PWM数据: 功能码0x{func_code:02X}")
+        logger.debug(f"[UDP] PWM数据: 功能码0x{func_code:02X}")
     elif msg_type == 'fcs_datactrl':
-        logger.info(f"[UDP] 控制循环数据")
+        logger.debug(f"[UDP] 控制循环数据")
     elif msg_type == 'fcs_gncbus':
-        logger.info(f"[UDP] GN&C总线数据")
+        logger.debug(f"[UDP] GN&C总线数据")
     elif msg_type == 'avoiflag':
         data = message.get('data', {})
-        logger.info(f"[UDP] 避障标志: 雷达={data.get('laser_radar_enabled', False)}, 避障={data.get('avoidance_flag', False)}")
+        logger.debug(f"[UDP] 避障标志: 雷达={data.get('laser_radar_enabled', False)}, 避障={data.get('avoidance_flag', False)}")
     elif msg_type == 'fcs_esc':
-        logger.info(f"[UDP] 电机ESC数据")
+        logger.debug(f"[UDP] 电机ESC数据")
     elif msg_type == 'fcs_param':
         logger.info(f"[UDP] 飞控参数: 功能码0x{func_code:02X}")
-    elif msg_type == 'lidar_obstacles':
-        count = message.get('obstacle_count', 0)
-        logger.info(f"[UDP] 雷达障碍物: {count}个")
-        if count == 0:
-            logger.debug(f"[UDP] 收到空障碍物包: {message}")
     elif msg_type == 'unknown':
         logger.warning(f"[UDP] 未知数据包: 功能码=0x{func_code:02X}")
     else:
-        logger.info(f"[UDP] {msg_type} (功能码: 0x{func_code:02X})")
+        logger.debug(f"[UDP] {msg_type} (功能码: 0x{func_code:02X})")
+
+    if msg_type in ['fcs_states', 'fcs_gncbus', 'fcs_datagcs', 'fcs_esc', 'avoiflag']:
+        if _should_emit_named_update('flight_state_update', current_time):
+            asyncio.create_task(manager.broadcast(_build_ws_payload(
+                'flight_state_update',
+                data=views.get('flight_state', {}),
+                session_id=current_session_id,
+                case_id=case_id,
+                timestamp=message.get('timestamp', int(time.time() * 1000))
+            )))
+
+    if msg_type in ['planning_telemetry', 'fcs_datagcs', 'fcs_line_aim2ab', 'fcs_line_ab', 'avoiflag']:
+        if _should_emit_named_update('planning_state_update', current_time):
+            asyncio.create_task(manager.broadcast(_build_ws_payload(
+                'planning_state_update',
+                data=views.get('planning_state', {}),
+                session_id=current_session_id,
+                case_id=case_id,
+                timestamp=message.get('timestamp', int(time.time() * 1000))
+            )))
+
+    if _should_emit_named_update('system_performance_update', current_time):
+        asyncio.create_task(manager.broadcast(_build_ws_payload(
+            'system_performance_update',
+            data=views.get('system_performance', {}),
+            session_id=current_session_id,
+            case_id=case_id,
+            timestamp=message.get('timestamp', int(time.time() * 1000))
+        )))
+
+    if _should_emit_named_update('experiment_context_update', current_time):
+        asyncio.create_task(manager.broadcast(_build_ws_payload(
+            'experiment_context_update',
+            data=runtime_payload,
+            session_id=current_session_id,
+            case_id=case_id,
+            timestamp=message.get('timestamp', int(time.time() * 1000))
+        )))
+
+    if _should_emit_named_update('capture_overview_update', current_time):
+        asyncio.create_task(manager.broadcast(_build_capture_overview_payload(current_time)))
+
+    if _should_emit_named_update('data_quality_update', current_time):
+        asyncio.create_task(manager.broadcast(_build_data_quality_payload(current_time)))
     
-    # 广播消息到前端
-    asyncio.create_task(manager.broadcast(ws_message))
+    if _should_broadcast_packet(msg_type, func_code, current_time):
+        asyncio.create_task(manager.broadcast(ws_message))
     
-    # 记录数据到日志文件（旧方式已弃用，统一使用 RawDataRecorder）
-    # save_data_to_log(msg_type, message)
+
 
 
 # ================================================================
@@ -421,7 +1966,7 @@ def on_udp_message_received(message: dict):
 async def root():
     """根路径"""
     return {
-        "name": "Apollo GCS Web Backend",
+        "name": "GCS Web Backend",
         "version": "1.0.0",
         "status": "running"
     }
@@ -465,169 +2010,31 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/api/config/connection")
 async def get_connection_config():
     """获取连接配置"""
+    active_config = _reset_connection_config()
     return {
         "type": "connection_config",
-        "data": connection_config.dict(),
+        "data": active_config.dict(),
         "timestamp": int(time.time() * 1000)
     }
 
 @app.post("/api/config/connection")
 async def update_connection_config(config: ConnectionConfig):
-    """更新连接配置（智能判断：IP更新 vs 端口更新）"""
-    global connection_config, udp_server_started, udp_handler
-    
-    logger.info(f"更新连接配置: {config}")
-    
-    # 检测配置变化类型
-    # 1. 监听配置是否改变（监听地址或端口改变，需要重启UDP服务器）
-    listen_config_changed = (
-        connection_config.listenAddress != config.listenAddress or
-        connection_config.hostPort != config.hostPort or
-        connection_config.lidarSendPort != config.lidarSendPort or
-        connection_config.planningRecvPort != config.planningRecvPort
+    """固定部署口径下忽略运行时改写，仅返回当前固定配置。"""
+    active_config = _reset_connection_config()
+    logger.info(
+        "忽略运行时连接配置修改请求，继续使用固定链路: "
+        f"{active_config.listenAddress}:{active_config.hostPort} -> "
+        f"{active_config.remoteIp}:{active_config.commandRecvPort}"
     )
-    
-    # 2. 发送目标（IP+端口）是否改变（只需更新目标地址，不需要重启）
-    target_changed = (
-        connection_config.remoteIp != config.remoteIp or
-        connection_config.commandRecvPort != config.commandRecvPort
-    )
-    
-    # 更新配置对象
-    connection_config = config
-    
-    # 场景1: 仅监听配置改变（监听地址或端口）- 需要重启UDP服务器
-    if listen_config_changed and not target_changed:
-        logger.info(f"场景1: 监听配置已改变，重启UDP服务器")
-        logger.info(f"  监听地址: {config.listenAddress}")
-        logger.info(f"  监听端口: {config.hostPort}, {config.lidarSendPort}, {config.planningRecvPort}")
-        
-        if udp_handler and udp_server_started:
-            try:
-                await udp_handler.stop_server()
-                logger.info("UDP服务器已停止")
-                udp_server_started = False
-            except Exception as e:
-                logger.error(f"停止UDP服务器失败: {e}")
-        
-        # 等待端口完全释放
-        await asyncio.sleep(1.0)
-        
-        # 初始化UDP处理器（如果尚未初始化）
-        if udp_handler is None:
-            udp_handler = UDPHandler(on_udp_message_received)
-            logger.info("UDP处理器已初始化")
-        
-        try:
-            ports = [
-                connection_config.hostPort,
-                connection_config.lidarSendPort,
-                connection_config.planningRecvPort
-            ]
-            # 使用配置中的监听地址
-            await udp_handler.start_server(host=config.listenAddress, ports=ports)
-            udp_server_started = True
-            logger.info(f"✓ UDP服务器已重启")
-            logger.info(f"  监听地址: {config.listenAddress}")
-            logger.info(f"  监听端口: {ports}")
-            
-            await manager.broadcast({
-                "type": "config_update",
-                "config_type": "connection",
-                "data": config.dict(),
-                "timestamp": int(time.time() * 1000)
-            })
-            
-            return {"status": "success", "message": "端口配置已更新，UDP服务器已重启"}
-        except Exception as e:
-            logger.error(f"UDP服务器启动失败: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
-    # 场景2: 仅目标IP/端口改变 - 只需更新发送目标
-    elif target_changed and not listen_config_changed:
-        logger.info(f"场景2: 仅目标地址改变，更新发送目标")
-        logger.info(f"  发送目标: {connection_config.remoteIp}:{connection_config.commandRecvPort}")
-        
-        # 更新发送目标地址
-        if udp_handler and udp_server_started:
-            udp_handler.set_target(connection_config.remoteIp, connection_config.commandRecvPort)
-            logger.info(f"✓ UDP发送目标已更新: {connection_config.remoteIp}:{connection_config.commandRecvPort}")
-        else:
-            logger.warning("UDP服务器未运行，仅保存配置")
-        
-        await manager.broadcast({
-            "type": "config_update",
-            "config_type": "connection",
-            "data": config.dict(),
-            "timestamp": int(time.time() * 1000)
-        })
-        
-        return {"status": "success", "message": "配置已更新，发送目标已更改"}
-    
-    # 场景3: 无任何改变 - 仅保存配置
-    elif not target_changed and not listen_config_changed:
-        logger.info("场景3: 配置无变化，仅保存配置")
-        
-        await manager.broadcast({
-            "type": "config_update",
-            "config_type": "connection",
-            "data": config.dict(),
-            "timestamp": int(time.time() * 1000)
-        })
-        
-        return {"status": "success", "message": "配置已更新"}
-    
-    # 场景4: 监听配置和目标都改变 - 需要重启并更新目标
-    else:
-        logger.info(f"场景4: 监听配置和目标地址都改变")
-        
-        if udp_handler and udp_server_started:
-            try:
-                await udp_handler.stop_server()
-                logger.info("UDP服务器已停止")
-                udp_server_started = False
-            except Exception as e:
-                logger.error(f"停止UDP服务器失败: {e}")
-        
-        # 等待端口完全释放
-        await asyncio.sleep(1.0)
-        
-        # 初始化UDP处理器（如果尚未初始化）
-        if udp_handler is None:
-            udp_handler = UDPHandler(on_udp_message_received)
-            logger.info("UDP处理器已初始化")
-        
-        try:
-            ports = [
-                connection_config.hostPort,
-                connection_config.lidarSendPort,
-                connection_config.planningRecvPort
-            ]
-            # 使用配置中的监听地址
-            await udp_handler.start_server(
-                host=config.listenAddress,
-                ports=ports,
-                target_host=connection_config.remoteIp,
-                target_port=connection_config.commandRecvPort
-            )
-            udp_server_started = True
-            
-            logger.info(f"✓ UDP服务器已重启")
-            logger.info(f"  监听地址: {config.listenAddress}")
-            logger.info(f"  监听端口: {ports}")
-            logger.info(f"  发送目标: {connection_config.remoteIp}:{connection_config.commandRecvPort}")
-            
-            await manager.broadcast({
-                "type": "config_update",
-                "config_type": "connection",
-                "data": config.dict(),
-                "timestamp": int(time.time() * 1000)
-            })
-            
-            return {"status": "success", "message": "配置已更新，UDP服务器已重启"}
-        except Exception as e:
-            logger.error(f"UDP服务器启动失败: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+
+    await manager.broadcast({
+        "type": "config_update",
+        "config_type": "connection",
+        "data": active_config.dict(),
+        "timestamp": int(time.time() * 1000)
+    })
+
+    return {"status": "success", "message": "固定链路参数已生效", "data": active_config.dict()}
 
 @app.post("/api/udp/start")
 async def start_udp_server():
@@ -645,23 +2052,26 @@ async def start_udp_server():
         if udp_handler is None:
             udp_handler = UDPHandler(on_udp_message_received)
         
+        active_config = _reset_connection_config()
+
         # 启动UDP服务器
-        ports = [
-            connection_config.hostPort,
-            connection_config.lidarSendPort,
-            connection_config.planningRecvPort
-        ]
+        ports = _normalize_listen_ports()
         
-        await udp_handler.start_server(host="0.0.0.0", ports=ports)
+        await udp_handler.start_server(
+            host=active_config.listenAddress,
+            ports=ports,
+            target_host=active_config.remoteIp,
+            target_port=active_config.commandRecvPort,
+        )
         udp_server_started = True
         
         logger.info(f"UDP服务器已启动: {ports}")
-        logger.info(f"发送目标: {connection_config.remoteIp}:{connection_config.commandRecvPort}")
+        logger.info(f"发送目标: {active_config.remoteIp}:{active_config.commandRecvPort}")
         
         await manager.broadcast({
             "type": "udp_status_change",
             "status": "connected",
-            "config": connection_config.dict(),
+            "config": active_config.dict(),
             "timestamp": int(time.time() * 1000)
         })
         
@@ -811,7 +2221,7 @@ async def save_log_entry(data: dict):
 
 @app.post("/api/command")
 async def send_command_to_drone(request: CommandRequest):
-    """发送指令到飞控（实现6次连续发送机制）"""
+    """发送指令到飞控或规划模块，并保证上行最小间隔为500ms。"""
     try:
         command_type = request.type
         params = request.params
@@ -821,63 +2231,19 @@ async def send_command_to_drone(request: CommandRequest):
         packet = None
         target_host = None
         target_port = None
+        response_message = "指令已发送"
+        channel = _resolve_command_channel(command_type)
         
         if command_type == 'cmd_idx':
             cmd_id = params.get('cmdId', 0)
-            
-            async with command_send_lock:
-                global command_send_count, last_valid_cmd_idx
-                
-                if 1 <= cmd_id <= 25:  # 有效指令ID范围
-                    last_valid_cmd_idx = cmd_id
-                    command_send_count = 0
-                    
-                    # 构建6次连续发送的数据包（使用缓存的PID参数）
-                    payload = encode_extu_fcs_from_dict(
-                        cached_pid_params,
-                        cmd_idx=cmd_id,
-                        cmd_mission=0,
-                        cmd_mission_val=0.0
-                    )
-                    packet = encode_command_packet(NCLINK_SEND_EXTU_FCS, payload)
-                    
-                    # 选择目标端口
-                    target_host = connection_config.remoteIp
-                    target_port = connection_config.commandRecvPort
-                    
-                    # 连续发送6次
-                    if packet and udp_handler:
-                        for i in range(6):
-                            udp_handler.send_data(packet, target_host, target_port)
-                            if i < 5:  # 前5次发送后等待100ms
-                                await asyncio.sleep(0.1)
-                        
-                        # 第7次重置指令
-                        payload_zero = encode_extu_fcs_from_dict(
-                            cached_pid_params,
-                            cmd_idx=0,
-                            cmd_mission=0,
-                            cmd_mission_val=0.0
-                        )
-                        packet_zero = encode_command_packet(NCLINK_SEND_EXTU_FCS, payload_zero)
-                        udp_handler.send_data(packet_zero, target_host, target_port)
-                        
-                        return {
-                            "type": "command_response",
-                            "command": command_type,
-                            "status": "success",
-                            "message": f"指令{cmd_id}已连续发送6次，第7次已重置为0",
-                            "timestamp": int(time.time() * 1000)
-                        }
-                else:
-                    # 无效指令（如0），只发送1次
-                    payload = encode_extu_fcs_from_dict(
-                        cached_pid_params,
-                        cmd_idx=cmd_id,
-                        cmd_mission=0,
-                        cmd_mission_val=0.0
-                    )
-                    packet = encode_command_packet(NCLINK_SEND_EXTU_FCS, payload)
+
+            payload = encode_extu_fcs_from_dict(
+                cached_pid_params,
+                cmd_idx=cmd_id,
+                cmd_mission=0,
+                cmd_mission_val=0.0
+            )
+            packet = encode_command_packet(NCLINK_SEND_EXTU_FCS, payload)
         
         elif command_type == 'cmd_mission':
             # 前端现在使用 cmd_mission 作为参数名（区分 CmdIdx 和 CmdMission）
@@ -926,30 +2292,66 @@ async def send_command_to_drone(request: CommandRequest):
         
         # 发送数据包
         if packet and udp_handler:
-            # 根据指令类型选择目标端口
-            # cmd_idx和cmd_mission发送到飞控指令端口(18504)
-            # gcs_command和waypoints_upload发送到规划端口(18510)
-            if command_type in ['cmd_idx', 'cmd_mission']:
-                target_host = connection_config.remoteIp
-                target_port = connection_config.commandRecvPort  # 飞控指令接收端口
-            elif command_type in ['gcs_command', 'waypoints_upload']:
-                target_host = connection_config.remoteIp
-                target_port = connection_config.planningSendPort  # 规划指令端口
-            else:
-                # 其他指令也发送到飞控指令端口
-                target_host = connection_config.remoteIp
-                target_port = connection_config.commandRecvPort
-            
-            logger.info(f"发送目标: {target_host}:{target_port}")
-            udp_handler.send_data(packet, target_host, target_port)
-            
-            return {
-                "type": "command_response",
-                "command": command_type,
-                "status": "success",
-                "message": "指令已发送",
-                "timestamp": int(time.time() * 1000)
-            }
+            rate_limit_result = await _check_command_send_rate(command_type)
+            if rate_limit_result is not None:
+                return rate_limit_result
+
+            try:
+                # 根据指令类型选择目标端口
+                # cmd_idx和cmd_mission发送到飞控指令端口(18504)
+                # gcs_command和waypoints_upload发送到规划端口(18510)
+                if command_type in ['cmd_idx', 'cmd_mission']:
+                    target_host = connection_config.remoteIp
+                    target_port = connection_config.commandRecvPort  # 飞控指令接收端口
+                elif command_type in ['gcs_command', 'waypoints_upload']:
+                    target_host = connection_config.remoteIp
+                    target_port = connection_config.planningSendPort  # 规划指令端口
+                else:
+                    # 其他指令也发送到飞控指令端口
+                    target_host = connection_config.remoteIp
+                    target_port = connection_config.commandRecvPort
+
+                logger.info(f"发送目标: {target_host}:{target_port}")
+
+                if command_type == 'cmd_idx':
+                    cmd_id = params.get('cmdId', 0)
+                    for repeat_index in range(CMD_IDX_REPEAT_COUNT):
+                        udp_handler.send_data(packet, target_host, target_port)
+                        await _mark_command_sent(channel)
+
+                        if repeat_index < CMD_IDX_REPEAT_COUNT - 1:
+                            await asyncio.sleep(COMMAND_SEND_MIN_INTERVAL_SEC)
+
+                    if CMD_IDX_RESET_TO_ZERO:
+                        await asyncio.sleep(COMMAND_SEND_MIN_INTERVAL_SEC)
+                        payload_zero = encode_extu_fcs_from_dict(
+                            cached_pid_params,
+                            cmd_idx=0,
+                            cmd_mission=0,
+                            cmd_mission_val=0.0
+                        )
+                        packet_zero = encode_command_packet(NCLINK_SEND_EXTU_FCS, payload_zero)
+                        udp_handler.send_data(packet_zero, target_host, target_port)
+                        await _mark_command_sent(channel)
+                        response_message = (
+                            f"指令{cmd_id}已按500ms间隔连续发送{CMD_IDX_REPEAT_COUNT}次，"
+                            "末次已置0"
+                        )
+                    else:
+                        response_message = f"指令{cmd_id}已按500ms间隔连续发送{CMD_IDX_REPEAT_COUNT}次"
+                else:
+                    udp_handler.send_data(packet, target_host, target_port)
+                    await _mark_command_sent(channel)
+
+                return {
+                    "type": "command_response",
+                    "command": command_type,
+                    "status": "success",
+                    "message": response_message,
+                    "timestamp": int(time.time() * 1000)
+                }
+            finally:
+                await _release_command_channel(channel)
         else:
             return {
                 "type": "command_response",
@@ -1032,7 +2434,7 @@ Returns:
 
 async def handle_client_message(message: dict, websocket: WebSocket):
     """处理WebSocket客户端消息"""
-    global recording_active, current_session_id, recorder, cached_pid_params, replayer, replay_active, current_replay_file, replay_df_cache
+    global recording_active, current_session_id, recorder, cached_pid_params
     
     msg_type = message.get('type')
     
@@ -1071,29 +2473,94 @@ async def handle_client_message(message: dict, websocket: WebSocket):
         try:
             if action == 'start':
                 if not recording_active:
-                    session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    planned_case = _find_experiment_case()
+                    session_id = _build_session_id(planned_case)
                     
                     # 确定日志目录: Apollo-GCS-Web/Log/DSM
                     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
                     base_directory = os.path.join(project_root, 'Log', 'DSM')
-                    
-                    recorder = RawDataRecorder(session_id, base_directory)
+
+                    recorder = RawDataRecorder(
+                        session_id,
+                        base_directory,
+                        plan_case_id=getattr(planned_case, 'case_id', None),
+                        session_meta_patch=_build_recording_meta_patch(
+                            planned_case,
+                            case_id=getattr(planned_case, 'case_id', None),
+                            repeat_index=getattr(planned_case, 'repeat_index', None),
+                            analysis_run_id=session_id,
+                        ),
+                    )
+                    recorder.enabled_ports = _normalize_listen_ports()
+                    recorder.set_runtime_context(_refresh_experiment_runtime(latest_metrics={}, planned_case=planned_case))
                     recorder.start_recording()
                     
                     recording_active = True
                     current_session_id = session_id
                     
                     await manager.broadcast({
-                        "type": "recording_status",
-                        "is_active": True,
-                        "session_id": current_session_id,
-                        "timestamp": int(time.time() * 1000)
+                        **_build_recording_status_payload(True, current_session_id, recorder.get_session_info())
                     })
                     logger.info(f"WebSocket启动录制: {current_session_id}")
+
+                    runtime_defaults = _build_runtime_event_defaults(recorder.get_session_info())
+                    _record_session_event(
+                        recorder.get_session_info(),
+                        _build_contract_event(
+                            session_id=current_session_id,
+                            case_id=recorder.get_session_info().get('case_id'),
+                            event_type='operator_action',
+                            event_source='websocket',
+                            event_level='info',
+                            event_value='start_recording',
+                            event_detail='通过WebSocket开始录制',
+                            **runtime_defaults,
+                        ),
+                    )
+                    _record_session_event(
+                        recorder.get_session_info(),
+                        _build_contract_event(
+                            session_id=current_session_id,
+                            case_id=recorder.get_session_info().get('case_id'),
+                            event_type='record_start',
+                            event_source='websocket',
+                            event_level='info',
+                            event_value=current_session_id,
+                            event_detail='通过WebSocket开始录制',
+                            **runtime_defaults,
+                        ),
+                    )
                     
             elif action == 'stop':
                 if recording_active and recorder:
                     session_info = recorder.get_session_info()
+                    runtime_defaults = _build_runtime_event_defaults(recorder.get_session_info())
+                    _record_session_event(
+                        recorder.get_session_info(),
+                        _build_contract_event(
+                            session_id=current_session_id,
+                            case_id=recorder.get_session_info().get('case_id'),
+                            event_type='operator_action',
+                            event_source='websocket',
+                            event_level='info',
+                            event_value='stop_recording',
+                            event_detail='通过WebSocket停止录制',
+                            **runtime_defaults,
+                        ),
+                    )
+                    _record_session_event(
+                        recorder.get_session_info(),
+                        _build_contract_event(
+                            session_id=current_session_id,
+                            case_id=recorder.get_session_info().get('case_id'),
+                            event_type='record_stop',
+                            event_source='websocket',
+                            event_level='info',
+                            event_value=current_session_id,
+                            event_detail='通过WebSocket停止录制',
+                            **runtime_defaults,
+                        ),
+                    )
                     recorder.stop_recording()
                     
                     last_session_id = current_session_id
@@ -1101,11 +2568,7 @@ async def handle_client_message(message: dict, websocket: WebSocket):
                     current_session_id = None
                     
                     await manager.broadcast({
-                        "type": "recording_status",
-                        "is_active": False,
-                        "session_id": last_session_id,
-                        "session_info": session_info,
-                        "timestamp": int(time.time() * 1000)
+                        **_build_recording_status_payload(False, last_session_id, session_info)
                     })
                     logger.info(f"WebSocket停止录制: {last_session_id}")
             
@@ -1131,377 +2594,23 @@ async def handle_client_message(message: dict, websocket: WebSocket):
                 "timestamp": int(time.time() * 1000)
             })
 
-
-    elif msg_type == 'replay':
-        # 处理回放控制消息
-        action = message.get('action', '')
-        params = message.get('params', {})
-        
-        global replayer, replay_active, current_replay_file, replay_df_cache
-        
-        try:
-            if action == 'load':
-                # 加载回放文件
-                file_path = params.get('file_path')
-                if replayer is None:
-                    replayer = Replayer(manager.broadcast)
-                
-                total_time = replayer.load_file(file_path)
-                current_replay_file = file_path
-                replay_active = True
-                
-                # 缓存 DataFrame 供变量分析使用
-                replay_df_cache = replayer.df
-                
-                # 发送系统模式切换通知
-                await manager.broadcast({
-                    "type": "system_mode_change",
-                    "mode": "REPLAY",
-                    "timestamp": int(time.time() * 1000)
-                })
-                
-                await websocket.send_json({
-                    "type": "replay_response",
-                    "action": "load",
-                    "status": "success",
-                    "total_time": total_time,
-                    "timestamp": int(time.time() * 1000)
-                })
-            
-            elif action == 'play':
-                # 开始播放
-                if replayer:
-                    replayer.play()
-                    await replayer.start()
-                    
-                    await websocket.send_json({
-                        "type": "replay_response",
-                        "action": "play",
-                        "status": "success",
-                        "timestamp": int(time.time() * 1000)
-                    })
-            
-            elif action == 'pause':
-                # 暂停播放
-                if replayer:
-                    replayer.pause()
-                    
-                    await websocket.send_json({
-                        "type": "replay_response",
-                        "action": "pause",
-                        "status": "success",
-                        "timestamp": int(time.time() * 1000)
-                    })
-            
-            elif action == 'seek':
-                # 跳转
-                progress_percent = params.get('progress_percent', 0)
-                if replayer:
-                    replayer.seek(progress_percent)
-                    
-                    await websocket.send_json({
-                        "type": "replay_response",
-                        "action": "seek",
-                        "status": "success",
-                        "progress": progress_percent,
-                        "timestamp": int(time.time() * 1000)
-                    })
-            
-            elif action == 'set_speed':
-                # 设置播放速度
-                speed = params.get('speed', 1.0)
-                if replayer:
-                    replayer.set_speed(speed)
-                    
-                    await websocket.send_json({
-                        "type": "replay_response",
-                        "action": "set_speed",
-                        "status": "success",
-                        "speed": speed,
-                        "timestamp": int(time.time() * 1000)
-                    })
-            
-            elif action == 'stop':
-                # 停止回放
-                if replayer:
-                    await replayer.stop()
-                    replay_active = False
-                    current_replay_file = None
-                    
-                    # 发送系统模式切换通知
-                    await manager.broadcast({
-                        "type": "system_mode_change",
-                        "mode": "REALTIME",
-                        "timestamp": int(time.time() * 1000)
-                    })
-                    
-                    await websocket.send_json({
-                        "type": "replay_response",
-                        "action": "stop",
-                        "status": "success",
-                        "timestamp": int(time.time() * 1000)
-                    })
-            
-            else:
-                await websocket.send_json({
-                    "type": "replay_response",
-                    "action": action,
-                    "status": "error",
-                    "message": f"未知回放操作: {action}",
-                    "timestamp": int(time.time() * 1000)
-                })
-        
-        except Exception as e:
-            logger.error(f"处理回放请求失败: {e}")
-            await websocket.send_json({
-                "type": "replay_response",
-                "action": action,
-                "status": "error",
-                "message": str(e),
-                "timestamp": int(time.time() * 1000)
-            })
-
-# ================================================================
-# 录制控制 API
-# ================================================================
-
-# ================================================================
-# 回放控制 API
-# ================================================================
-
-@app.get("/api/replay/files")
-async def get_replay_files():
-    """获取所有可用的回放文件列表"""
-    global replayer
-    
-    if replayer is None:
-        replayer = Replayer(manager.broadcast)
-    
-    files = replayer.get_data_list()
-    
-    # 格式化文件信息
-    file_list = []
-    for file_info in files:
-        file_list.append({
-            "name": file_info['name'],
-            "path": file_info['path'],
-            "size": file_info['size'],
-            "date": datetime.fromtimestamp(file_info['date']).strftime("%Y-%m-%d %H:%M:%S")
-        })
-    
-    return {
-        "type": "replay_files",
-        "files": file_list,
-        "count": len(file_list),
-        "timestamp": int(time.time() * 1000)
-    }
-
-@app.post("/api/replay/upload")
-async def upload_replay_file(file: UploadFile = File(...)):
-    """上传回放文件"""
-    global replayer, replay_df_cache, replay_active, current_replay_file
-    
-    try:
-        # 确保 Log 目录存在
-        log_dir = 'Log'
-        os.makedirs(log_dir, exist_ok=True)
-        
-        # 保存上传的文件
-        file_path = os.path.join(log_dir, file.filename)
-        
-        # 写入文件
-        with open(file_path, 'wb') as f:
-            content = await file.read()
-            f.write(content)
-        
-        logger.info(f"回放文件已上传: {file_path}")
-        
-        return {
-            "status": "success",
-            "message": "文件上传成功",
-            "file_path": file_path,
-            "timestamp": int(time.time() * 1000)
-        }
-    except Exception as e:
-        logger.error(f"上传回放文件失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/replay/status")
-async def get_replay_status():
-    """获取当前回放状态"""
-    global replayer, replay_active, current_replay_file
-    
-    if replayer:
-        status = replayer.get_status()
-        status['replay_active'] = replay_active
-        status['current_file'] = current_replay_file
-    else:
-        status = {
-            'is_loaded': False,
-            'is_playing': False,
-            'replay_active': False,
-            'current_file': None,
-            'current_idx': 0,
-            'total_rows': 0,
-            'total_time': 0.0,
-            'speed': 1.0,
-            'progress': 0.0,
-            'current_time': 0.0
-        }
-    
-    return {
-        "type": "replay_status",
-        "status": status,
-        "timestamp": int(time.time() * 1000)
-    }
-
-@app.post("/api/replay/control")
-async def replay_control(request: ReplayControlRequest):
-    """回放控制接口"""
-    global replayer, replay_df_cache, replay_active, current_replay_file
-    
-    try:
-        action = request.action
-        
-        if action == 'load':
-            # 加载回放文件
-            if not request.file_path:
-                raise HTTPException(status_code=400, detail="未指定文件路径")
-            
-            if replayer is None:
-                replayer = Replayer(manager.broadcast)
-            
-            total_time = replayer.load_file(request.file_path)
-            current_replay_file = request.file_path
-            replay_active = True
-            
-            # 重要：缓存 DataFrame 供变量分析使用
-            replay_df_cache = replayer.df
-            logger.info(f"[REST API] 回放数据已缓存: {len(replayer.df)} 行数据")
-            
-            # 广播系统模式切换
-            await manager.broadcast({
-                "type": "system_mode_change",
-                "mode": "REPLAY",
-                "timestamp": int(time.time() * 1000)
-            })
-            
-            return {
-                "type": "replay_response",
-                "action": "load",
-                "status": "success",
-                "total_time": total_time,
-                "timestamp": int(time.time() * 1000)
-            }
-        
-        elif action == 'play':
-            # 开始播放
-            if replayer:
-                replayer.play()
-                await replayer.start()
-                
-                return {
-                    "type": "replay_response",
-                    "action": "play",
-                    "status": "success",
-                    "timestamp": int(time.time() * 1000)
-                }
-        
-        elif action == 'pause':
-            # 暂停播放
-            if replayer:
-                replayer.pause()
-                
-                return {
-                    "type": "replay_response",
-                    "action": "pause",
-                    "status": "success",
-                    "timestamp": int(time.time() * 1000)
-                }
-        
-        elif action == 'seek':
-            # 跳转
-            if request.progress_percent is None:
-                raise HTTPException(status_code=400, detail="未指定进度百分比")
-            
-            if replayer:
-                replayer.seek(request.progress_percent)
-                
-                return {
-                    "type": "replay_response",
-                    "action": "seek",
-                    "status": "success",
-                    "progress": request.progress_percent,
-                    "timestamp": int(time.time() * 1000)
-                }
-        
-        elif action == 'set_speed':
-            # 设置播放速度
-            if request.speed is None:
-                raise HTTPException(status_code=400, detail="未指定播放速度")
-            
-            if replayer:
-                replayer.set_speed(request.speed)
-                
-                return {
-                    "type": "replay_response",
-                    "action": "set_speed",
-                    "status": "success",
-                    "speed": request.speed,
-                    "timestamp": int(time.time() * 1000)
-                }
-        
-        elif action == 'stop':
-            # 停止回放
-            if replayer:
-                await replayer.stop()
-                replay_active = False
-                current_replay_file = None
-                
-                # 广播系统模式切换
-                await manager.broadcast({
-                    "type": "system_mode_change",
-                    "mode": "REALTIME",
-                    "timestamp": int(time.time() * 1000)
-                })
-                
-                return {
-                    "type": "replay_response",
-                    "action": "stop",
-                    "status": "success",
-                    "timestamp": int(time.time() * 1000)
-                }
-        
-        else:
-            raise HTTPException(status_code=400, detail=f"未知操作: {action}")
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"回放控制失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
 @app.get("/api/recording/status")
 async def get_recording_status():
     """获取当前录制状态"""
-    global recording_active, current_session_id, recorder
+    global recording_active, current_session_id, recorder, last_standardization_result, last_evaluation_result, last_optimization_result
     
     session_info = None
-    if recorder and recording_active:
+    if recorder:
         session_info = recorder.get_session_info()
     
     return {
-        "type": "recording_status",
-        "is_active": recording_active,
-        "session_id": current_session_id,
-        "session_info": session_info,
-        "timestamp": int(time.time() * 1000)
+        **_build_recording_status_payload(recording_active, current_session_id, session_info)
     }
 
 @app.post("/api/recording/start")
 async def start_recording(config: RecordingConfig):
     """开始数据录制"""
-    global recording_active, current_session_id, recorder
+    global recording_active, current_session_id, recorder, selected_plan_case_id, last_standardization_result, last_dsm_result, last_evaluation_result, last_optimization_result
     
     if recording_active:
         logger.warning("录制已在进行中")
@@ -1513,24 +2622,131 @@ async def start_recording(config: RecordingConfig):
         }
     
     try:
+        planned_case = _find_experiment_case(config.plan_case_id)
+        if planned_case is not None:
+            selected_plan_case_id = experiment_case_manager.select_case(planned_case.case_id).case_id
+        elif config.plan_case_id:
+            selected_plan_case_id = str(config.plan_case_id).strip().upper()
+            experiment_case_manager.selected_case_id = selected_plan_case_id
+
+        resolved_plan_case_id = getattr(planned_case, 'case_id', None) or selected_plan_case_id or None
+        resolved_repeat_index = getattr(planned_case, 'repeat_index', None)
+        if resolved_repeat_index is None and config.repeat_index is not None:
+            resolved_repeat_index = config.repeat_index
+
         # 生成会话ID（如果未提供）
         if not config.session_id:
-            config.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            config.session_id = _build_session_id(
+                planned_case,
+                case_id=resolved_plan_case_id,
+                repeat_index=resolved_repeat_index,
+            )
+        else:
+            try:
+                _validate_session_id_contract(
+                    config.session_id,
+                    plan_case_id=resolved_plan_case_id,
+                    repeat_index=resolved_repeat_index,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if not config.base_directory:
+            base_directory = os.path.join(project_root, 'Log', 'Records')
+        elif os.path.isabs(config.base_directory):
+            base_directory = config.base_directory
+        else:
+            base_directory = os.path.join(project_root, config.base_directory)
         
         # 创建录制器
-        recorder = RawDataRecorder(config.session_id, config.base_directory)
+        recorder = RawDataRecorder(
+            config.session_id,
+            base_directory,
+            case_id_override=config.case_id or None,
+            plan_case_id=selected_plan_case_id,
+            session_meta_patch=_build_recording_meta_patch(
+                planned_case,
+                case_id=resolved_plan_case_id,
+                repeat_index=resolved_repeat_index,
+                scenario_id=config.scenario_id or None,
+                notes=config.notes or '',
+                experiment_type=config.experiment_type or None,
+                figure_run_id=config.figure_run_id or None,
+                figure_batch_id=config.figure_batch_id or None,
+                figure_batch_group=config.figure_batch_group or None,
+                chapter_target=config.chapter_target or None,
+                law_validation_scope=config.law_validation_scope or None,
+                analysis_run_id=config.session_id,
+            ),
+        )
+        recorder.enabled_ports = _normalize_listen_ports()
+        recorder.set_runtime_context(_refresh_experiment_runtime(latest_metrics={}, planned_case=planned_case))
         recorder.start_recording()
+        runtime_defaults = _build_runtime_event_defaults(recorder.get_session_info())
+        _record_session_event(
+            recorder.get_session_info(),
+            _build_contract_event(
+                session_id=config.session_id,
+                case_id=recorder.get_session_info().get('case_id'),
+                event_type='operator_action',
+                event_source='rest_api',
+                event_level='info',
+                event_value='start_recording',
+                event_detail='通过REST开始录制',
+                **runtime_defaults,
+            ),
+        )
+        _record_session_event(
+            recorder.get_session_info(),
+            _build_contract_event(
+                session_id=config.session_id,
+                case_id=recorder.get_session_info().get('case_id'),
+                event_type='record_start',
+                event_source='rest_api',
+                event_level='info',
+                event_value=config.session_id,
+                event_detail='通过REST开始录制',
+                **runtime_defaults,
+            ),
+        )
+        _record_session_event(
+            recorder.get_session_info(),
+            _build_contract_event(
+                session_id=config.session_id,
+                case_id=recorder.get_session_info().get('case_id'),
+                event_type='task_change',
+                event_source='experiment_context',
+                event_level='info',
+                event_value=current_experiment_runtime.get('task', {}).get('task_name', ''),
+                event_detail='录制启动时绑定当前任务上下文',
+                **runtime_defaults,
+            ),
+        )
+        _record_session_event(
+            recorder.get_session_info(),
+            _build_contract_event(
+                session_id=config.session_id,
+                case_id=recorder.get_session_info().get('case_id'),
+                event_type='scenario_tag',
+                event_source='experiment_context',
+                event_level='info',
+                event_value=current_experiment_runtime.get('scenario', {}).get('scenario_id', 'scenario_default'),
+                event_detail='录制启动时绑定当前场景标签',
+                **runtime_defaults,
+            ),
+        )
         
         recording_active = True
         current_session_id = config.session_id
+        last_standardization_result = None
+        last_dsm_result = None
+        last_evaluation_result = None
+        last_optimization_result = None
         
         # 广播状态更新
-        await manager.broadcast({
-            "type": "recording_status",
-            "is_active": True,
-            "session_id": current_session_id,
-            "timestamp": int(time.time() * 1000)
-        })
+        await manager.broadcast(_build_recording_status_payload(True, current_session_id, recorder.get_session_info()))
+        await manager.broadcast(_build_pipeline_status_payload(True, current_session_id, recorder.get_session_info(), None, None, None, None))
         
         logger.info(f"开始录制: {current_session_id}")
         
@@ -1539,6 +2755,8 @@ async def start_recording(config: RecordingConfig):
             "status": "success",
             "message": "录制已开始",
             "session_id": current_session_id,
+            "session_info": recorder.get_session_info(),
+            "experiment_context": current_experiment_runtime,
             "timestamp": int(time.time() * 1000)
         }
     except Exception as e:
@@ -1548,7 +2766,7 @@ async def start_recording(config: RecordingConfig):
 @app.post("/api/recording/stop")
 async def stop_recording():
     """停止数据录制"""
-    global recording_active, current_session_id, recorder
+    global recording_active, current_session_id, recorder, last_standardization_result, last_dsm_result, last_evaluation_result, last_optimization_result
     
     if not recording_active:
         return {
@@ -1559,22 +2777,88 @@ async def stop_recording():
         }
     
     try:
+        session_info = None
         if recorder:
-            session_info = recorder.get_session_info()
+            runtime_defaults = _build_runtime_event_defaults(recorder.get_session_info())
+            _record_session_event(
+                recorder.get_session_info(),
+                _build_contract_event(
+                    session_id=current_session_id,
+                    case_id=recorder.get_session_info().get('case_id'),
+                    event_type='operator_action',
+                    event_source='rest_api',
+                    event_level='info',
+                    event_value='stop_recording',
+                    event_detail='通过REST停止录制',
+                    **runtime_defaults,
+                ),
+            )
+            _record_session_event(
+                recorder.get_session_info(),
+                _build_contract_event(
+                    session_id=current_session_id,
+                    case_id=recorder.get_session_info().get('case_id'),
+                    event_type='record_stop',
+                    event_source='rest_api',
+                    event_level='info',
+                    event_value=current_session_id,
+                    event_detail='通过REST停止录制',
+                    **runtime_defaults,
+                ),
+            )
             recorder.stop_recording()
+            session_info = recorder.get_session_info()
+            last_standardization_result = _run_session_standardization(session_info)
+            if last_standardization_result is not None:
+                session_info['standardization'] = last_standardization_result
+                _record_pipeline_stage_event(session_info, 'standardization', last_standardization_result)
+            last_dsm_result = _run_session_dsm(session_info, last_standardization_result)
+            if last_dsm_result is not None:
+                session_info['dsm'] = last_dsm_result
+                _record_pipeline_stage_event(session_info, 'dsm', last_dsm_result)
+            last_evaluation_result = _run_session_evaluation(session_info, last_dsm_result)
+            if last_evaluation_result is not None:
+                session_info['evaluation'] = last_evaluation_result
+                _record_pipeline_stage_event(session_info, 'evaluation', last_evaluation_result)
+            last_optimization_result = _run_session_optimization(session_info, last_evaluation_result)
+            if last_optimization_result is not None:
+                session_info['optimization'] = last_optimization_result
+                _record_pipeline_stage_event(session_info, 'optimization', last_optimization_result)
+            _update_session_meta_status(
+                session_info,
+                standardization_result=last_standardization_result,
+                dsm_result=last_dsm_result,
+                evaluation_result=last_evaluation_result,
+                optimization_result=last_optimization_result,
+            )
+            _persist_pipeline_status(
+                session_info,
+                _build_pipeline_status_data(False, session_info, last_standardization_result, last_dsm_result, last_evaluation_result, last_optimization_result),
+            )
         
         recording_active = False
         session_id = current_session_id
         current_session_id = None
         
         # 广播状态更新
-        await manager.broadcast({
-            "type": "recording_status",
-            "is_active": False,
-            "session_id": session_id,
-            "session_info": session_info,
-            "timestamp": int(time.time() * 1000)
-        })
+        await manager.broadcast(_build_recording_status_payload(False, session_id, session_info))
+        await manager.broadcast(_build_pipeline_status_payload(False, session_id, session_info, last_standardization_result, last_dsm_result, last_evaluation_result, last_optimization_result))
+        figure_asset_status_payload = _build_figure_asset_status_payload(
+            session_id,
+            session_info,
+            _build_pipeline_status_data(False, session_info, last_standardization_result, last_dsm_result, last_evaluation_result, last_optimization_result),
+        )
+        if figure_asset_status_payload is not None:
+            await manager.broadcast(figure_asset_status_payload)
+        dsm_summary_payload = _build_dsm_summary_payload(session_id, session_info, last_dsm_result)
+        if dsm_summary_payload is not None:
+            await manager.broadcast(dsm_summary_payload)
+        evaluation_summary_payload = _build_evaluation_summary_payload(session_id, session_info, last_evaluation_result)
+        if evaluation_summary_payload is not None:
+            await manager.broadcast(evaluation_summary_payload)
+        architecture_recommendation_payload = _build_architecture_recommendation_payload(session_id, session_info, last_optimization_result)
+        if architecture_recommendation_payload is not None:
+            await manager.broadcast(architecture_recommendation_payload)
         
         logger.info(f"录制已停止: {session_id}")
         
@@ -1584,11 +2868,301 @@ async def stop_recording():
             "message": "录制已停止",
             "session_id": session_id,
             "session_info": session_info,
+            "standardization": last_standardization_result,
+            "dsm": last_dsm_result,
+            "evaluation": last_evaluation_result,
+            "optimization": last_optimization_result,
+            "experiment_context": current_experiment_runtime,
             "timestamp": int(time.time() * 1000)
         }
     except Exception as e:
         logger.error(f"停止录制失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/experiment/plan")
+async def get_experiment_plan():
+    return {
+        'type': 'experiment_plan',
+        'selected_case_id': selected_plan_case_id,
+        'cases': [_serialize_experiment_case(case) for case in experiment_plan_cases],
+        'architecture_profiles': experiment_case_manager.list_architecture_profiles(),
+        'timestamp': int(time.time() * 1000)
+    }
+
+
+@app.get("/api/experiment/runtime")
+async def get_experiment_runtime():
+    runtime_payload = _refresh_experiment_runtime(latest_metrics={})
+    return {
+        'type': 'experiment_runtime',
+        'runtime': runtime_payload,
+        'selected_case_id': selected_plan_case_id,
+        'timestamp': int(time.time() * 1000)
+    }
+
+
+@app.post("/api/experiment/select-case")
+async def select_experiment_case(selection: ExperimentCaseSelection):
+    global selected_plan_case_id
+
+    planned_case = _find_experiment_case(selection.case_id)
+    if planned_case is None:
+        raise HTTPException(status_code=404, detail=f"未知实验 case: {selection.case_id}")
+
+    selected_plan_case_id = experiment_case_manager.select_case(planned_case.case_id).case_id
+    runtime_payload = _refresh_experiment_runtime(latest_metrics={}, planned_case=planned_case)
+    if recorder:
+        recorder.apply_session_meta_patch(_build_recording_meta_patch(planned_case))
+        recorder.set_runtime_context(runtime_payload)
+        recorder._write_session_meta()
+        runtime_defaults = _build_runtime_event_defaults(recorder.get_session_info())
+        _record_session_event(
+            recorder.get_session_info(),
+            _build_contract_event(
+                session_id=current_session_id,
+                case_id=recorder.get_session_info().get('case_id'),
+                event_type='task_change',
+                event_source='experiment_context',
+                event_level='info',
+                event_value=runtime_payload.get('task', {}).get('task_name', ''),
+                event_detail='切换实验 case 后更新任务上下文',
+                **runtime_defaults,
+            ),
+        )
+        _record_session_event(
+            recorder.get_session_info(),
+            _build_contract_event(
+                session_id=current_session_id,
+                case_id=recorder.get_session_info().get('case_id'),
+                event_type='scenario_tag',
+                event_source='experiment_context',
+                event_level='info',
+                event_value=runtime_payload.get('scenario', {}).get('scenario_id', 'scenario_default'),
+                event_detail='切换实验 case 后更新场景标签',
+                **runtime_defaults,
+            ),
+        )
+
+    await manager.broadcast(_build_ws_payload(
+        'experiment_context_update',
+        data=runtime_payload,
+        session_id=current_session_id,
+        case_id=getattr(recorder, 'case_id', None) if recorder else None,
+    ))
+
+    return {
+        'type': 'experiment_case_selected',
+        'selected_case_id': selected_plan_case_id,
+        'runtime': runtime_payload,
+        'timestamp': int(time.time() * 1000)
+    }
+
+
+@app.post('/api/analysis/dsm')
+async def run_dsm_analysis(request: DsmAnalysisRequest):
+    global last_dsm_result, last_evaluation_result, last_optimization_result
+
+    session_dir = request.session_dir.strip()
+    if not session_dir and request.session_id:
+        session_dir = os.path.join(os.path.dirname(current_dir), 'Log', 'Records', request.session_id)
+
+    if not session_dir:
+        raise HTTPException(status_code=400, detail='缺少 session_dir 或 session_id')
+
+    if not os.path.isdir(session_dir):
+        raise HTTPException(status_code=404, detail=f'会话目录不存在: {session_dir}')
+
+    session_info = {
+        'data_directory': session_dir,
+        'session_id': request.session_id or os.path.basename(session_dir),
+        'case_id': os.path.basename(session_dir),
+    }
+    last_dsm_result = _run_session_dsm(session_info, None, request.start_time, request.end_time)
+    if last_dsm_result is None:
+        raise HTTPException(status_code=500, detail='DSM 分析未产生结果')
+    last_evaluation_result = _run_session_evaluation(session_info, last_dsm_result)
+    last_optimization_result = _run_session_optimization(session_info, last_evaluation_result)
+    _update_session_meta_status(
+        session_info,
+        standardization_result=last_standardization_result,
+        dsm_result=last_dsm_result,
+        evaluation_result=last_evaluation_result,
+        optimization_result=last_optimization_result,
+    )
+    _persist_pipeline_status(
+        session_info,
+        _build_pipeline_status_data(False, session_info, last_standardization_result, last_dsm_result, last_evaluation_result, last_optimization_result),
+    )
+
+    session_id = request.session_id or os.path.basename(session_dir)
+    await manager.broadcast(_build_pipeline_status_payload(False, session_id, session_info, last_standardization_result, last_dsm_result, last_evaluation_result, last_optimization_result))
+    figure_asset_status_payload = _build_figure_asset_status_payload(
+        session_id,
+        session_info,
+        _build_pipeline_status_data(False, session_info, last_standardization_result, last_dsm_result, last_evaluation_result, last_optimization_result),
+    )
+    if figure_asset_status_payload is not None:
+        await manager.broadcast(figure_asset_status_payload)
+    dsm_summary_payload = _build_dsm_summary_payload(session_id, session_info, last_dsm_result)
+    if dsm_summary_payload is not None:
+        await manager.broadcast(dsm_summary_payload)
+    evaluation_summary_payload = _build_evaluation_summary_payload(session_id, session_info, last_evaluation_result)
+    if evaluation_summary_payload is not None:
+        await manager.broadcast(evaluation_summary_payload)
+    architecture_recommendation_payload = _build_architecture_recommendation_payload(session_id, session_info, last_optimization_result)
+    if architecture_recommendation_payload is not None:
+        await manager.broadcast(architecture_recommendation_payload)
+
+    return {
+        'type': 'dsm_analysis_response',
+        'status': 'success' if last_dsm_result.get('success') else 'failed',
+        'result': last_dsm_result,
+        'evaluation': last_evaluation_result,
+        'optimization': last_optimization_result,
+        'timestamp': int(time.time() * 1000)
+    }
+
+
+@app.post('/api/analysis/evaluation')
+async def run_evaluation_analysis(request: EvaluationAnalysisRequest):
+    global last_evaluation_result, last_optimization_result
+
+    session_dir = request.session_dir.strip()
+    if not session_dir and request.session_id:
+        session_dir = os.path.join(os.path.dirname(current_dir), 'Log', 'Records', request.session_id)
+
+    if not session_dir:
+        raise HTTPException(status_code=400, detail='缺少 session_dir 或 session_id')
+
+    if not os.path.isdir(session_dir):
+        raise HTTPException(status_code=404, detail=f'会话目录不存在: {session_dir}')
+
+    session_info = {
+        'data_directory': session_dir,
+        'session_id': request.session_id or os.path.basename(session_dir),
+        'case_id': os.path.basename(session_dir),
+    }
+    dsm_result = {
+        'status': 'ready' if os.path.exists(os.path.join(session_dir, 'analysis', 'dsm_report.json')) else 'blocked'
+    }
+    last_evaluation_result = _run_session_evaluation(
+        session_info,
+        dsm_result,
+        baseline_profile_id=request.baseline_profile_id or None,
+        candidate_profile_id=request.candidate_profile_id or None,
+    )
+    if last_evaluation_result is None:
+        raise HTTPException(status_code=500, detail='Evaluation 分析未产生结果')
+    last_optimization_result = _run_session_optimization(
+        session_info,
+        last_evaluation_result,
+        baseline_profile_id=request.baseline_profile_id or None,
+        current_profile_id=request.candidate_profile_id or None,
+    )
+
+    _update_session_meta_status(
+        session_info,
+        standardization_result=last_standardization_result,
+        dsm_result=dsm_result,
+        evaluation_result=last_evaluation_result,
+        optimization_result=last_optimization_result,
+    )
+    _persist_pipeline_status(
+        session_info,
+        _build_pipeline_status_data(False, session_info, last_standardization_result, dsm_result, last_evaluation_result, last_optimization_result),
+    )
+
+    session_id = request.session_id or os.path.basename(session_dir)
+    await manager.broadcast(_build_pipeline_status_payload(False, session_id, session_info, last_standardization_result, dsm_result, last_evaluation_result, last_optimization_result))
+    figure_asset_status_payload = _build_figure_asset_status_payload(
+        session_id,
+        session_info,
+        _build_pipeline_status_data(False, session_info, last_standardization_result, dsm_result, last_evaluation_result, last_optimization_result),
+    )
+    if figure_asset_status_payload is not None:
+        await manager.broadcast(figure_asset_status_payload)
+    evaluation_summary_payload = _build_evaluation_summary_payload(session_id, session_info, last_evaluation_result)
+    if evaluation_summary_payload is not None:
+        await manager.broadcast(evaluation_summary_payload)
+    architecture_recommendation_payload = _build_architecture_recommendation_payload(session_id, session_info, last_optimization_result)
+    if architecture_recommendation_payload is not None:
+        await manager.broadcast(architecture_recommendation_payload)
+
+    return {
+        'type': 'evaluation_analysis_response',
+        'status': 'success' if last_evaluation_result.get('success') else 'failed',
+        'result': last_evaluation_result,
+        'optimization': last_optimization_result,
+        'timestamp': int(time.time() * 1000)
+    }
+
+
+@app.post('/api/analysis/optimization')
+async def run_optimization_analysis(request: OptimizationAnalysisRequest):
+    global last_optimization_result
+
+    session_dir = request.session_dir.strip()
+    if not session_dir and request.session_id:
+        session_dir = os.path.join(os.path.dirname(current_dir), 'Log', 'Records', request.session_id)
+
+    if not session_dir:
+        raise HTTPException(status_code=400, detail='缺少 session_dir 或 session_id')
+
+    if not os.path.isdir(session_dir):
+        raise HTTPException(status_code=404, detail=f'会话目录不存在: {session_dir}')
+
+    session_info = {
+        'data_directory': session_dir,
+        'session_id': request.session_id or os.path.basename(session_dir),
+        'case_id': os.path.basename(session_dir),
+    }
+    evaluation_result = {
+        'status': 'ready' if os.path.exists(os.path.join(session_dir, 'analysis', 'evaluation_result.json')) else 'blocked'
+    }
+    last_optimization_result = _run_session_optimization(
+        session_info,
+        evaluation_result,
+        baseline_profile_id=request.baseline_profile_id or None,
+        current_profile_id=request.current_profile_id or None,
+        pop_size=request.pop_size,
+        n_gen=request.n_gen,
+        seed=request.seed,
+    )
+    if last_optimization_result is None:
+        raise HTTPException(status_code=500, detail='Optimization 分析未产生结果')
+
+    _update_session_meta_status(
+        session_info,
+        standardization_result=last_standardization_result,
+        dsm_result=last_dsm_result,
+        evaluation_result=evaluation_result,
+        optimization_result=last_optimization_result,
+    )
+    _persist_pipeline_status(
+        session_info,
+        _build_pipeline_status_data(False, session_info, last_standardization_result, last_dsm_result, evaluation_result, last_optimization_result),
+    )
+
+    session_id = request.session_id or os.path.basename(session_dir)
+    await manager.broadcast(_build_pipeline_status_payload(False, session_id, session_info, last_standardization_result, last_dsm_result, evaluation_result, last_optimization_result))
+    figure_asset_status_payload = _build_figure_asset_status_payload(
+        session_id,
+        session_info,
+        _build_pipeline_status_data(False, session_info, last_standardization_result, last_dsm_result, evaluation_result, last_optimization_result),
+    )
+    if figure_asset_status_payload is not None:
+        await manager.broadcast(figure_asset_status_payload)
+    architecture_recommendation_payload = _build_architecture_recommendation_payload(session_id, session_info, last_optimization_result)
+    if architecture_recommendation_payload is not None:
+        await manager.broadcast(architecture_recommendation_payload)
+
+    return {
+        'type': 'optimization_analysis_response',
+        'status': 'success' if last_optimization_result.get('success') else 'failed',
+        'result': last_optimization_result,
+        'timestamp': int(time.time() * 1000)
+    }
 
 @app.get("/api/recording/sessions")
 async def list_sessions(base_directory: str = "data"):
@@ -1605,8 +3179,9 @@ async def list_sessions(base_directory: str = "data"):
         for session_id in os.listdir(base_directory):
             session_path = os.path.join(base_directory, session_id)
             if os.path.isdir(session_path):
-                # 统计文件数量和大小
-                file_count = len([f for f in os.listdir(session_path) if os.path.isfile(os.path.join(session_path, f))])
+                file_count = 0
+                for _, _, files in os.walk(session_path):
+                    file_count += len(files)
                 
                 sessions.append({
                     "session_id": session_id,
@@ -1623,218 +3198,6 @@ async def list_sessions(base_directory: str = "data"):
         logger.error(f"列出会话失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ================================================================
-# DSM报告生成 API
-# ================================================================
-
-@app.post("/api/dsm/generate")
-async def generate_dsm_report(request: DSMReportRequest):
-    """生成DSM分析报告"""
-    try:
-        logger.info(f"开始生成DSM报告: {request.session_id}")
-        
-        # 生成DSM报告
-        report = dsm_generator.generate_dsm_report(
-            session_id=request.session_id,
-            base_directory=request.base_directory,
-            start_time=request.start_time,
-            end_time=request.end_time,
-            output_format=request.output_format
-        )
-        
-        # 广播通知
-        await manager.broadcast({
-            "type": "dsm_report_generated",
-            "session_id": request.session_id,
-            "output_path": report.get("output_path"),
-            "timestamp": int(time.time() * 1000)
-        })
-        
-        logger.info(f"DSM报告生成成功: {report.get('output_path')}")
-        
-        return {
-            "type": "dsm_report_response",
-            "status": "success",
-            "message": "DSM报告生成成功",
-            "report": report,
-            "timestamp": int(time.time() * 1000)
-        }
-    except Exception as e:
-        logger.error(f"生成DSM报告失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/dsm/config")
-async def get_dsm_config():
-    """获取DSM映射配置"""
-    return {
-        "type": "dsm_config",
-        "config": mapping_config.to_dict(),
-        "timestamp": int(time.time() * 1000)
-    }
-
-@app.post("/api/dsm/config")
-async def update_dsm_config(config_data: Dict[str, Any]):
-    """更新DSM映射配置"""
-    try:
-        mapping_config.save_config(config_data)
-        
-        # 重新创建DSM生成器以应用新配置
-        global dsm_generator
-        dsm_generator = DSMGenerator(mapping_config)
-        
-        # 广播配置更新
-        await manager.broadcast({
-            "type": "dsm_config_updated",
-            "config": mapping_config.to_dict(),
-            "timestamp": int(time.time() * 1000)
-        })
-        
-        logger.info("DSM映射配置已更新")
-        
-        return {
-            "type": "dsm_config_response",
-            "status": "success",
-            "message": "DSM映射配置已更新",
-            "timestamp": int(time.time() * 1000)
-        }
-    except Exception as e:
-        logger.error(f"更新DSM配置失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/dsm/export/{session_id}")
-async def download_dsm_report(session_id: str, format: str = "json"):
-    """下载DSM报告文件"""
-    try:
-        base_dir = "data"
-        session_dir = os.path.join(base_dir, session_id)
-        
-        if not os.path.exists(session_dir):
-            raise HTTPException(status_code=404, detail="会话不存在")
-        
-        # 查找DSM报告文件
-        report_files = [f for f in os.listdir(session_dir) if f.startswith("dsm_")]
-        
-        if not report_files:
-            raise HTTPException(status_code=404, detail="未找到DSM报告文件")
-        
-        # 返回最新的报告文件
-        report_file = sorted(report_files)[-1]
-        file_path = os.path.join(session_dir, report_file)
-        
-        return FileResponse(
-            path=file_path,
-            filename=report_file,
-            media_type='application/octet-stream'
-        )
-    except Exception as e:
-        logger.error(f"下载DSM报告失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ================================================================
-# 回放变量分析 API
-# ================================================================
-
-@app.get("/api/replay/headers")
-async def get_replay_headers():
-    """获取回放数据的所有列名（变量列表）"""
-    import pandas as pd
-    global replay_df_cache, replay_active, current_replay_file
-    
-    if replay_df_cache is None:
-        raise HTTPException(status_code=400, detail="未加载回放文件，先加载 CSV 文件")
-    
-    try:
-        # 获取所有列名
-        columns = list(replay_df_cache.columns)
-        
-        # 按照变量分类组织
-        categorized_vars = {}
-        for category, prefixes in VARIABLE_CATEGORIES.items():
-            vars_in_category = []
-            for prefix in prefixes:
-                vars_in_category.extend([col for col in columns if col.startswith(prefix)])
-            if vars_in_category:
-                categorized_vars[category] = vars_in_category
-        
-        return {
-            "status": "success",
-            "file": current_replay_file,
-            "total_variables": len(columns),
-            "categories": categorized_vars,
-            "all_variables": columns,
-            "timestamp": int(time.time() * 1000)
-        }
-    except Exception as e:
-        logger.error(f"获取回放变量列表失败: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/replay/series")
-async def get_replay_series_data(request: dict):
-    """获取选定变量的数据序列（用于图表绘制）"""
-    import pandas as pd
-    import numpy as np
-    global replay_df_cache
-    
-    if replay_df_cache is None:
-        raise HTTPException(status_code=400, detail="未加载回放文件")
-    
-    try:
-        variables = request.get('variables', [])  # 选定的变量列表
-        max_points = request.get('max_points', 2000)  # 最大数据点数（降采样）
-        
-        if not variables:
-            raise HTTPException(status_code=400, detail="未选择任何变量")
-        
-        logger.info(f"请求变量数据: {len(variables)} 个变量，最大点数: {max_points}")
-        
-        # 获取时间轴
-        if 'rel_time' in replay_df_cache.columns:
-            time_axis = replay_df_cache['rel_time'].values.astype(float)
-        elif 'timestamp' in replay_df_cache.columns:
-            time_axis = replay_df_cache['timestamp'].values
-        else:
-            time_axis = np.arange(len(replay_df_cache))
-        
-        # 获取每个变量的数据
-        series_data = {}
-        for var in variables:
-            if var in replay_df_cache.columns:
-                # 处理 NaN 值
-                data = replay_df_cache[var].values
-                # 将 NaN 替换为 0
-                data = np.nan_to_num(data, nan=0.0)
-                series_data[var] = data.tolist()
-        
-        # 数据降采样（如果数据点太多）
-        total_points = len(time_axis)
-        if total_points > max_points:
-            # 计算采样步长
-            step = total_points // max_points
-            indices = np.arange(0, total_points, step)
-            
-            # 降采样
-            time_axis_sampled = time_axis[indices].tolist()
-            
-            for var in series_data:
-                series_data[var] = [series_data[var][i] for i in indices]
-        else:
-            time_axis_sampled = time_axis.tolist()
-        
-        logger.info(f"返回数据: 时间轴 {len(time_axis_sampled)} 点, 变量 {len(variables)} 个")
-        
-        return {
-            "status": "success",
-            "time_axis": time_axis_sampled,
-            "series_data": series_data,
-            "total_points": total_points,
-            "sampled_points": len(time_axis_sampled),
-            "timestamp": int(time.time() * 1000)
-        }
-    except Exception as e:
-        logger.error(f"获取变量序列数据失败: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 # ================================================================
 # 应用启动和关闭事件
@@ -1843,7 +3206,7 @@ async def get_replay_series_data(request: dict):
 @app.on_event("startup")
 async def startup_event():
     """应用启动"""
-    global command_send_lock, udp_handler, udp_server_started
+    global command_send_lock, command_last_send_at, command_channel_busy, udp_handler, udp_server_started
     
     logger.info("=" * 60)
     logger.info("Apollo GCS Web 后端启动")
@@ -1851,7 +3214,17 @@ async def startup_event():
     
     # 初始化指令发送状态
     command_send_lock = asyncio.Lock()
-    logger.info("指令发送锁已初始化（支持6次连续发送机制）")
+    command_last_send_at = {
+        'flight_control': 0.0,
+        'planning': 0.0,
+    }
+    command_channel_busy = {
+        'flight_control': False,
+        'planning': False,
+    }
+    logger.info(
+        f"指令发送节流已初始化（飞控/规划最小间隔 500ms，cmd_idx 连发 {CMD_IDX_REPEAT_COUNT} 次，末次置0={CMD_IDX_RESET_TO_ZERO}）"
+    )
     logger.info("=" * 60)
     
     # 自动启动UDP服务器
@@ -1863,12 +3236,8 @@ async def startup_event():
             udp_handler = UDPHandler(on_udp_message_received)
             logger.info("UDP处理器已初始化")
         
-        # 启动UDP服务器，监听三个端口
-        ports = [
-            connection_config.hostPort,
-            connection_config.lidarSendPort,
-            connection_config.planningRecvPort
-        ]
+        # 启动UDP服务器，监听协议定义端口，并兼容历史联调端口
+        ports = _normalize_listen_ports()
         
         await udp_handler.start_server(host=connection_config.listenAddress, ports=ports)
         udp_server_started = True
@@ -1920,7 +3289,7 @@ if __name__ == '__main__':
     """)
     
     uvicorn.run(
-        "main:app",
+        app,
         host="0.0.0.0",
         port=8000,
         reload=False,

@@ -12,7 +12,7 @@ class UDPConfig:
     # 接收配置（地面站监听）
     listen_host: str = "192.168.16.13"
     listen_port: int = 30509
-    listen_ports: list = field(default_factory=lambda: [30509, 18507, 18511])
+    listen_ports: list = field(default_factory=lambda: [18506, 18507, 18511, 30509])
     
     # 发送配置（地面站发送指令到飞控）
     target_ip: str = "192.168.16.116"
@@ -38,10 +38,11 @@ class Config:
     def _load_from_env(self):
         """从环境变量加载配置"""
         # 默认监听端口（地面站使用的监听端口）
-        # - 30509: 接收飞控遥测数据
+        # - 30509: 当前实机主聚合接收口
+        # - 18506: 接收飞控遥测数据
         # - 18507: 接收LiDAR数据
         # - 18511: 接收规划模块遥测数据
-        self.udp_config.listen_ports = [30509, 18507, 18511]  # ✅ 修复：包含三个端口
+        self.udp_config.listen_ports = [18506, 18507, 18511, 30509]
         self.udp_config.listen_host = "192.168.16.13"
         self.udp_config.listen_port = 30509
         
