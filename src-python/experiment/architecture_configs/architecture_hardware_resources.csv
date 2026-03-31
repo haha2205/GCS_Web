@@ -1,8 +1,0 @@
-hardware_id,type,compute_type,mips,bandwidth_mbps,safety_level,power_idle_w,power_full_w,description
-SoC_CPU,SoC,CPU,100000,2000,QM,3.0,15.0,SoC general-purpose compute core for planning and communication
-SoC_NPU,SoC,NPU,500000,5000,QM,5.0,25.0,SoC AI acceleration core for radar perception
-SoC_ISP,SoC,ISP,200000,4000,QM,4.0,18.0,SoC image signal processing core for camera perception
-MCU_GP1,MCU,MCU,5000,100,ASIL-D,0.5,1.5,MCU GP1 service coordination or flight control backup partition
-MCU_GP2,MCU,MCU,5000,100,ASIL-D,0.5,1.5,MCU GP2 cross-domain communication and flight control partition
-MCU_GP3,MCU,MCU,3000,50,ASIL-B,0.3,1.0,MCU GP3 actuator output partition
-MCU_GP4,MCU,MCU,5000,100,ASIL-D,0.5,1.5,MCU GP4 sensor input and parser partition

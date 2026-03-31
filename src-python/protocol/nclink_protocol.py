@@ -51,8 +51,8 @@ NCLINK_RECEIVE_EXTY_FCS_DATAGCS = 0x46
 NCLINK_RECEIVE_EXTY_FCS_LINESTRUC_AIM2AB = 0x47
 NCLINK_RECEIVE_EXTY_FCS_LINESTRUC_AB = 0x48
 NCLINK_RECEIVE_EXTY_FCS_PARAM = 0x49
-NCLINK_RECEIVE_EXTY_FCS_ROOT = 0x4A
-NCLINK_RECEIVE_EXTY_FCS_ESC = 0x4B
+NCLINK_RECEIVE_EXTY_FCS_ESC = 0x4A
+NCLINK_RECEIVE_EXTY_FCS_ROOT = 0x4B
 
 # 航迹规划协议定义
 NCLINK_GCS_COMMAND = 0x70
@@ -602,27 +602,29 @@ class ExtY_FCS_GNCBUS_T:
     
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ExtY_FCS_GNCBUS_T':
-        """从字节数据解析GN&C总线状态
+        """从字节数据解析GN&C总线状态（渐进式解析）
         
         根据C++ interface.h第114-209行完整定义
-        总共96字节：17*int8 + 9*real32 + 10*real32 + 7*real32 + 4*real32 + 3*real32 + 10*real32 + 4*real32 + 2*real_T + 2*int8 + 2*real_T
-        实际按字段顺序解析：
-        - TokenMode: 17个int8 = 17字节
-        - FtbOpt: 9个real32 + 1个int8 = 36+1 = 37字节
-        - SrcValue: 2个int8 = 2字节
-        - MixValue: 10个real32 = 40字节
-        - CmdValue: 7个real32 = 28字节
-        - VarValue: 4个real32 = 16字节
-        - TrimValue: 3个real32 = 12字节
-        - ParamsLMT: 11个real32 = 44字节
-        - AcValue: 4个real32 = 16字节
-        - HoverValue: 2个real_T + 1个int8 = 16+1 = 17字节
-        - HomeValue: 2个real_T = 16字节
+        实际按字段顺序解析（各段累计偏移）：
+        - TokenMode:  17个int8        = 17字节   (累计 0→17)
+        - FtbOpt:     9个float+1个int8 = 37字节  (累计 17→54)
+        - SrcValue:   2个int8          = 2字节   (累计 54→56)
+        - MixValue:   10个float        = 40字节  (累计 56→96)
+        - CmdValue:   7个float         = 28字节  (累计 96→124)
+        - VarValue:   4个float         = 16字节  (累计 124→140)
+        - TrimValue:  3个float         = 12字节  (累计 140→152)
+        - ParamsLMT:  11个float        = 44字节  (累计 152→196)
+        - AcValue:    4个float         = 16字节  (累计 196→212)
+        - HoverValue: 2个double+1个int8= 17字节  (累计 212→229)
+        - HomeValue:  2个double        = 16字节  (累计 229→245)
+        总计：245字节
         
-        总计：17 + 37 + 2 + 40 + 28 + 16 + 12 + 44 + 16 + 17 + 16 = 245字节
+        采用渐进式解析：至少需要 TokenMode(17)+FtbOpt(37)+SrcValue(2)=56 字节，
+        后续字段按剩余长度逐步解析，不足则保留默认值。
         """
-        if len(data) < 245:
-            # 至少需要完整的 GNCBUS 基础结构
+        data_len = len(data)
+        if data_len < 56:
+            # 至少需要 TokenMode(17) + FtbOpt(37) + SrcValue(2) = 56 字节
             return cls()
         
         try:
@@ -642,41 +644,73 @@ class ExtY_FCS_GNCBUS_T:
             srcvalue_values = struct.unpack_from('<2b', data, offset)
             offset += 2
             
-            # 4. MixValue (10个float)
-            mixvalue_values = struct.unpack_from('<10f', data, offset)
-            offset += 40  # 10*4
+            # --- 以下为渐进式解析：根据剩余长度决定是否解析 ---
             
-            # 5. CmdValue (7个float)
-            cmdvalue_values = struct.unpack_from('<7f', data, offset)
-            offset += 28  # 7*4
-
-            # 6. VarValue (4个float)
-            varvalue_values = struct.unpack_from('<4f', data, offset)
-            offset += 16
-
-            # 7. TrimValue (3个float)
-            trimvalue_values = struct.unpack_from('<3f', data, offset)
-            offset += 12
-
-            # 8. ParamsLMT (11个float)
-            paramslmt_values = struct.unpack_from('<11f', data, offset)
-            offset += 44
-
-            # 9. AcValue (4个float)
-            acvalue_values = struct.unpack_from('<4f', data, offset)
-            offset += 16
-
-            # 10. HoverValue (2个double + 1个int8)
-            hovervalue_values = struct.unpack_from('<2db', data, offset)
-            offset += 17
-
-            # 11. HomeValue (2个double)
-            homevalue_values = struct.unpack_from('<2d', data, offset)
-            offset += 16
+            # 4. MixValue (10个float) — 需要 40 字节 (累计偏移 96)
+            mixvalue_values = None
+            if data_len >= 96:
+                mixvalue_values = struct.unpack_from('<10f', data, offset)
+                offset += 40  # 10*4
+            else:
+                offset = data_len
             
-            # 构建返回对象
+            # 5. CmdValue (7个float) — 需要 28 字节 (累计偏移 124)
+            cmdvalue_values = None
+            if data_len >= 124:
+                cmdvalue_values = struct.unpack_from('<7f', data, offset)
+                offset += 28  # 7*4
+            else:
+                offset = data_len
+
+            # 6. VarValue (4个float) — 需要 16 字节 (累计偏移 140)
+            varvalue_values = None
+            if data_len >= 140:
+                varvalue_values = struct.unpack_from('<4f', data, offset)
+                offset += 16
+            else:
+                offset = data_len
+
+            # 7. TrimValue (3个float) — 需要 12 字节 (累计偏移 152)
+            trimvalue_values = None
+            if data_len >= 152:
+                trimvalue_values = struct.unpack_from('<3f', data, offset)
+                offset += 12
+            else:
+                offset = data_len
+
+            # 8. ParamsLMT (11个float) — 需要 44 字节 (累计偏移 196)
+            paramslmt_values = None
+            if data_len >= 196:
+                paramslmt_values = struct.unpack_from('<11f', data, offset)
+                offset += 44
+            else:
+                offset = data_len
+
+            # 9. AcValue (4个float) — 需要 16 字节 (累计偏移 212)
+            acvalue_values = None
+            if data_len >= 212:
+                acvalue_values = struct.unpack_from('<4f', data, offset)
+                offset += 16
+            else:
+                offset = data_len
+
+            # 10. HoverValue (2个double + 1个int8) — 需要 17 字节 (累计偏移 229)
+            hovervalue_values = None
+            if data_len >= 229:
+                hovervalue_values = struct.unpack_from('<2db', data, offset)
+                offset += 17
+            else:
+                offset = data_len
+
+            # 11. HomeValue (2个double) — 需要 16 字节 (累计偏移 245)
+            homevalue_values = None
+            if data_len >= 245:
+                homevalue_values = struct.unpack_from('<2d', data, offset)
+                offset += 16
+            
+            # 构建返回对象（渐进式：不足的字段保留默认值 0）
             return cls(
-                # TokenMode
+                # TokenMode (必有)
                 GNCBus_TokenMode_OnSky=tokenmode_values[0],
                 GNCBus_TokenMode_Ctrl_Mode=tokenmode_values[1],
                 GNCBus_TokenMode_Pre_CMD=tokenmode_values[2],
@@ -695,7 +729,7 @@ class ExtY_FCS_GNCBUS_T:
                 GNCBus_TokenMode_token_vert=tokenmode_values[15],
                 GNCBus_TokenMode_step_vert=tokenmode_values[16],
                 
-                # FtbOpt
+                # FtbOpt (必有)
                 GNCBus_FtbOpt_ele_opt=ftbopt_floats[0],
                 GNCBus_FtbOpt_ail_opt=ftbopt_floats[1],
                 GNCBus_FtbOpt_rud_opt=ftbopt_floats[2],
@@ -707,69 +741,69 @@ class ExtY_FCS_GNCBUS_T:
                 GNCBus_FtbOpt_col0_opt=ftbopt_floats[8],
                 GNCBus_FtbOpt_Ftb_Switch=ftbopt_switch[0],
                 
-                # SrcValue
+                # SrcValue (必有)
                 GNCBus_SrcValue_ac_SrcCmdV=srcvalue_values[0],
                 GNCBus_SrcValue_SrcV_fus=srcvalue_values[1],
                 
-                # MixValue
-                GNCBus_MixValue_col_mix=mixvalue_values[0],
-                GNCBus_MixValue_phi_mix=mixvalue_values[1],
-                GNCBus_MixValue_Vx_mix=mixvalue_values[2],
-                GNCBus_MixValue_dX_mix=mixvalue_values[3],
-                GNCBus_MixValue_theta_mix=mixvalue_values[4],
-                GNCBus_MixValue_Vy_mix=mixvalue_values[5],
-                GNCBus_MixValue_dY_mix=mixvalue_values[6],
-                GNCBus_MixValue_psi_mix=mixvalue_values[7],
-                GNCBus_MixValue_Hdot_mix=mixvalue_values[8],
-                GNCBus_MixValue_height_mix=mixvalue_values[9],
+                # MixValue (渐进)
+                GNCBus_MixValue_col_mix=mixvalue_values[0] if mixvalue_values else 0.0,
+                GNCBus_MixValue_phi_mix=mixvalue_values[1] if mixvalue_values else 0.0,
+                GNCBus_MixValue_Vx_mix=mixvalue_values[2] if mixvalue_values else 0.0,
+                GNCBus_MixValue_dX_mix=mixvalue_values[3] if mixvalue_values else 0.0,
+                GNCBus_MixValue_theta_mix=mixvalue_values[4] if mixvalue_values else 0.0,
+                GNCBus_MixValue_Vy_mix=mixvalue_values[5] if mixvalue_values else 0.0,
+                GNCBus_MixValue_dY_mix=mixvalue_values[6] if mixvalue_values else 0.0,
+                GNCBus_MixValue_psi_mix=mixvalue_values[7] if mixvalue_values else 0.0,
+                GNCBus_MixValue_Hdot_mix=mixvalue_values[8] if mixvalue_values else 0.0,
+                GNCBus_MixValue_height_mix=mixvalue_values[9] if mixvalue_values else 0.0,
                 
-                # CmdValue
-                GNCBus_CmdValue_phi_cmd=cmdvalue_values[0],   # 滚转指令
-                GNCBus_CmdValue_Hdot_cmd=cmdvalue_values[1],   # 垂向速度指令
-                GNCBus_CmdValue_R_cmd=cmdvalue_values[2],      # 偏航速率指令
-                GNCBus_CmdValue_psi_cmd=cmdvalue_values[3],    # 偏航指令
-                GNCBus_CmdValue_Vx_cmd=cmdvalue_values[4],     # X速度指令
-                GNCBus_CmdValue_Vy_cmd=cmdvalue_values[5],     # Y速度指令
-                GNCBus_CmdValue_height_cmd=cmdvalue_values[6],  # 高度指令
+                # CmdValue (渐进)
+                GNCBus_CmdValue_phi_cmd=cmdvalue_values[0] if cmdvalue_values else 0.0,
+                GNCBus_CmdValue_Hdot_cmd=cmdvalue_values[1] if cmdvalue_values else 0.0,
+                GNCBus_CmdValue_R_cmd=cmdvalue_values[2] if cmdvalue_values else 0.0,
+                GNCBus_CmdValue_psi_cmd=cmdvalue_values[3] if cmdvalue_values else 0.0,
+                GNCBus_CmdValue_Vx_cmd=cmdvalue_values[4] if cmdvalue_values else 0.0,
+                GNCBus_CmdValue_Vy_cmd=cmdvalue_values[5] if cmdvalue_values else 0.0,
+                GNCBus_CmdValue_height_cmd=cmdvalue_values[6] if cmdvalue_values else 0.0,
 
-                # VarValue
-                GNCBus_VarValue_psi_var=varvalue_values[0],
-                GNCBus_VarValue_height_var=varvalue_values[1],
-                GNCBus_VarValue_dX_var=varvalue_values[2],
-                GNCBus_VarValue_dY_var=varvalue_values[3],
+                # VarValue (渐进)
+                GNCBus_VarValue_psi_var=varvalue_values[0] if varvalue_values else 0.0,
+                GNCBus_VarValue_height_var=varvalue_values[1] if varvalue_values else 0.0,
+                GNCBus_VarValue_dX_var=varvalue_values[2] if varvalue_values else 0.0,
+                GNCBus_VarValue_dY_var=varvalue_values[3] if varvalue_values else 0.0,
 
-                # TrimValue
-                GNCBus_TrimValue_Vx_trim=trimvalue_values[0],
-                GNCBus_TrimValue_col_trim=trimvalue_values[1],
-                GNCBus_TrimValue_col_autotrim=trimvalue_values[2],
+                # TrimValue (渐进)
+                GNCBus_TrimValue_Vx_trim=trimvalue_values[0] if trimvalue_values else 0.0,
+                GNCBus_TrimValue_col_trim=trimvalue_values[1] if trimvalue_values else 0.0,
+                GNCBus_TrimValue_col_autotrim=trimvalue_values[2] if trimvalue_values else 0.0,
 
-                # ParamsLMT
-                GNCBus_ParamsLMT_Vx_LMT=paramslmt_values[0],
-                GNCBus_ParamsLMT_Vy_LMT=paramslmt_values[1],
-                GNCBus_ParamsLMT_R_LMT=paramslmt_values[2],
-                GNCBus_ParamsLMT_Hdot_ILmt=paramslmt_values[3],
-                GNCBus_ParamsLMT_Hdot_UpLMT=paramslmt_values[4],
-                GNCBus_ParamsLMT_Hdot_DownLMT=paramslmt_values[5],
-                GNCBus_ParamsLMT_R_FLYTURN=paramslmt_values[6],
-                GNCBus_ParamsLMT_R_unit=paramslmt_values[7],
-                GNCBus_ParamsLMT_Hdot_unit=paramslmt_values[8],
-                GNCBus_ParamsLMT_Vx_unit=paramslmt_values[9],
-                GNCBus_ParamsLMT_Vy_unit=paramslmt_values[10],
+                # ParamsLMT (渐进)
+                GNCBus_ParamsLMT_Vx_LMT=paramslmt_values[0] if paramslmt_values else 0.0,
+                GNCBus_ParamsLMT_Vy_LMT=paramslmt_values[1] if paramslmt_values else 0.0,
+                GNCBus_ParamsLMT_R_LMT=paramslmt_values[2] if paramslmt_values else 0.0,
+                GNCBus_ParamsLMT_Hdot_ILmt=paramslmt_values[3] if paramslmt_values else 0.0,
+                GNCBus_ParamsLMT_Hdot_UpLMT=paramslmt_values[4] if paramslmt_values else 0.0,
+                GNCBus_ParamsLMT_Hdot_DownLMT=paramslmt_values[5] if paramslmt_values else 0.0,
+                GNCBus_ParamsLMT_R_FLYTURN=paramslmt_values[6] if paramslmt_values else 0.0,
+                GNCBus_ParamsLMT_R_unit=paramslmt_values[7] if paramslmt_values else 0.0,
+                GNCBus_ParamsLMT_Hdot_unit=paramslmt_values[8] if paramslmt_values else 0.0,
+                GNCBus_ParamsLMT_Vx_unit=paramslmt_values[9] if paramslmt_values else 0.0,
+                GNCBus_ParamsLMT_Vy_unit=paramslmt_values[10] if paramslmt_values else 0.0,
 
-                # AcValue
-                GNCBus_AcValue_ac_dY=acvalue_values[0],
-                GNCBus_AcValue_ac_dX=acvalue_values[1],
-                GNCBus_AcValue_ac_dPsi=acvalue_values[2],
-                GNCBus_AcValue_ac_dL=acvalue_values[3],
+                # AcValue (渐进)
+                GNCBus_AcValue_ac_dY=acvalue_values[0] if acvalue_values else 0.0,
+                GNCBus_AcValue_ac_dX=acvalue_values[1] if acvalue_values else 0.0,
+                GNCBus_AcValue_ac_dPsi=acvalue_values[2] if acvalue_values else 0.0,
+                GNCBus_AcValue_ac_dL=acvalue_values[3] if acvalue_values else 0.0,
 
-                # HoverValue
-                GNCBus_HoverValue_lon_hov=hovervalue_values[0],
-                GNCBus_HoverValue_lat_hov=hovervalue_values[1],
-                GNCBus_HoverValue_IsHovStatus_hov=hovervalue_values[2],
+                # HoverValue (渐进)
+                GNCBus_HoverValue_lon_hov=hovervalue_values[0] if hovervalue_values else 0.0,
+                GNCBus_HoverValue_lat_hov=hovervalue_values[1] if hovervalue_values else 0.0,
+                GNCBus_HoverValue_IsHovStatus_hov=hovervalue_values[2] if hovervalue_values else 0,
 
-                # HomeValue
-                GNCBus_HomeValue_lon_home=homevalue_values[0],
-                GNCBus_HomeValue_lat_home=homevalue_values[1]
+                # HomeValue (渐进)
+                GNCBus_HomeValue_lon_home=homevalue_values[0] if homevalue_values else 0.0,
+                GNCBus_HomeValue_lat_home=homevalue_values[1] if homevalue_values else 0.0,
             )
         except Exception as e:
             print(f"[ExtY_FCS_GNCBUS_T] 解析失败: {e}")
@@ -1108,7 +1142,7 @@ class ExtY_FCS_GNCBUS_T:
 class ExtY_FCS_PARAM_T:
     """飞控回传参数 (ExtY_FCS_PARAM)
     
-    包含26个飞控内部PID参数
+    包含30个real32参数，与飞控侧ExtY_FCS_PARAM结构保持一致
     """
     ParamAil_F_KaPHI: real32_T = 0.0
     ParamAil_F_KaP: real32_T = 0.0
@@ -1117,6 +1151,7 @@ class ExtY_FCS_PARAM_T:
     ParamAil_F_KaVy: real32_T = 0.0
     ParamAil_F_IaVy: real32_T = 0.0
     ParamAil_F_KaAy: real32_T = 0.0
+    ParamAil_YaccLMT: real32_T = 0.0
     
     ParamEle_F_KeTHETA: real32_T = 0.0
     ParamEle_F_KeQ: real32_T = 0.0
@@ -1125,6 +1160,7 @@ class ExtY_FCS_PARAM_T:
     ParamEle_F_KeVx: real32_T = 0.0
     ParamEle_F_IeVx: real32_T = 0.0
     ParamEle_F_KeAx: real32_T = 0.0
+    ParamEle_XaccLMT: real32_T = 0.0
     
     ParamRud_F_KrR: real32_T = 0.0
     ParamRud_F_IrR: real32_T = 0.0
@@ -1141,31 +1177,34 @@ class ExtY_FCS_PARAM_T:
     ParamRPM_F_IgRPM: real32_T = 0.0
     
     ParamScale_F_scale_factor: real32_T = 0.0
+    ParamGuide_Hground: real32_T = 0.0
+    ParamGuide_AutoTakeoffHcmd: real32_T = 0.0
     
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ExtY_FCS_PARAM_T':
-        # 26个float32 = 104字节
-        if len(data) < 104:
-            print(f"[ExtY_FCS_PARAM_T] Payload长度不足: {len(data)} < 104")
+        # 30个float32 = 120字节
+        if len(data) < 120:
+            print(f"[ExtY_FCS_PARAM_T] Payload长度不足: {len(data)} < 120")
             return cls()
         
-        fmt = '<26f'  # 小端序
-        values = struct.unpack(fmt, data[:104])
+        fmt = '<30f'  # 小端序
+        values = struct.unpack(fmt, data[:120])
         
         return cls(*values)
     
     def to_bytes(self) -> bytes:
         """编码为字节数据"""
-        fmt = '<26f'
+        fmt = '<30f'
         return struct.pack(fmt,
             self.ParamAil_F_KaPHI, self.ParamAil_F_KaP, self.ParamAil_F_KaY, self.ParamAil_F_IaY,
-            self.ParamAil_F_KaVy, self.ParamAil_F_IaVy, self.ParamAil_F_KaAy,
+            self.ParamAil_F_KaVy, self.ParamAil_F_IaVy, self.ParamAil_F_KaAy, self.ParamAil_YaccLMT,
             self.ParamEle_F_KeTHETA, self.ParamEle_F_KeQ, self.ParamEle_F_KeX, self.ParamEle_F_IeX,
-            self.ParamEle_F_KeVx, self.ParamEle_F_IeVx, self.ParamEle_F_KeAx,
+            self.ParamEle_F_KeVx, self.ParamEle_F_IeVx, self.ParamEle_F_KeAx, self.ParamEle_XaccLMT,
             self.ParamRud_F_KrR, self.ParamRud_F_IrR, self.ParamRud_F_KrAy, self.ParamRud_F_KrPSI,
             self.ParamH_F_KcH, self.ParamH_F_IcH, self.ParamH_F_KcHdot, self.ParamH_F_IcHdot, self.ParamH_F_KcAz,
             self.ParamRPM_F_KgRPM, self.ParamRPM_F_IgRPM,
-            self.ParamScale_F_scale_factor
+            self.ParamScale_F_scale_factor,
+            self.ParamGuide_Hground, self.ParamGuide_AutoTakeoffHcmd
         )
     
     def to_json(self) -> dict:
@@ -1212,13 +1251,41 @@ class ExtY_FCS_AVOIFLAG_T:
 
 @dataclass
 class ExtY_FCS_ESC_T:
-    """电机参数"""
+    """电机参数。
+
+    协议版本 2026-03-29:
+    - 6 * uint32 错误计数
+    - 6 * float 电压
+    - 6 * float 电流
+    - 6 * float 温度
+    - 6 * int32 转速
+    - 6 * uint8 功率百分比
+    - 总计 126 字节
+    """
     esc1_error_count: uint32_T = 0
     esc2_error_count: uint32_T = 0
     esc3_error_count: uint32_T = 0
     esc4_error_count: uint32_T = 0
     esc5_error_count: uint32_T = 0
     esc6_error_count: uint32_T = 0
+    esc1_voltage: real32_T = 0.0
+    esc2_voltage: real32_T = 0.0
+    esc3_voltage: real32_T = 0.0
+    esc4_voltage: real32_T = 0.0
+    esc5_voltage: real32_T = 0.0
+    esc6_voltage: real32_T = 0.0
+    esc1_current: real32_T = 0.0
+    esc2_current: real32_T = 0.0
+    esc3_current: real32_T = 0.0
+    esc4_current: real32_T = 0.0
+    esc5_current: real32_T = 0.0
+    esc6_current: real32_T = 0.0
+    esc1_temperature: real32_T = 0.0
+    esc2_temperature: real32_T = 0.0
+    esc3_temperature: real32_T = 0.0
+    esc4_temperature: real32_T = 0.0
+    esc5_temperature: real32_T = 0.0
+    esc6_temperature: real32_T = 0.0
     esc1_rpm: int32_T = 0
     esc2_rpm: int32_T = 0
     esc3_rpm: int32_T = 0
@@ -1234,33 +1301,54 @@ class ExtY_FCS_ESC_T:
     
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ExtY_FCS_ESC_T':
-        # C++飞控使用小端序发送payload数据
-        fmt = '<IIIIIIiiiiiiBBBBBB'  # 小端序：6*uint32 + 6*int32 + 6*uint8 = 60 bytes
-        values = struct.unpack(fmt, data[:60])
+        if len(data) < 126:
+            print(f"[ExtY_FCS_ESC_T] Payload长度不足: {len(data)} < 126")
+            return cls()
+
+        fmt = '<6I18f6i6B'
+        values = struct.unpack(fmt, data[:126])
         return cls(
             esc1_error_count=values[0], esc2_error_count=values[1],
             esc3_error_count=values[2], esc4_error_count=values[3],
             esc5_error_count=values[4], esc6_error_count=values[5],
-            esc1_rpm=values[6], esc2_rpm=values[7],
-            esc3_rpm=values[8], esc4_rpm=values[9],
-            esc5_rpm=values[10], esc6_rpm=values[11],
-            esc1_power_rating_pct=values[12], esc2_power_rating_pct=values[13],
-            esc3_power_rating_pct=values[14], esc4_power_rating_pct=values[15],
-            esc5_power_rating_pct=values[16], esc6_power_rating_pct=values[17]
+            esc1_voltage=values[6], esc2_voltage=values[7],
+            esc3_voltage=values[8], esc4_voltage=values[9],
+            esc5_voltage=values[10], esc6_voltage=values[11],
+            esc1_current=values[12], esc2_current=values[13],
+            esc3_current=values[14], esc4_current=values[15],
+            esc5_current=values[16], esc6_current=values[17],
+            esc1_temperature=values[18], esc2_temperature=values[19],
+            esc3_temperature=values[20], esc4_temperature=values[21],
+            esc5_temperature=values[22], esc6_temperature=values[23],
+            esc1_rpm=values[24], esc2_rpm=values[25],
+            esc3_rpm=values[26], esc4_rpm=values[27],
+            esc5_rpm=values[28], esc6_rpm=values[29],
+            esc1_power_rating_pct=values[30], esc2_power_rating_pct=values[31],
+            esc3_power_rating_pct=values[32], esc4_power_rating_pct=values[33],
+            esc5_power_rating_pct=values[34], esc6_power_rating_pct=values[35]
         )
     
     def to_bytes(self) -> bytes:
         """编码为字节数据"""
-        fmt = '<IIIIIIiiiiiiBBBBBB'  # 小端序：6*uint32 + 6*int32 + 6*uint8 = 60 bytes
+        fmt = '<6I18f6i6B'
         return struct.pack(fmt,
             self.esc1_error_count, self.esc2_error_count, self.esc3_error_count,
             self.esc4_error_count, self.esc5_error_count, self.esc6_error_count,
+            self.esc1_voltage, self.esc2_voltage, self.esc3_voltage,
+            self.esc4_voltage, self.esc5_voltage, self.esc6_voltage,
+            self.esc1_current, self.esc2_current, self.esc3_current,
+            self.esc4_current, self.esc5_current, self.esc6_current,
+            self.esc1_temperature, self.esc2_temperature, self.esc3_temperature,
+            self.esc4_temperature, self.esc5_temperature, self.esc6_temperature,
             self.esc1_rpm, self.esc2_rpm, self.esc3_rpm,
             self.esc4_rpm, self.esc5_rpm, self.esc6_rpm,
             self.esc1_power_rating_pct, self.esc2_power_rating_pct,
             self.esc3_power_rating_pct, self.esc4_power_rating_pct,
             self.esc5_power_rating_pct, self.esc6_power_rating_pct
         )
+
+    def to_json(self) -> dict:
+        return {k: v for k, v in self.__dict__.items() if not k.startswith('_')}
 
 
 @dataclass
@@ -2017,7 +2105,8 @@ class NCLinkFrame:
         """
         data_len = len(data)
         # 构建完整帧（不含校验和和帧尾）
-        frame_without_checksum = struct.pack('!BBHB',
+        # 帧头(2) + 功能码(1) + 数据长度(2, 大端) + 数据(N)
+        frame_without_checksum = struct.pack('!BBBH',
                                               NCLINK_HEAD0, NCLINK_HEAD1,
                                               func_code, data_len) + data
         
@@ -2104,7 +2193,7 @@ class NCLinkProtocolParser:
                 if frame:
                     messages.append(frame)
             except Exception as e:
-                print(f"解析帧失败: {e}")
+                logger.error(f"解析帧失败: {e}")
             
             # 移除已处理的帧
             del self.buffer[:total_len]
@@ -2121,21 +2210,14 @@ class NCLinkProtocolParser:
         Returns:
             解析后的消息字典，失败返回None
         """
-        # 打印调试信息（兼容Python 3.7）
-        import binascii
-        preview_data = frame_data[:20] if len(frame_data) >= 20 else frame_data
-        hex_bytes = binascii.hexlify(preview_data).decode('ascii')
-        hex_preview = ' '.join([hex_bytes[i:i+2] for i in range(0, len(hex_bytes), 2)])
-        print(f"[协议解析] 帧数据预览: {hex_preview}")
-        
         # 验证最小帧长度
         if len(frame_data) < 8:
-            print(f"[协议解析] ✗ 帧太短: {len(frame_data)} < 8")
+            logger.debug(f"[协议解析] 帧太短: {len(frame_data)} < 8")
             return None
         
         # 验证帧头
         if frame_data[0] != NCLINK_HEAD0 or frame_data[1] != NCLINK_HEAD1:
-            print(f"[协议解析] ✗ 帧头错误: 0x{frame_data[0]:02X} 0x{frame_data[1]:02X}")
+            logger.debug(f"[协议解析] 帧头错误: 0x{frame_data[0]:02X} 0x{frame_data[1]:02X}")
             return None
         
         # 读取功能码和长度字段（正确偏移）
@@ -2144,24 +2226,22 @@ class NCLinkProtocolParser:
         
         # 验证数据长度是否合理
         if data_len > BUFFER_SIZE_MAX:
-            print(f"[协议解析] ⚠ 数据长度异常: {data_len}（超过最大值）")
+            logger.warning(f"[协议解析] 数据长度异常: {data_len} (超过最大值)")
             return None
         
         # 计算预期帧长度：head(2) + func(1) + len(2) + data(data_len) + checksum(1) + tail(2)
         expected_frame_len = 2 + 1 + 2 + data_len + 1 + 2
         
         if len(frame_data) < expected_frame_len:
-            print(f"[协议解析] ⚠ 帧不完整: 需要{expected_frame_len}字节，只有{len(frame_data)}字节")
+            logger.debug(f"[协议解析] 帧不完整: 需要{expected_frame_len}字节, 只有{len(frame_data)}字节")
             return None
-        
-        print(f"[协议解析] 功能码: 0x{func_code:02X}, 数据长度: {data_len}, 期望帧长度: {expected_frame_len}, 实际帧长度: {len(frame_data)}")
         
         try:
             # 提取payload（从字节5开始，因为：head(0-1) + func(2) + len(3-4) = 5字节）
             payload = frame_data[5:5+data_len]
             checksum = frame_data[5+data_len]
         except IndexError as e:
-            print(f"[协议解析] ✗ 提取payload失败: {e}")
+            logger.error(f"[协议解析] 提取payload失败: {e}")
             return None
         
         # 飞控遥测校验和计算：对 帧头(2) + 功能码(1) + 长度(2) + 载荷(N) 进行异或
@@ -2170,18 +2250,13 @@ class NCLinkProtocolParser:
         for byte in frame_for_checksum:
             expected_checksum ^= byte
 
-        print(f"[协议解析] 校验和: 计算{expected_checksum:02X}, 接收{checksum:02X}")
         if checksum != expected_checksum:
-            print(f"[协议解析] ✗ 校验和不匹配")
+            logger.warning(f"[协议解析] 校验和不匹配: 计算{expected_checksum:02X}, 接收{checksum:02X}")
             # 即使校验和错误，也继续解析（用于调试）
-        else:
-            print(f"[协议解析] ✓ 校验和匹配")
         
         # 验证帧尾
         if frame_data[-2] != NCLINK_END0 or frame_data[-1] != NCLINK_END1:
-            print(f"[协议解析] ✗ 帧尾错误: 0x{frame_data[-2]:02X} 0x{frame_data[-1]:02X}")
-        else:
-            print(f"[协议解析] ✓ 帧尾正确")
+            logger.warning(f"[协议解析] 帧尾错误: 0x{frame_data[-2]:02X} 0x{frame_data[-1]:02X}")
         
         # 根据功能码解析数据
         message = {
@@ -2205,7 +2280,7 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_states'
                 message['data'] = self.fcs_states.to_json()
             except Exception as e:
-                print(f"[协议解析] ⚠ ExtY_FCS_STATES_T解析失败: {e}, 使用默认值")
+                logger.warning(f"[协议解析] ExtY_FCS_STATES_T解析失败: {e}, 使用默认值")
                 # 提取可用的数据（前56字节）
                 self.fcs_states = ExtY_FCS_STATES_T.from_bytes(payload[:56].ljust(64, b'\x00'))
                 message['type'] = 'fcs_states'
@@ -2218,7 +2293,7 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_datactrl'
                 message['data'] = self.fcs_datactrl.to_json()
             except Exception as e:
-                print(f"[协议解析] ⚠ ExtY_FCS_DATACTRL_T解析失败: {e}, 使用默认值")
+                logger.warning(f"[协议解析] ExtY_FCS_DATACTRL_T解析失败: {e}, 使用默认值")
                 self.fcs_datactrl = ExtY_FCS_DATACTRL_T.from_bytes(payload[:212].ljust(64, b'\x00'))
                 message['type'] = 'fcs_datactrl'
                 message['data'] = self.fcs_datactrl.to_json()
@@ -2230,7 +2305,7 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_gncbus'
                 message['data'] = self.fcs_gncbus.to_json()
             except Exception as e:
-                print(f"[协议解析] ⚠ ExtY_FCS_GNCBUS_T解析失败: {e}, 使用默认值")
+                logger.warning(f"[协议解析] ExtY_FCS_GNCBUS_T解析失败: {e}, 使用默认值")
                 self.fcs_gncbus = ExtY_FCS_GNCBUS_T.from_bytes(payload[:245].ljust(40, b'\x00'))
                 message['type'] = 'fcs_gncbus'
                 message['data'] = self.fcs_gncbus.to_json()
@@ -2248,7 +2323,7 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_datagcs'
                 message['data'] = self.fcs_datagcs.to_json()
             except Exception as e:
-                print(f"[协议解析] ⚠ ExtY_FCS_DATAGCS_T解析失败: {e}")
+                logger.warning(f"[协议解析] ExtY_FCS_DATAGCS_T解析失败: {e}")
                 self.fcs_datagcs = ExtY_FCS_DATAGCS_T()
                 message['type'] = 'fcs_datagcs'
                 message['data'] = self.fcs_datagcs.to_json()
@@ -2260,7 +2335,7 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_line_aim2ab'
                 message['data'] = self.fcs_line_aim2ab.to_json()
             except Exception as e:
-                print(f"[协议解析] ⚠ ExtY_FCS_LINESTRUC_ac_aim2AB_T解析失败: {e}")
+                logger.warning(f"[协议解析] ExtY_FCS_LINESTRUC_ac_aim2AB_T解析失败: {e}")
                 message['type'] = 'fcs_line_aim2ab'
                 message['data'] = {
                     'lon': 0.0,
@@ -2293,7 +2368,7 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_line_ab'
                 message['data'] = self.fcs_line_ab.to_json()
             except Exception as e:
-                print(f"[协议解析] ⚠ ExtY_FCS_LINESTRUC_acAB_T解析失败: {e}")
+                logger.warning(f"[协议解析] ExtY_FCS_LINESTRUC_acAB_T解析失败: {e}")
                 message['type'] = 'fcs_line_ab'
                 message['data'] = {
                     'lon': 0.0,
@@ -2320,10 +2395,42 @@ class NCLinkProtocolParser:
                 }
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_ESC:
-            # 0x4B: 机载当前未使用，保留识别但不进入记录链。
-            message['type'] = 'ignored_obsolete_fcs_esc'
-            message['data'] = {}
-            message['skip_recording'] = True
+            # 0x4A: 电机ESC数据
+            self.fcs_esc = ExtY_FCS_ESC_T.from_bytes(payload)
+            message['type'] = 'fcs_esc'
+            message['data'] = {
+                **self.fcs_esc.to_json(),
+                'error_counts': [
+                    self.fcs_esc.esc1_error_count, self.fcs_esc.esc2_error_count,
+                    self.fcs_esc.esc3_error_count, self.fcs_esc.esc4_error_count,
+                    self.fcs_esc.esc5_error_count, self.fcs_esc.esc6_error_count,
+                ],
+                'voltages': [
+                    self.fcs_esc.esc1_voltage, self.fcs_esc.esc2_voltage,
+                    self.fcs_esc.esc3_voltage, self.fcs_esc.esc4_voltage,
+                    self.fcs_esc.esc5_voltage, self.fcs_esc.esc6_voltage,
+                ],
+                'currents': [
+                    self.fcs_esc.esc1_current, self.fcs_esc.esc2_current,
+                    self.fcs_esc.esc3_current, self.fcs_esc.esc4_current,
+                    self.fcs_esc.esc5_current, self.fcs_esc.esc6_current,
+                ],
+                'temperatures': [
+                    self.fcs_esc.esc1_temperature, self.fcs_esc.esc2_temperature,
+                    self.fcs_esc.esc3_temperature, self.fcs_esc.esc4_temperature,
+                    self.fcs_esc.esc5_temperature, self.fcs_esc.esc6_temperature,
+                ],
+                'rpms': [
+                    self.fcs_esc.esc1_rpm, self.fcs_esc.esc2_rpm,
+                    self.fcs_esc.esc3_rpm, self.fcs_esc.esc4_rpm,
+                    self.fcs_esc.esc5_rpm, self.fcs_esc.esc6_rpm,
+                ],
+                'power_ratings': [
+                    self.fcs_esc.esc1_power_rating_pct, self.fcs_esc.esc2_power_rating_pct,
+                    self.fcs_esc.esc3_power_rating_pct, self.fcs_esc.esc4_power_rating_pct,
+                    self.fcs_esc.esc5_power_rating_pct, self.fcs_esc.esc6_power_rating_pct,
+                ]
+            }
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_PARAM:
             # 0x49: 飞控参数
@@ -2332,13 +2439,41 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_param'
                 message['data'] = self.fcs_param.to_json()
             except Exception as e:
-                print(f"[协议解析] ⚠ ExtY_FCS_PARAM_T解析失败: {e}")
+                logger.warning(f"[协议解析] ExtY_FCS_PARAM_T解析失败: {e}")
                 message['type'] = 'fcs_param'
+                message['data'] = ExtY_FCS_PARAM_T().to_json()
+
+        elif func_code == NCLINK_RECEIVE_EXTY_FCS_ROOT:
+            # 0x4B: 飞控根参数扩展数据
+            try:
+                if len(payload) < 17:
+                    raise ValueError(f'payload too short for fcs_root: {len(payload)} < 17')
+
+                xacc_lmt, yacc_lmt, hground, auto_takeoff_hcmd = struct.unpack('<4f', payload[:16])
+                ftb_interrupt_plan = struct.unpack('<b', payload[16:17])[0]
+                timestamp_value = ''
+                if len(payload) >= 21:
+                    timestamp_value = struct.unpack('<i', payload[17:21])[0]
+
+                message['type'] = 'fcs_root'
                 message['data'] = {
-                    'param_id': 0,
-                    'param_value': 0.0,
-                    'param_min': 0.0,
-                    'param_max': 0.0
+                    'XaccLMT': xacc_lmt,
+                    'YaccLMT': yacc_lmt,
+                    'Hground': hground,
+                    'AutoTakeoffHcmd': auto_takeoff_hcmd,
+                    'ftb_intterrupt_plan': ftb_interrupt_plan,
+                    'TimeStamp': timestamp_value,
+                }
+            except Exception as e:
+                logger.warning(f"[协议解析] fcs_root解析失败: {e}")
+                message['type'] = 'fcs_root'
+                message['data'] = {
+                    'XaccLMT': 0.0,
+                    'YaccLMT': 0.0,
+                    'Hground': 0.0,
+                    'AutoTakeoffHcmd': 0.0,
+                    'ftb_intterrupt_plan': 0,
+                    'TimeStamp': '',
                 }
         
         # ============ 规划系统数据包解析 (0x70-0x71) ============
@@ -2349,12 +2484,12 @@ class NCLinkProtocolParser:
                 if self.gcs_telemetry:
                     message['type'] = 'planning_telemetry'
                     message['data'] = self.gcs_telemetry.to_json()
-                    logger.info(f"[协议解析] ✓ 成功解析规划遥测数据 (0x71): {message['data']}")
+                    logger.info(f"[协议解析] 成功解析规划遥测数据 (0x71): {message['data']}")
                 else:
                     message['type'] = 'planning_telemetry_failed'
                     message['data'] = {'error': 'Failed to parse GCSTelemetry_T from bytes'}
             except Exception as e:
-                logger.error(f"[协议解析] ✗ 解析规划遥测数据 (0x71) 时发生异常: {e}")
+                logger.error(f"[协议解析] 解析规划遥测数据 (0x71) 时发生异常: {e}")
                 message['type'] = 'planning_telemetry_error'
                 message['data'] = {'error': str(e)}
         
@@ -2552,11 +2687,11 @@ def encode_extu_fcs_from_dict(pids_data: dict, cmd_idx: int = 0, cmd_mission: in
         # 6. Scale (1)
         float(pids_data.get('fScale_factor', 0.3)),  # F_Scale_factor
         
-        # 7. New Params (4)
-        float(pids_data.get('XaccLMT', 1.0)),       # XaccLMT
-        float(pids_data.get('YaccLMT', 1.0)),       # YaccLMT
-        float(pids_data.get('Hground', 0.4)),       # Hground
-        float(pids_data.get('AutoTakeoffHcmd', 10.0)), # AutoTakeoffHcmd
+        # 7. Guide / limit params (4)
+        float(pids_data.get('ParamAil_YaccLMT', pids_data.get('YaccLMT', 1.0))),
+        float(pids_data.get('ParamEle_XaccLMT', pids_data.get('XaccLMT', 1.0))),
+        float(pids_data.get('ParamGuide_Hground', pids_data.get('Hground', 0.4))),
+        float(pids_data.get('ParamGuide_AutoTakeoffHcmd', pids_data.get('AutoTakeoffHcmd', 10.0))),
     ]
     
     logger.info("-" * 50)
@@ -2568,7 +2703,7 @@ def encode_extu_fcs_from_dict(pids_data: dict, cmd_idx: int = 0, cmd_mission: in
         "F_KcH", "F_IcH", "F_KcHdot", "F_IcHdot", "F_KcAz",
         "F_IgRPM", "F_KgRPM",
         "F_Scale_factor",
-        "XaccLMT", "YaccLMT", "Hground", "AutoTakeoffHcmd"
+        "ParamAil_YaccLMT", "ParamEle_XaccLMT", "ParamGuide_Hground", "ParamGuide_AutoTakeoffHcmd"
     ]
     for i, (name, val) in enumerate(zip(param_names, pid_values)):
         logger.info(f"  [{i+1:02d}] {name:<18}: {val}")
@@ -2632,10 +2767,10 @@ def encode_command_packet(func_code: int, payload: bytes = b'') -> bytes:
                 0.0,    # F_IgRPM (电机积分系数)
                 0.01,   # F_KgRPM (电机比例系数)
                 1.0,    # F_Scale_factor (缩放因子)
-                1.0,    # XaccLMT
-                1.0,    # YaccLMT
-                0.4,    # Hground
-                10.0    # AutoTakeoffHcmd
+                1.0,    # ParamAil_YaccLMT
+                1.0,    # ParamEle_XaccLMT
+                0.4,    # ParamGuide_Hground
+                10.0    # ParamGuide_AutoTakeoffHcmd
             )
             
             # 构建3个指令字段（12字节）

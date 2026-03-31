@@ -1,0 +1,23 @@
+==> 2026-03-29 15:48:12 <==
+# cmd: D:\ProgramData\anaconda3\Scripts\conda-script.py create -p .packenv python=3.11 -y
+# conda version: 25.5.1
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/noarch::ca-certificates-2026.2.25-h4c7d964_0
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/noarch::packaging-26.0-pyhcf101f3_0
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/noarch::pip-26.0.1-pyh8b19718_0
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/noarch::setuptools-82.0.1-pyh332efcf_0
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/noarch::tzdata-2025c-hc9c84f9_1
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/noarch::wheel-0.46.3-pyhd8ed1ab_0
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::bzip2-1.0.8-h0ad9c76_9
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::libexpat-2.7.5-hac47afa_0
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::libffi-3.5.2-h3d046cb_0
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::liblzma-5.8.2-hfd05255_0
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::libsqlite-3.52.0-hf5d6505_0
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::libzlib-1.3.2-hfd05255_2
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::openssl-3.6.1-hf411b9b_1
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::python-3.11.15-h0159041_0_cpython
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::tk-8.6.13-h6ed50ae_3
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::ucrt-10.0.26100.0-h57928b3_0
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::vc-14.3-h41ae7f8_34
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::vc14_runtime-14.44.35208-h818238b_34
++https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64::vcomp14-14.44.35208-h818238b_34
+# update specs: ['python=3.11']
