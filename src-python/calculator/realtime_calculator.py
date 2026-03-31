@@ -20,11 +20,13 @@ EXPECTED_PERIOD_MS = {
     0x43: 20.0,
     0x44: 20.0,
     0x4B: 20.0,
+    0x50: 100.0,
+    0x52: 100.0,
+    0x53: 500.0,
     0x71: 100.0,
 }
 
 BUS_CAPACITY_BYTES_PER_SEC = 1_250_000.0
-CONTROL_JITTER_FUNC_CODES = {0x42, 0x43, 0x44}
 
 
 class RealTimeCalculator:
@@ -32,7 +34,6 @@ class RealTimeCalculator:
 
     def __init__(self):
         self.packet_times = defaultdict(lambda: deque(maxlen=200))
-        self.packet_intervals_ms = defaultdict(lambda: deque(maxlen=60))
         self.packet_bytes = deque(maxlen=1500)
         self.control_jitter_samples = deque(maxlen=400)
         self.tracking_error_window = deque(maxlen=200)
@@ -51,10 +52,12 @@ class RealTimeCalculator:
         self.latest_line_aim2ab: Dict[str, Any] = {}
         self.latest_line_ab: Dict[str, Any] = {}
         self.latest_planning: Dict[str, Any] = {}
+        self.latest_lidar_status: Dict[str, Any] = {}
 
         self.last_sequence = defaultdict(lambda: None)
         self.seq_total_received = defaultdict(int)
         self.seq_total_missing = defaultdict(int)
+        self.last_planning_remote_ts: Optional[float] = None
         self.last_planning_arrival: Optional[float] = None
         self.last_avoidance_flag = False
         self.last_mission_id: Optional[int] = None
@@ -89,6 +92,15 @@ class RealTimeCalculator:
             self.latest_line_ab = payload
         elif msg_type == 'planning_telemetry':
             self._update_planning(payload, now)
+        elif msg_type == 'lidar_obstacles':
+            self.obstacle_count_window.append(self._safe_number(payload.get('obstacle_count', 0)))
+        elif msg_type == 'lidar_performance':
+            self._update_lidar_performance(payload)
+        elif msg_type == 'lidar_status':
+            self.latest_lidar_status = payload
+            avg_processing = self._safe_number(payload.get('avg_processing_time_ms', 0))
+            if avg_processing > 0:
+                self.perception_latency_window.append(avg_processing)
 
         indicators = self._compute_indicators()
         dimensions = self._build_dimensions(indicators)
@@ -119,15 +131,11 @@ class RealTimeCalculator:
         self.packet_bytes.append((now, payload_size, func_code))
         self.packet_times[func_code].append(now)
 
+        expected_ms = EXPECTED_PERIOD_MS.get(func_code)
         times = self.packet_times[func_code]
-        if func_code in CONTROL_JITTER_FUNC_CODES and len(times) >= 2:
+        if expected_ms and len(times) >= 2:
             interval_ms = (times[-1] - times[-2]) * 1000.0
-            if interval_ms > 0:
-                interval_window = self.packet_intervals_ms[func_code]
-                interval_window.append(interval_ms)
-                if len(interval_window) >= 5:
-                    baseline_ms = float(np.median(list(interval_window)))
-                    self.control_jitter_samples.append(abs(interval_ms - baseline_ms))
+            self.control_jitter_samples.append(abs(interval_ms - expected_ms))
 
         seq_id = payload.get('seq_id')
         if seq_id is not None:
@@ -156,6 +164,24 @@ class RealTimeCalculator:
             self.last_energy_time = now
             self.system_power_window.append(power)
 
+        fallback_tracking_error = self._compute_command_tracking_error()
+        if fallback_tracking_error is not None:
+            self.tracking_error_window.append(fallback_tracking_error)
+
+    def _update_lidar_performance(self, payload: Dict[str, Any]) -> None:
+        processing_time_ms = self._safe_number(payload.get('processing_time_ms', 0))
+        frame_rate = self._safe_number(payload.get('frame_rate', 0))
+        obstacle_count = self._safe_number(payload.get('obstacle_count', 0))
+
+        if processing_time_ms > 0:
+            self.perception_latency_window.append(processing_time_ms)
+
+        if frame_rate > 0 and processing_time_ms > 0:
+            proxy_load = min(1.5, processing_time_ms * frame_rate / 1000.0)
+            self.perception_cpu_window.append(proxy_load)
+
+        self.obstacle_count_window.append(obstacle_count)
+
     def _update_datagcs(self, payload: Dict[str, Any]) -> None:
         self.latest_datagcs = payload
         mission_id = payload.get('Tele_GCS_Mission', payload.get('Mission'))
@@ -178,13 +204,21 @@ class RealTimeCalculator:
         self.latest_planning = payload
         self.obstacle_count_window.append(self._safe_number(payload.get('obstacle_count', 0)))
 
-        planning_time_ms = self._extract_planning_time_ms(payload)
-        if planning_time_ms is not None and planning_time_ms >= 0:
-            self.planning_time_window.append(planning_time_ms)
+        remote_ts = payload.get('timestamp')
+        remote_ts = self._safe_number(remote_ts, None)
+        if remote_ts is not None and self.last_planning_remote_ts is not None:
+            remote_delta = remote_ts - self.last_planning_remote_ts
+            if 0 < remote_delta < 10_000:
+                self.planning_time_window.append(remote_delta)
+        elif self.last_planning_arrival is not None:
+            self.planning_time_window.append((now - self.last_planning_arrival) * 1000.0)
 
+        self.last_planning_remote_ts = remote_ts
         self.last_planning_arrival = now
 
         tracking_error = self._compute_path_tracking_error(payload)
+        if tracking_error is None:
+            tracking_error = self._compute_command_tracking_error()
         if tracking_error is not None:
             self.tracking_error_window.append(tracking_error)
 
@@ -243,21 +277,15 @@ class RealTimeCalculator:
         radar_fps = self._estimate_packet_frequency(0x50)
         attitude_peak_phi_deg = round(max(self.roll_abs_window) if self.roll_abs_window else 0.0, 3)
         esc_power_pct_avg = round(self._average_list(self.latest_esc.get('power_ratings', [])), 3)
-        tracking_rmse = indicators['Ind_Tracking_RMSE'] if self.tracking_error_window else None
-        planning_time_ms = indicators['Ind_Planning_Time'] if self.planning_time_window else None
-        control_jitter_ms = indicators['Ind_Control_Jitter'] if self.control_jitter_samples else None
-        perception_latency_ms = indicators['Ind_Perception_Latency'] if self.perception_latency_window else None
-        planner_cycle_hz = round(planner_cycle_hz, 3) if planner_cycle_hz > 0 else None
-        radar_fps = round(radar_fps, 3) if radar_fps > 0 else None
 
         return {
-            'tracking_rmse': tracking_rmse,
-            'planning_time_ms': planning_time_ms,
-            'control_jitter_ms': control_jitter_ms,
-            'perception_latency_ms': perception_latency_ms,
+            'tracking_rmse': indicators['Ind_Tracking_RMSE'],
+            'planning_time_ms': indicators['Ind_Planning_Time'],
+            'control_jitter_ms': indicators['Ind_Control_Jitter'],
+            'perception_latency_ms': indicators['Ind_Perception_Latency'],
             'obstacle_count': indicators['Ind_Obstacle_Count'],
-            'planner_cycle_hz': planner_cycle_hz,
-            'radar_fps': radar_fps,
+            'planner_cycle_hz': round(planner_cycle_hz, 3),
+            'radar_fps': round(radar_fps, 3),
             'attitude_peak_phi_deg': attitude_peak_phi_deg,
             'cmd_idx': cmd_idx,
             'mission_id': mission_id,
@@ -283,9 +311,9 @@ class RealTimeCalculator:
             'p_rate': self._display_angle(state.get('states_p', 0.0)),
             'q_rate': self._display_angle(state.get('states_q', 0.0)),
             'r_rate': self._display_angle(state.get('states_r', 0.0)),
-            'phi': round(self._safe_number(state.get('states_phi', 0.0), 0.0), 3),
-            'theta': round(self._safe_number(state.get('states_theta', 0.0), 0.0), 3),
-            'psi': round(self._safe_number(state.get('states_psi', 0.0), 0.0), 3),
+            'phi': self._display_angle(state.get('states_phi', 0.0)),
+            'theta': self._display_angle(state.get('states_theta', 0.0)),
+            'psi': self._display_angle(state.get('states_psi', 0.0)),
             'raw': {
                 'states_p': self._safe_number(state.get('states_p', 0.0), 0.0),
                 'states_q': self._safe_number(state.get('states_q', 0.0), 0.0),
@@ -302,10 +330,6 @@ class RealTimeCalculator:
         aim2ab = self.latest_line_aim2ab
         line_ab = self.latest_line_ab
         avoiflag = self.latest_avoiflag
-        position = planning.get('position', {}) if isinstance(planning.get('position', {}), dict) else {}
-        local_path = planning.get('local_path') or planning.get('local_traj') or []
-        global_path = planning.get('global_path') or []
-        obstacles = planning.get('obstacles') or []
         return {
             'cmd_idx': int(self._safe_number(datagcs.get('Tele_GCS_CmdIdx', datagcs.get('CmdIdx', 0)), 0)),
             'mission_id': int(self._safe_number(datagcs.get('Tele_GCS_Mission', datagcs.get('Mission', 0)), 0)),
@@ -321,56 +345,11 @@ class RealTimeCalculator:
             'global_path_count': int(self._safe_number(planning.get('global_path_count', 0), 0)),
             'local_traj_count': int(self._safe_number(planning.get('local_traj_count', 0), 0)),
             'obstacle_count': int(self._safe_number(planning.get('obstacle_count', 0), 0)),
-            'current_pos_x': self._safe_number(planning.get('current_pos_x', position.get('x')), 0.0),
-            'current_pos_y': self._safe_number(planning.get('current_pos_y', position.get('y')), 0.0),
-            'current_pos_z': self._safe_number(planning.get('current_pos_z', position.get('z')), 0.0),
-            'global_path': global_path if isinstance(global_path, list) else [],
-            'local_path': local_path if isinstance(local_path, list) else [],
-            'local_traj': local_path if isinstance(local_path, list) else [],
-            'obstacles': obstacles if isinstance(obstacles, list) else [],
         }
 
     def _build_system_performance_view(self, window_metrics: Dict[str, Any], indicators: Dict[str, float]) -> Dict[str, Any]:
         esc_rpms = self.latest_esc.get('rpms', []) if isinstance(self.latest_esc, dict) else []
         esc_powers = self.latest_esc.get('power_ratings', []) if isinstance(self.latest_esc, dict) else []
-        trusted_metrics = {
-            'planner_cycle_hz': window_metrics['planner_cycle_hz'],
-            'radar_fps': window_metrics.get('radar_fps'),
-            'perception_latency_ms': window_metrics['perception_latency_ms'],
-            'obstacle_count': window_metrics['obstacle_count'],
-            'avoid_trigger_count': window_metrics['avoid_trigger_count'],
-            'mission_switch_count': window_metrics['mission_switch_count'],
-            'next_waypoint': window_metrics['next_waypoint'],
-            'esc_power_pct_avg': window_metrics.get('esc_power_pct_avg', window_metrics['esc_power_pct']),
-            'esc_rpm_avg': round(self._average_list(esc_rpms), 3),
-            'esc_rpm_max': round(max([self._safe_number(value, 0.0) for value in esc_rpms], default=0.0), 3),
-            'esc_power_max': round(max([self._safe_number(value, 0.0) for value in esc_powers], default=0.0), 3),
-            'downlink_loss_rate': indicators['Ind_Downlink_Loss'],
-        }
-        derived_metrics = {
-            'planning_time_ms': window_metrics['planning_time_ms'],
-            'tracking_rmse': window_metrics['tracking_rmse'],
-            'control_jitter_ms': window_metrics['control_jitter_ms'],
-            'attitude_peak_phi_deg': window_metrics.get('attitude_peak_phi_deg'),
-        }
-        metric_quality = {
-            'planner_cycle_hz': 'trusted',
-            'radar_fps': 'trusted',
-            'perception_latency_ms': 'trusted',
-            'obstacle_count': 'trusted',
-            'avoid_trigger_count': 'trusted',
-            'mission_switch_count': 'trusted',
-            'next_waypoint': 'trusted',
-            'esc_power_pct_avg': 'trusted',
-            'esc_rpm_avg': 'trusted',
-            'esc_rpm_max': 'trusted',
-            'esc_power_max': 'trusted',
-            'downlink_loss_rate': 'trusted',
-            'planning_time_ms': 'derived' if window_metrics['planning_time_ms'] is not None else 'unavailable',
-            'tracking_rmse': 'derived' if window_metrics['tracking_rmse'] is not None else 'unavailable',
-            'control_jitter_ms': 'derived' if window_metrics['control_jitter_ms'] is not None else 'unavailable',
-            'attitude_peak_phi_deg': 'derived',
-        }
         return {
             'perception_latency_ms': window_metrics['perception_latency_ms'],
             'planning_time_ms': window_metrics['planning_time_ms'],
@@ -386,13 +365,10 @@ class RealTimeCalculator:
             'mission_id': window_metrics['mission_id'],
             'esc_power_pct': window_metrics['esc_power_pct'],
             'esc_power_pct_avg': window_metrics.get('esc_power_pct_avg', window_metrics['esc_power_pct']),
-            'esc_rpm_avg': trusted_metrics['esc_rpm_avg'],
-            'esc_rpm_max': trusted_metrics['esc_rpm_max'],
-            'esc_power_max': trusted_metrics['esc_power_max'],
+            'esc_rpm_avg': round(self._average_list(esc_rpms), 3),
+            'esc_rpm_max': round(max([self._safe_number(value, 0.0) for value in esc_rpms], default=0.0), 3),
+            'esc_power_max': round(max([self._safe_number(value, 0.0) for value in esc_powers], default=0.0), 3),
             'downlink_loss_rate': indicators['Ind_Downlink_Loss'],
-            'trusted': trusted_metrics,
-            'derived': derived_metrics,
-            'metric_quality': metric_quality,
         }
 
     def _build_dimensions(self, indicators: Dict[str, float]) -> Dict[str, Dict[str, Any]]:
@@ -499,28 +475,19 @@ class RealTimeCalculator:
 
         return min(distances) if distances else None
 
-    def _extract_planning_time_ms(self, payload: Dict[str, Any]) -> Optional[float]:
-        candidate_keys = [
-            'planning_time_ms',
-            'planner_time_ms',
-            'solve_time_ms',
-            'processing_time_ms',
-            'latency_ms',
-        ]
+    def _compute_command_tracking_error(self) -> Optional[float]:
+        if not self.latest_fcs_states or not self.latest_gncbus:
+            return None
 
-        for key in candidate_keys:
-            value = self._safe_number(payload.get(key), None)
-            if value is not None:
-                return value
+        actual_vx = self._safe_number(self.latest_fcs_states.get('states_Vx_GS', 0.0))
+        actual_vy = self._safe_number(self.latest_fcs_states.get('states_Vy_GS', 0.0))
+        actual_h = self._safe_number(self.latest_fcs_states.get('states_height', 0.0))
 
-        performance_payload = payload.get('performance')
-        if isinstance(performance_payload, dict):
-            for key in candidate_keys:
-                value = self._safe_number(performance_payload.get(key), None)
-                if value is not None:
-                    return value
+        cmd_vx = self._safe_number(self.latest_gncbus.get('GNCBus_CmdValue_Vx_cmd', actual_vx))
+        cmd_vy = self._safe_number(self.latest_gncbus.get('GNCBus_CmdValue_Vy_cmd', actual_vy))
+        cmd_h = self._safe_number(self.latest_gncbus.get('GNCBus_CmdValue_height_cmd', actual_h))
 
-        return None
+        return math.sqrt((actual_vx - cmd_vx) ** 2 + (actual_vy - cmd_vy) ** 2 + (actual_h - cmd_h) ** 2)
 
     def _calc_overall_score(self, dimensions: Dict[str, Dict[str, Any]]) -> float:
         weights = {

@@ -11,8 +11,8 @@ from datetime import datetime
 # ==================== 列数常量 ====================
 
 # 总列数（重新核对）
-# 1 + 8 + 12 + 53 + 73 + 3 + 6 + 4 + 21 + 21 + 26 + 18 = 246
-TOTAL_COLUMNS = 246
+# 1 + 8 + 12 + 53 + 73 + 3 + 6 + 4 + 21 + 21 + 26 + 36 = 264
+TOTAL_COLUMNS = 264
 
 # 各数据段的列数（根据interface.h严格计数）
 COL_TIMESTAMP = 1
@@ -26,7 +26,7 @@ COL_GCS = 4
 COL_AC_AIM2AB = 21 
 COL_AC_AB = 21      
 COL_PARAM = 26
-COL_ESC = 18
+COL_ESC = 36
 
 # 累计偏移量
 OFFSET_PWMS = COL_TIMESTAMP
@@ -362,9 +362,15 @@ def get_full_header() -> str:
         "ParamScale_F_scale_factor"
     ])
     
-    # 12. ESC数据 (18字段)
+    # 12. ESC数据 (36字段)
     for i in range(1, 7):
         header_fields.append(f"esc{i}_error_count")
+    for i in range(1, 7):
+        header_fields.append(f"esc{i}_voltage")
+    for i in range(1, 7):
+        header_fields.append(f"esc{i}_current")
+    for i in range(1, 7):
+        header_fields.append(f"esc{i}_temperature")
     for i in range(1, 7):
         header_fields.append(f"esc{i}_rpm")
     for i in range(1, 7):
@@ -775,12 +781,18 @@ def _format_param_row(timestamp: str, param_data: Dict[str, Any]) -> str:
 
 
 def _format_esc_row(timestamp: str, esc_data: Dict[str, Any]) -> str:
-    """Format ESC data row (18 columns)."""
+    """Format ESC data row (36 columns)."""
     row = [timestamp]
     row.extend([""] * (OFFSET_ESC - 1))
 
     for i in range(1, 7):
         row.append(str(_safe_int(esc_data.get(f'esc{i}_error_count', 0))))
+    for i in range(1, 7):
+        row.append(f"{_safe_float(esc_data.get(f'esc{i}_voltage', 0.0)):.4f}")
+    for i in range(1, 7):
+        row.append(f"{_safe_float(esc_data.get(f'esc{i}_current', 0.0)):.4f}")
+    for i in range(1, 7):
+        row.append(f"{_safe_float(esc_data.get(f'esc{i}_temperature', 0.0)):.4f}")
     for i in range(1, 7):
         row.append(str(_safe_int(esc_data.get(f'esc{i}_rpm', 0))))
     for i in range(1, 7):

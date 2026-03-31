@@ -1,0 +1,45 @@
+{
+  "build": "hac47afa_0",
+  "build_number": 0,
+  "channel": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64",
+  "constrains": [
+    "expat 2.7.5.*"
+  ],
+  "depends": [
+    "ucrt >=10.0.20348.0",
+    "vc >=14.3,<15",
+    "vc14_runtime >=14.44.35208"
+  ],
+  "extracted_package_dir": "D:\\Anaconda_envs\\pkgs\\libexpat-2.7.5-hac47afa_0",
+  "files": [
+    "Library/bin/libexpat.dll"
+  ],
+  "fn": "libexpat-2.7.5-hac47afa_0.conda",
+  "license": "MIT",
+  "link": {
+    "source": "D:\\Anaconda_envs\\pkgs\\libexpat-2.7.5-hac47afa_0",
+    "type": 1
+  },
+  "md5": "bfb43f52f13b7c56e7677aa7a8efdf0c",
+  "name": "libexpat",
+  "package_tarball_full_path": "D:\\Anaconda_envs\\pkgs\\libexpat-2.7.5-hac47afa_0.conda",
+  "paths_data": {
+    "paths": [
+      {
+        "_path": "Library/bin/libexpat.dll",
+        "path_type": "hardlink",
+        "sha256": "cd32c68ca2de9b9d2b665e722e2241d7cd57ec520c54b1559631e28cf4c1fcdf",
+        "sha256_in_prefix": "cd32c68ca2de9b9d2b665e722e2241d7cd57ec520c54b1559631e28cf4c1fcdf",
+        "size_in_bytes": 264704
+      }
+    ],
+    "paths_version": 1
+  },
+  "requested_spec": "None",
+  "sha256": "6850c3a4d5dc215b86f58518cfb8752998533d6569b08da8df1da72e7c68e571",
+  "size": 70609,
+  "subdir": "win-64",
+  "timestamp": 1774719377000,
+  "url": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64/libexpat-2.7.5-hac47afa_0.conda",
+  "version": "2.7.5"
+}

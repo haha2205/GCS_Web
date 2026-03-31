@@ -1,0 +1,45 @@
+{
+  "build": "hfd05255_0",
+  "build_number": 0,
+  "channel": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64",
+  "constrains": [
+    "xz 5.8.2.*"
+  ],
+  "depends": [
+    "ucrt >=10.0.20348.0",
+    "vc >=14.3,<15",
+    "vc14_runtime >=14.44.35208"
+  ],
+  "extracted_package_dir": "D:\\Anaconda_envs\\pkgs\\liblzma-5.8.2-hfd05255_0",
+  "files": [
+    "Library/bin/liblzma.dll"
+  ],
+  "fn": "liblzma-5.8.2-hfd05255_0.conda",
+  "license": "0BSD",
+  "link": {
+    "source": "D:\\Anaconda_envs\\pkgs\\liblzma-5.8.2-hfd05255_0",
+    "type": 1
+  },
+  "md5": "ba0bfd4c3cf73f299ffe46ff0eaeb8e3",
+  "name": "liblzma",
+  "package_tarball_full_path": "D:\\Anaconda_envs\\pkgs\\liblzma-5.8.2-hfd05255_0.conda",
+  "paths_data": {
+    "paths": [
+      {
+        "_path": "Library/bin/liblzma.dll",
+        "path_type": "hardlink",
+        "sha256": "c8bbdf05499afa44fd862484b4f98f2855792ff62ea05e10b7cdf3020f999e3b",
+        "sha256_in_prefix": "c8bbdf05499afa44fd862484b4f98f2855792ff62ea05e10b7cdf3020f999e3b",
+        "size_in_bytes": 188416
+      }
+    ],
+    "paths_version": 1
+  },
+  "requested_spec": "None",
+  "sha256": "f25bf293f550c8ed2e0c7145eb404324611cfccff37660869d97abf526eb957c",
+  "size": 106169,
+  "subdir": "win-64",
+  "timestamp": 1768752763000,
+  "url": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64/liblzma-5.8.2-hfd05255_0.conda",
+  "version": "5.8.2"
+}

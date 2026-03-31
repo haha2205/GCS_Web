@@ -1,0 +1,32 @@
+{
+  "build": "h41ae7f8_34",
+  "build_number": 34,
+  "channel": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64",
+  "constrains": [],
+  "depends": [
+    "vc14_runtime >=14.44.35208"
+  ],
+  "extracted_package_dir": "D:\\Anaconda_envs\\pkgs\\vc-14.3-h41ae7f8_34",
+  "files": [],
+  "fn": "vc-14.3-h41ae7f8_34.conda",
+  "license": "BSD-3-Clause",
+  "link": {
+    "source": "D:\\Anaconda_envs\\pkgs\\vc-14.3-h41ae7f8_34",
+    "type": 1
+  },
+  "md5": "1e610f2416b6acdd231c5f573d754a0f",
+  "name": "vc",
+  "package_tarball_full_path": "D:\\Anaconda_envs\\pkgs\\vc-14.3-h41ae7f8_34.conda",
+  "paths_data": {
+    "paths": [],
+    "paths_version": 1
+  },
+  "requested_spec": "None",
+  "sha256": "9dc40c2610a6e6727d635c62cced5ef30b7b30123f5ef67d6139e23d21744b3a",
+  "size": 19356,
+  "subdir": "win-64",
+  "timestamp": 1767320221000,
+  "track_features": "vc14",
+  "url": "https://mirrors.tuna.tsinghua.edu.cn/anaconda/cloud/conda-forge/win-64/vc-14.3-h41ae7f8_34.conda",
+  "version": "14.3"
+}
