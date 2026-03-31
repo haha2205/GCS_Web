@@ -89,32 +89,18 @@ const sysLogRef = ref(null)
 const targetPos = ref({ x: 100, y: 100, z: 10 })
 const cruiseSpeed = ref(5)
 const enableMission = ref(false)
-const currentCmdIdx = ref(0)
 const seqIdCounter = ref(0)
-const sysLogs = ref([])
 
-watch(() => droneStore.gcsData?.Tele_GCS_CmdIdx, (newVal) => {
-  if (newVal !== 0 && newVal !== undefined) {
-    currentCmdIdx.value = newVal
-  }
-}, { immediate: true })
+const currentCmdIdx = computed(() => droneStore.activeCommandIdx)
+const sysLogs = computed(() => droneStore.displaySystemLogs)
 
-watch(() => droneStore.logs, (logs) => {
-  if (logs.length > 0) {
-    const lastLog = logs[logs.length - 1]
-    sysLogs.value.push({
-      time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-      level: lastLog.level === 'error' ? 'error' : lastLog.level === 'warning' ? 'warn' : lastLog.level === 'success' ? 'success' : 'info',
-      icon: lastLog.level === 'error' ? '❌' : lastLog.level === 'warning' ? '⚠' : '✓',
-      message: lastLog.message
-    })
-    setTimeout(() => {
-      if (sysLogRef.value) {
-        sysLogRef.value.scrollTop = sysLogRef.value.scrollHeight
-      }
-    }, 100)
-  }
-}, { deep: true })
+watch(() => sysLogs.value.length, () => {
+  setTimeout(() => {
+    if (sysLogRef.value) {
+      sysLogRef.value.scrollTop = sysLogRef.value.scrollHeight
+    }
+  }, 80)
+})
 
 const currentCmdIdxInfo = computed(() => {
   if (currentCmdIdx.value === 0) return 'CmdIdx: 无'
@@ -127,24 +113,7 @@ const currentCmdIdxInfo = computed(() => {
   return `CmdIdx ${currentCmdIdx.value} ${cmdMap[currentCmdIdx.value] || ''}`
 })
 
-const addSysLog = (message, level = 'info') => {
-  sysLogs.value.unshift({
-    time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
-    level,
-    icon: level === 'error' ? '❌' : level === 'warning' ? '⚠' : level === 'success' ? '✓' : 'ℹ',
-    message
-  })
-
-  if (sysLogs.value.length > 100) {
-    sysLogs.value = sysLogs.value.slice(0, 100)
-  }
-
-  setTimeout(() => {
-    if (sysLogRef.value) {
-      sysLogRef.value.scrollTop = sysLogRef.value.scrollHeight
-    }
-  }, 50)
-}
+const addSysLog = (message, level = 'info') => droneStore.addLog(message, level)
 
 const triggerCriticalCommand = async (cmd) => {
   if (!droneStore.canSendCommands) {
@@ -203,8 +172,7 @@ const resetPlanning = () => {
 }
 
 const clearSysLog = () => {
-  sysLogs.value = []
-  addSysLog('日志已清空', 'info')
+  droneStore.clearLogs()
 }
 </script>
 

@@ -4,28 +4,20 @@
  */
 import { ref } from 'vue'
 
-export function useWebSocket(url) {
+export function useWebSocket(url, options = {}) {
   const ws = ref(null)
   const connected = ref(false)
   const connecting = ref(false)
   const error = ref(null)
   const reconnectEnabled = ref(true)
   const reconnectAttempts = ref(0)
+  const pingIntervalMs = Number(options.pingIntervalMs) || 2500
+  const staleTimeoutMs = Math.max(Number(options.staleTimeoutMs) || 8000, pingIntervalMs * 2)
   let reconnectTimer = null
   let manualDisconnect = false
-  
-  // KPI 数据状态
-  const kpiData = ref({
-    timestamp: null,
-    dimensions: {
-      computing: null,
-      communication: null,
-      energy: null,
-      mission: null,
-      performance: null
-    },
-    overallScore: null
-  })
+  let keepAliveTimer = null
+  let staleCheckTimer = null
+  let lastMessageAt = 0
   
   // 消息处理器回调
   let messageHandler = null
@@ -37,6 +29,55 @@ export function useWebSocket(url) {
   function cleanup() {
     reconnectEnabled.value = false
     disconnect()
+  }
+
+  function stopConnectionMonitors() {
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer)
+      keepAliveTimer = null
+    }
+    if (staleCheckTimer) {
+      clearInterval(staleCheckTimer)
+      staleCheckTimer = null
+    }
+  }
+
+  function markAlive() {
+    lastMessageAt = Date.now()
+  }
+
+  function startConnectionMonitors() {
+    stopConnectionMonitors()
+    markAlive()
+
+    keepAliveTimer = setInterval(() => {
+      if (!ws.value || ws.value.readyState !== WebSocket.OPEN) {
+        return
+      }
+
+      try {
+        ws.value.send(JSON.stringify({ type: 'ping', timestamp: Date.now() }))
+      } catch (sendError) {
+        console.warn('WebSocket ping 发送失败:', sendError)
+      }
+    }, pingIntervalMs)
+
+    staleCheckTimer = setInterval(() => {
+      if (!ws.value || ws.value.readyState !== WebSocket.OPEN || manualDisconnect) {
+        return
+      }
+
+      if (Date.now() - lastMessageAt <= staleTimeoutMs) {
+        return
+      }
+
+      console.warn(`WebSocket 超过 ${staleTimeoutMs}ms 未收到消息，准备重连`)
+      try {
+        ws.value.close(4000, 'stale connection')
+      } catch (closeError) {
+        console.warn('关闭过期 WebSocket 失败:', closeError)
+      }
+    }, 1000)
   }
   
   /**
@@ -67,6 +108,8 @@ export function useWebSocket(url) {
         connecting.value = false
         error.value = null
         reconnectAttempts.value = 0
+        markAlive()
+        startConnectionMonitors()
         
         if (openHandler) {
           openHandler()
@@ -74,17 +117,13 @@ export function useWebSocket(url) {
       }
       
       ws.value.onmessage = (event) => {
+        markAlive()
         if (messageHandler) {
           try {
             const data = typeof event.data === 'string'
               ? JSON.parse(event.data)
               : event.data
-            
-            // 处理 KPI 更新消息
-            if (data.type === 'kpi_update') {
-              handleKPIUpdate(data)
-            }
-            
+
             messageHandler(data)
           } catch (e) {
             console.error('解析消息失败:', e)
@@ -94,6 +133,7 @@ export function useWebSocket(url) {
       
       ws.value.onclose = (event) => {
         console.log('WebSocket 连接已关闭, code:', event.code)
+        stopConnectionMonitors()
         connected.value = false
         connecting.value = false
         ws.value = null
@@ -143,20 +183,6 @@ export function useWebSocket(url) {
   }
   
   /**
-   * 处理 KPI 数据更新
-   */
-  function handleKPIUpdate(messageData) {
-    if (messageData.type === 'kpi_update' && messageData.data) {
-      kpiData.value = {
-        timestamp: messageData.timestamp,
-        dimensions: messageData.data.dimensions || {},
-        overallScore: messageData.data.overallScore ?? messageData.data.overall_score ?? null
-      }
-      console.log('[WebSocket] KPI数据已更新:', kpiData.value)
-    }
-  }
-  
-  /**
    * 启动录制
    */
   function startRecording() {
@@ -196,6 +222,7 @@ export function useWebSocket(url) {
   function disconnect() {
     manualDisconnect = true
     reconnectEnabled.value = false
+    stopConnectionMonitors()
     if (reconnectTimer) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
@@ -263,7 +290,6 @@ export function useWebSocket(url) {
     onOpen,
     onClose,
     onError,
-    kpiData,
     startRecording,
     stopRecording
   }

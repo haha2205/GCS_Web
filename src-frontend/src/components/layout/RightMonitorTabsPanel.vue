@@ -52,22 +52,22 @@
 
         <div class="column-scroll">
           <div class="monitor-section chart-grid-section">
-            <div class="section-subtitle">机载关键曲线</div>
+            <div class="section-subtitle">电机数值</div>
             <div class="chart-grid">
               <div class="chart-cell">
-                <EChartWrapper title="地速分量" unit="m/s" :series="groundVelocitySeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
+                <EChartWrapper title="电调电压" unit="V" :series="escVoltageSeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
               </div>
               <div class="chart-cell">
-                <EChartWrapper title="角速度 p/q/r" unit="rad/s" :series="angularRateSeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
+                <EChartWrapper title="电调电流" unit="A" :series="escCurrentSeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
               </div>
               <div class="chart-cell">
-                <EChartWrapper title="控制令牌状态" :series="controlTokenSeries" :showLegend="true" :height="140" :yMin="0" :yMax="4" :optionOverrides="tokenTimeChartOverrides" />
+                <EChartWrapper title="电调温度" unit="°C" :series="escTempSeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
               </div>
               <div class="chart-cell">
-                <EChartWrapper title="高度趋势" unit="m" :series="heightSeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
+                <EChartWrapper title="电机转速" unit="rpm" :series="escRpmSeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
               </div>
               <div class="chart-cell chart-span-2">
-                <EChartWrapper title="遥控输入" :series="futabaSeries" :showLegend="true" :height="140" :optionOverrides="defaultTimeChartOverrides" />
+                <EChartWrapper title="功率百分比" unit="%" :series="escPowerSeries" :showLegend="true" :height="140" :yMin="0" :yMax="100" :optionOverrides="defaultTimeChartOverrides" />
               </div>
             </div>
           </div>
@@ -76,9 +76,6 @@
     </div>
 
     <section class="trend-band">
-      <div class="trend-card">
-        <EChartWrapper key="attitude-trend-chart" title="姿态角趋势" unit="deg" :series="attitudeTrendSeries" :showLegend="true" :height="180" :optionOverrides="defaultTimeChartOverrides" />
-      </div>
       <div class="trend-card">
         <EChartWrapper key="path-deviation-trend-chart" title="轨迹偏差趋势" unit="m" :series="pathDeviationSeries" :showLegend="true" :height="180" :optionOverrides="defaultTimeChartOverrides" />
       </div>
@@ -121,7 +118,6 @@ const monitorContentClass = computed(() => ({
   'empty-panel': !showControlPanel.value && !showSystemPanel.value
 }))
 
-const trimSeries = (entries = [], limit = 120) => (entries || []).slice(-limit).map((item) => item.value)
 const trimTimedSeries = (entries = [], limit = 120) => (entries || []).slice(-limit).map((item) => [item.timestamp, item.value])
 const trimTrack = (entries = [], limit = 180) => (entries || []).slice(-limit)
 
@@ -158,33 +154,24 @@ const defaultTimeChartOverrides = {
   }
 }
 
-const tokenTimeChartOverrides = {
-  ...defaultTimeChartOverrides,
-  yAxis: {
-    type: 'value',
-    min: 0,
-    max: 4,
-    interval: 1,
-    axisLine: {
-      lineStyle: {
-        color: '#94a3b8'
-      }
-    },
-    axisLabel: {
-      color: '#475569'
-    },
-    splitLine: {
-      lineStyle: {
-        color: '#dbe4ef',
-        type: 'dashed'
-      }
-    }
-  }
-}
-
 const formatValue = (value, digits = 2) => {
   const num = Number(value)
   return Number.isFinite(num) ? num.toFixed(digits) : (0).toFixed(digits)
+}
+
+const formatTelemetryValue = (hasTelemetry, value, digits = 2) => {
+  if (!hasTelemetry) {
+    return '--'
+  }
+  return formatValue(value, digits)
+}
+
+const formatTelemetryInteger = (hasTelemetry, value) => {
+  if (!hasTelemetry) {
+    return '--'
+  }
+  const num = Number(value)
+  return Number.isFinite(num) ? String(Math.trunc(num)) : '--'
 }
 
 const statesLat = computed(() => droneStore.fcsStates?.states_lat ?? 0)
@@ -199,37 +186,43 @@ const statesR = computed(() => droneStore.fcsStates?.states_r ?? 0)
 const statesPhi = computed(() => droneStore.realtimeViews?.flightState?.phi ?? droneStore.attitude?.roll ?? 0)
 const statesTheta = computed(() => droneStore.realtimeViews?.flightState?.theta ?? droneStore.attitude?.pitch ?? 0)
 const statesPsi = computed(() => droneStore.realtimeViews?.flightState?.psi ?? droneStore.attitude?.yaw ?? 0)
+const hasFlightTelemetry = computed(() => !!droneStore.telemetryTimestamps?.flightState)
+const hasGcsTelemetry = computed(() => !!droneStore.telemetryTimestamps?.gcsData)
+const alignedTargetPath = computed(() => {
+  const source = droneStore.localTraj.length ? droneStore.localTraj : droneStore.globalPath
+  return (source || []).map((point) => droneStore._alignPlanningPoint(point))
+})
 
 const gcsCards = computed(() => {
   const gcs = droneStore.gcsData || {}
   return [
-    { label: 'CmdIdx', value: Number.isFinite(Number(gcs.Tele_GCS_CmdIdx)) ? String(gcs.Tele_GCS_CmdIdx) : '0', unit: 'idx' },
-    { label: 'Mission', value: Number.isFinite(Number(gcs.Tele_GCS_Mission)) ? String(gcs.Tele_GCS_Mission) : '0', unit: 'mission' },
-    { label: 'Val', value: formatValue(gcs.Tele_GCS_Val, 3), unit: 'value' },
-    { label: 'GCS Fail', value: Number(gcs.Tele_GCS_com_GCS_fail) ? 'FAIL' : 'OK', unit: 'link' }
+    { label: 'CmdIdx', value: formatTelemetryInteger(hasGcsTelemetry.value, gcs.Tele_GCS_CmdIdx), unit: 'idx' },
+    { label: 'Mission', value: formatTelemetryInteger(hasGcsTelemetry.value, gcs.Tele_GCS_Mission), unit: 'mission' },
+    { label: 'Val', value: hasGcsTelemetry.value ? formatValue(gcs.Tele_GCS_Val, 3) : '--', unit: 'value' },
+    { label: 'GCS Fail', value: hasGcsTelemetry.value ? (Number(gcs.Tele_GCS_com_GCS_fail) ? 'FAIL' : 'OK') : '未接入', unit: 'link' }
   ]
 })
 
 const stateColumns = computed(() => [
   [
-    { label: '纬度', value: formatValue(statesLat.value, 6), unit: 'deg' },
-    { label: '经度', value: formatValue(statesLon.value, 6), unit: 'deg' },
-    { label: '高度', value: formatValue(statesHeight.value), unit: 'm' }
+    { label: '纬度', value: formatTelemetryValue(hasFlightTelemetry.value, statesLat.value, 6), unit: 'deg' },
+    { label: '经度', value: formatTelemetryValue(hasFlightTelemetry.value, statesLon.value, 6), unit: 'deg' },
+    { label: '高度', value: formatTelemetryValue(hasFlightTelemetry.value, statesHeight.value), unit: 'm' }
   ],
   [
-    { label: 'Vx', value: formatValue(statesVx.value), unit: 'm/s' },
-    { label: 'Vy', value: formatValue(statesVy.value), unit: 'm/s' },
-    { label: 'Vz', value: formatValue(statesVz.value), unit: 'm/s' }
+    { label: 'Vx', value: formatTelemetryValue(hasFlightTelemetry.value, statesVx.value), unit: 'm/s' },
+    { label: 'Vy', value: formatTelemetryValue(hasFlightTelemetry.value, statesVy.value), unit: 'm/s' },
+    { label: 'Vz', value: formatTelemetryValue(hasFlightTelemetry.value, statesVz.value), unit: 'm/s' }
   ],
   [
-    { label: 'p', value: formatValue(statesP.value, 3), unit: 'rad/s' },
-    { label: 'q', value: formatValue(statesQ.value, 3), unit: 'rad/s' },
-    { label: 'r', value: formatValue(statesR.value, 3), unit: 'rad/s' }
+    { label: 'p', value: formatTelemetryValue(hasFlightTelemetry.value, statesP.value, 3), unit: 'rad/s' },
+    { label: 'q', value: formatTelemetryValue(hasFlightTelemetry.value, statesQ.value, 3), unit: 'rad/s' },
+    { label: 'r', value: formatTelemetryValue(hasFlightTelemetry.value, statesR.value, 3), unit: 'rad/s' }
   ],
   [
-    { label: 'φ', value: formatValue(statesPhi.value), unit: 'deg' },
-    { label: 'θ', value: formatValue(statesTheta.value), unit: 'deg' },
-    { label: 'ψ', value: formatValue(statesPsi.value), unit: 'deg' }
+    { label: 'φ', value: formatTelemetryValue(hasFlightTelemetry.value, statesPhi.value), unit: 'deg' },
+    { label: 'θ', value: formatTelemetryValue(hasFlightTelemetry.value, statesTheta.value), unit: 'deg' },
+    { label: 'ψ', value: formatTelemetryValue(hasFlightTelemetry.value, statesPsi.value), unit: 'deg' }
   ]
 ])
 
@@ -242,41 +235,53 @@ const pwmSeries = computed(() => [
   { name: 'M6', data: trimTimedSeries(droneStore.history.pwm6, 100), lineStyle: { color: '#f97316' }, itemStyle: { color: '#f97316' } }
 ])
 
-const groundVelocitySeries = computed(() => [
-  { name: 'Vx', data: trimTimedSeries(droneStore.history.velocityX), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
-  { name: 'Vy', data: trimTimedSeries(droneStore.history.velocityY), lineStyle: { color: '#f97316' }, itemStyle: { color: '#f97316' } },
-  { name: 'Vz', data: trimTimedSeries(droneStore.history.velocityZ), lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' } }
-])
+const motorColors = ['#ef4444', '#14b8a6', '#0ea5e9', '#22c55e', '#f59e0b', '#f97316']
+const motorNames = ['M1', 'M2', 'M3', 'M4', 'M5', 'M6']
 
-const angularRateSeries = computed(() => [
-  { name: 'p', data: trimTimedSeries(droneStore.history.angularRateP), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
-  { name: 'q', data: trimTimedSeries(droneStore.history.angularRateQ), lineStyle: { color: '#f97316' }, itemStyle: { color: '#f97316' } },
-  { name: 'r', data: trimTimedSeries(droneStore.history.angularRateR), lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' } }
-])
+const escVoltageSeries = computed(() =>
+  motorNames.map((name, i) => ({
+    name,
+    data: trimTimedSeries(droneStore.history[`escVoltage${i + 1}`], 100),
+    lineStyle: { color: motorColors[i] },
+    itemStyle: { color: motorColors[i] }
+  }))
+)
 
-const controlTokenSeries = computed(() => [
-  { name: 'rud', data: trimTimedSeries(droneStore.history.tokenRud), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
-  { name: 'ail', data: trimTimedSeries(droneStore.history.tokenAil), lineStyle: { color: '#f59e0b' }, itemStyle: { color: '#f59e0b' } },
-  { name: 'ele', data: trimTimedSeries(droneStore.history.tokenEle), lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' } },
-  { name: 'col', data: trimTimedSeries(droneStore.history.tokenCol), lineStyle: { color: '#ef4444' }, itemStyle: { color: '#ef4444' } }
-])
+const escCurrentSeries = computed(() =>
+  motorNames.map((name, i) => ({
+    name,
+    data: trimTimedSeries(droneStore.history[`escCurrent${i + 1}`], 100),
+    lineStyle: { color: motorColors[i] },
+    itemStyle: { color: motorColors[i] }
+  }))
+)
 
-const heightSeries = computed(() => [
-  { name: 'Actual', data: trimTimedSeries(droneStore.history.altitudeActual), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
-  { name: 'Target', data: trimTimedSeries(droneStore.history.altitudeTarget), lineStyle: { color: '#94a3b8', type: 'dashed' }, itemStyle: { color: '#94a3b8' } }
-])
+const escTempSeries = computed(() =>
+  motorNames.map((name, i) => ({
+    name,
+    data: trimTimedSeries(droneStore.history[`escTemp${i + 1}`], 100),
+    lineStyle: { color: motorColors[i] },
+    itemStyle: { color: motorColors[i] }
+  }))
+)
 
-const futabaSeries = computed(() => [
-  { name: 'Roll', data: trimTimedSeries(droneStore.history.futabaRoll), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
-  { name: 'Pitch', data: trimTimedSeries(droneStore.history.futabaPitch), lineStyle: { color: '#f97316' }, itemStyle: { color: '#f97316' } },
-  { name: 'Yaw', data: trimTimedSeries(droneStore.history.futabaYaw), lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' } }
-])
+const escRpmSeries = computed(() =>
+  motorNames.map((name, i) => ({
+    name,
+    data: trimTimedSeries(droneStore.history[`escRpm${i + 1}`], 100),
+    lineStyle: { color: motorColors[i] },
+    itemStyle: { color: motorColors[i] }
+  }))
+)
 
-const attitudeTrendSeries = computed(() => [
-  { name: 'Roll', data: trimTimedSeries(droneStore.history.rollActual, 160), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
-  { name: 'Pitch', data: trimTimedSeries(droneStore.history.pitchActual, 160), lineStyle: { color: '#0ea5e9' }, itemStyle: { color: '#0ea5e9' } },
-  { name: 'Yaw', data: trimTimedSeries(droneStore.history.yawActual, 160), lineStyle: { color: '#f97316' }, itemStyle: { color: '#f97316' } }
-])
+const escPowerSeries = computed(() =>
+  motorNames.map((name, i) => ({
+    name,
+    data: trimTimedSeries(droneStore.history[`escPower${i + 1}`], 100),
+    lineStyle: { color: motorColors[i] },
+    itemStyle: { color: motorColors[i] }
+  }))
+)
 
 const pathDeviationSeries = computed(() => [
   { name: 'Error X', data: trimTimedSeries(droneStore.metricTrends.pathErrorX, 160), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
@@ -287,8 +292,7 @@ const pathDeviationSeries = computed(() => [
 
 const trajectorySeries = computed(() => {
   const actualPath = trimTrack(droneStore.trajectory, 220).map((point) => [point.x, point.y])
-  const targetPathSource = droneStore.localTraj.length ? droneStore.localTraj : droneStore.globalPath
-  const targetPath = trimTrack(targetPathSource, 220).map((point) => [point.x, point.y])
+  const targetPath = trimTrack(alignedTargetPath.value, 220).map((point) => [point.x, point.y])
 
   return [
     {
@@ -336,16 +340,28 @@ const trajectoryChartOverrides = computed(() => ({
 .monitor-tabs-panel {
   width: 100%;
   height: 100%;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+  overflow-y: auto;
+  overflow-x: hidden;
   background: linear-gradient(180deg, #f8fbff 0%, #edf4fb 100%);
   color: var(--text-primary);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(37, 99, 235, 0.38) rgba(219, 228, 239, 0.7);
+}
+
+.monitor-tabs-panel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.monitor-tabs-panel::-webkit-scrollbar-track {
+  background: rgba(219, 228, 239, 0.7);
+}
+
+.monitor-tabs-panel::-webkit-scrollbar-thumb {
+  background: rgba(37, 99, 235, 0.38);
+  border-radius: 999px;
 }
 
 .monitor-content {
-  flex: 1;
-  min-height: 0;
   display: grid;
   grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
   gap: 12px;
@@ -361,9 +377,6 @@ const trajectoryChartOverrides = computed(() => ({
 }
 
 .monitor-column {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
   background: rgba(255, 255, 255, 0.98);
   border: 1px solid var(--border-color);
   border-radius: 14px;
@@ -384,26 +397,7 @@ const trajectoryChartOverrides = computed(() => ({
 }
 
 .column-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
   padding: 12px;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(37, 99, 235, 0.38) rgba(219, 228, 239, 0.7);
-}
-
-.column-scroll::-webkit-scrollbar {
-  width: 8px;
-}
-
-.column-scroll::-webkit-scrollbar-track {
-  background: rgba(219, 228, 239, 0.7);
-  border-radius: 999px;
-}
-
-.column-scroll::-webkit-scrollbar-thumb {
-  background: rgba(37, 99, 235, 0.38);
-  border-radius: 999px;
 }
 
 .chart-shell,
@@ -504,9 +498,8 @@ const trajectoryChartOverrides = computed(() => ({
 }
 
 .trend-band {
-  flex: 0 0 232px;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
   padding: 0 12px 12px;
 }
@@ -563,7 +556,6 @@ const trajectoryChartOverrides = computed(() => ({
 
   .trend-band {
     grid-template-columns: 1fr;
-    flex-basis: 620px;
   }
 }
 

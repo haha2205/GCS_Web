@@ -10,25 +10,8 @@ import { useDroneStore } from '@/store/drone'
 
 const droneStore = useDroneStore()
 
-// Props
-const props = defineProps({
-  pitch: {
-    type: Number,
-    default: 0
-  },
-  roll: {
-    type: Number,
-    default: 0
-  },
-  yaw: {
-    type: Number,
-    default: 0
-  }
-})
-
 // Refs
 const container = ref(null)
-const currentViewMode = ref('chase')
 
 // Three.js 对象
 let scene, camera, renderer, controls
@@ -40,16 +23,21 @@ let globalPathMesh = null    // 全局路径 Mesh (Tube)
 let localTrajMesh = null    // 局部轨迹 Mesh (Tube)
 let globalPathMarker = null
 let localTrajMarker = null
+let globalPathStartMarker = null
+let globalPathGoalMarker = null
+let localTrajEndMarker = null
 let globalPathMaterial = null
 let localTrajMaterial = null
 let obstacleMeshes = []
 let horizonRing = null        // 空间姿态环
 let thrustPillars = []         // 推力柱数组
 let historyPoints = []
+let hasAutoFramed = false
 const maxHistoryPoints = 500
 const maxTrajectoryPoints = 500  // 轨迹最大点数
 const renderDelayMs = 120
 const poseBuffer = []
+let animationFrameId = null
 const renderedPose = {
   x: 0,
   y: 0,
@@ -58,12 +46,6 @@ const renderedPose = {
   roll: 0,
   yaw: 0,
 }
-
-const sceneData = ref({
-  pitch: props.pitch,
-  roll: props.roll,
-  yaw: props.yaw
-})
 
 // 电机PWM历史值（当前协议下为0~1的归一化比值）
 const motorPwmData = ref([0, 0, 0, 0, 0, 0])
@@ -76,6 +58,40 @@ const toRadians = (value) => {
   return THREE.MathUtils.degToRad(numeric)
 }
 
+const isFiniteNumber = (value) => Number.isFinite(Number(value))
+
+const hasMeaningfulPoint = (point = {}) => {
+  if (!point) {
+    return false
+  }
+
+  return isFiniteNumber(point.x) && isFiniteNumber(point.y) && isFiniteNumber(point.z)
+}
+
+const normalizePoint = (point = {}) => {
+  if (Array.isArray(point)) {
+    return {
+      x: Number(point[0]) || 0,
+      y: Number(point[1]) || 0,
+      z: Number(point[2]) || 0
+    }
+  }
+
+  return {
+    x: Number(point.x ?? point.pos_x ?? point.current_pos_x ?? 0) || 0,
+    y: Number(point.y ?? point.pos_y ?? point.current_pos_y ?? 0) || 0,
+    z: Number(point.z ?? point.pos_z ?? point.current_pos_z ?? 0) || 0
+  }
+}
+
+const toThreeVector = (point = {}) => {
+  const normalized = normalizePoint(point)
+  return new THREE.Vector3(normalized.x, normalized.z, -normalized.y)
+}
+
+const alignedGlobalPath = computed(() => (droneStore.globalPath || []).map((point) => droneStore._alignPlanningPoint(point)))
+const alignedLocalTraj = computed(() => (droneStore.localTraj || []).map((point) => droneStore._alignPlanningPoint(point)))
+
 const scenePose = computed(() => {
   const actualPose = droneStore.actualPose || {}
   const flight = droneStore.realtimeViews?.flightState || {}
@@ -85,19 +101,23 @@ const scenePose = computed(() => {
     x: Number.isFinite(Number(actualPose.x)) ? Number(actualPose.x) : 0,
     y: Number.isFinite(Number(actualPose.y)) ? Number(actualPose.y) : 0,
     z: Number.isFinite(Number(actualPose.z)) ? Number(actualPose.z) : (Number(flight.height) || 0),
-    pitch: toRadians(actualPose.pitch ?? rawFlight.states_theta ?? flight.theta ?? props.pitch),
-    roll: toRadians(actualPose.roll ?? rawFlight.states_phi ?? flight.phi ?? props.roll),
-    yaw: toRadians(actualPose.yaw ?? rawFlight.states_psi ?? flight.psi ?? props.yaw)
+    pitch: toRadians(actualPose.pitch ?? rawFlight.states_theta ?? flight.theta ?? 0),
+    roll: toRadians(actualPose.roll ?? rawFlight.states_phi ?? flight.phi ?? 0),
+    yaw: toRadians(actualPose.yaw ?? rawFlight.states_psi ?? flight.psi ?? 0)
   }
 })
+
+const alignedTrajectory = computed(() => droneStore.trajectory || [])
 
 // 当前障碍物数据源仅使用规划遥测派生结果
 const activeObstacles = computed(() => {
   if (droneStore.obstacles && droneStore.obstacles.length > 0) {
     return droneStore.obstacles.map(o => ({
-      x: o.cx ?? o.center?.x ?? 0,
-      y: o.cy ?? o.center?.y ?? 0,
-      z: o.cz ?? o.center?.z ?? 0,
+      ...droneStore._alignPlanningPoint({
+        x: o.cx ?? o.center?.x ?? 0,
+        y: o.cy ?? o.center?.y ?? 0,
+        z: o.cz ?? o.center?.z ?? 0
+      }),
       sx: o.sx ?? o.size?.x ?? 1.0,
       sy: o.sy ?? o.size?.y ?? 1.0,
       sz: o.sz ?? o.size?.z ?? 1.0,
@@ -492,35 +512,167 @@ const createLocalTraj = () => {
   })
 }
 
+const hydrateSceneFromStore = () => {
+  updateGlobalPath(alignedGlobalPath.value)
+  updateLocalTraj(alignedLocalTraj.value)
+  updateObstacleVisualization(activeObstacles.value)
+  updateHistoryTrail()
+  frameTelemetryScene()
+}
+
 const buildPathVectors = (pathPoints) => {
   const rawPoints = toRaw(pathPoints || [])
   const vectors = []
   const count = Math.min(rawPoints.length, maxTrajectoryPoints)
 
   for (let i = 0; i < count; i++) {
-    const point = toRaw(rawPoints[i])
-    let px = 0
-    let py = 0
-    let pz = 0
+    const point = normalizePoint(toRaw(rawPoints[i]))
 
-    if (Array.isArray(point)) {
-      px = Number(point[0])
-      py = Number(point[1])
-      pz = Number(point[2])
-    } else {
-      px = Number(point.x)
-      py = Number(point.y)
-      pz = Number(point.z)
-    }
-
-    if (Number.isNaN(px) || Number.isNaN(py) || Number.isNaN(pz)) {
+    if (!hasMeaningfulPoint(point)) {
       continue
     }
 
-    vectors.push(new THREE.Vector3(px, pz, -py))
+    vectors.push(toThreeVector(point))
   }
 
   return vectors
+}
+
+const createTextSprite = (text, accentColor = '#ffffff') => {
+  const canvas = document.createElement('canvas')
+  canvas.width = 256
+  canvas.height = 96
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    return null
+  }
+
+  context.clearRect(0, 0, canvas.width, canvas.height)
+  context.fillStyle = 'rgba(5, 10, 18, 0.86)'
+  context.strokeStyle = accentColor
+  context.lineWidth = 4
+  context.beginPath()
+  context.roundRect(8, 8, canvas.width - 16, canvas.height - 16, 18)
+  context.fill()
+  context.stroke()
+  context.fillStyle = accentColor
+  context.font = '700 34px Segoe UI'
+  context.textAlign = 'center'
+  context.textBaseline = 'middle'
+  context.fillText(text, canvas.width / 2, canvas.height / 2)
+
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.needsUpdate = true
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthWrite: false
+  })
+  const sprite = new THREE.Sprite(material)
+  sprite.scale.set(3.6, 1.35, 1)
+  return sprite
+}
+
+const createLabeledPathMarker = (vector, markerColor, radius, label, labelColor) => {
+  const group = new THREE.Group()
+  const sphere = createPathMarker(new THREE.Vector3(0, 0, 0), markerColor, radius)
+  const ringGeometry = new THREE.TorusGeometry(radius * 1.2, Math.max(radius * 0.08, 0.04), 12, 48)
+  const ringMaterial = new THREE.MeshBasicMaterial({
+    color: markerColor,
+    transparent: true,
+    opacity: 0.75,
+    depthWrite: false
+  })
+  const ring = new THREE.Mesh(ringGeometry, ringMaterial)
+  ring.rotation.x = Math.PI / 2
+  group.add(sphere)
+  group.add(ring)
+
+  const labelSprite = createTextSprite(label, labelColor || `#${markerColor.toString(16).padStart(6, '0')}`)
+  if (labelSprite) {
+    labelSprite.position.set(0, radius * 2.1, 0)
+    group.add(labelSprite)
+  }
+
+  group.position.copy(vector)
+  group.renderOrder = 12
+  return group
+}
+
+const disposeObject3D = (object) => {
+  if (!object) {
+    return
+  }
+
+  object.traverse((child) => {
+    if (child.geometry) {
+      child.geometry.dispose()
+    }
+    if (child.material) {
+      const materials = Array.isArray(child.material) ? child.material : [child.material]
+      materials.forEach((material) => {
+        if (material.map) {
+          material.map.dispose()
+        }
+        material.dispose()
+      })
+    }
+  })
+}
+
+const clearSceneObject = (objectRef) => {
+  if (!scene || !objectRef) {
+    return null
+  }
+
+  scene.remove(objectRef)
+  disposeObject3D(objectRef)
+  return null
+}
+
+const frameTelemetryScene = () => {
+  if (!scene || !camera || !controls || hasAutoFramed) {
+    return
+  }
+
+  const points = []
+  buildPathVectors(alignedGlobalPath.value).forEach((point) => points.push(point))
+  buildPathVectors(alignedLocalTraj.value).forEach((point) => points.push(point))
+  alignedTrajectory.value.slice(-maxHistoryPoints).forEach((point) => points.push(toThreeVector(point)))
+  activeObstacles.value.forEach((obstacle) => points.push(toThreeVector(obstacle)))
+  if (droneGroup) {
+    points.push(droneGroup.position.clone())
+  }
+
+  if (points.length < 2) {
+    return
+  }
+
+  const bounds = new THREE.Box3()
+  points.forEach((point) => bounds.expandByPoint(point))
+  const center = new THREE.Vector3()
+  const size = new THREE.Vector3()
+  bounds.getCenter(center)
+  bounds.getSize(size)
+  const radius = Math.max(size.length() * 0.5, 18)
+
+  controls.target.copy(center)
+  camera.position.set(center.x + radius * 0.72, center.y + radius * 0.46, center.z + radius * 0.72)
+  camera.lookAt(center)
+  controls.update()
+  hasAutoFramed = true
+}
+
+const resetAutoFrameIfSceneEmpty = () => {
+  const hasGlobalPath = Array.isArray(droneStore.globalPath) && droneStore.globalPath.length > 0
+  const hasLocalTraj = Array.isArray(droneStore.localTraj) && droneStore.localTraj.length > 0
+  const hasTrajectory = Array.isArray(alignedTrajectory.value) && alignedTrajectory.value.length > 0
+  const hasObstacles = Array.isArray(activeObstacles.value) && activeObstacles.value.length > 0
+
+  if (!hasGlobalPath && !hasLocalTraj && !hasTrajectory && !hasObstacles) {
+    hasAutoFramed = false
+  }
 }
 
 const createPathMarker = (vector, color, radius) => {
@@ -539,35 +691,28 @@ const createPathMarker = (vector, color, radius) => {
 }
 
 const clearGlobalPath = () => {
-  if (!scene || !globalPathMesh) return
-  scene.remove(globalPathMesh)
-  if (globalPathMesh.geometry) globalPathMesh.geometry.dispose()
-  if (globalPathMesh.material) globalPathMesh.material.dispose()
-  globalPathMesh = null
+  globalPathMesh = clearSceneObject(globalPathMesh)
 }
 
 const clearGlobalPathMarker = () => {
-  if (!scene || !globalPathMarker) return
-  scene.remove(globalPathMarker)
-  if (globalPathMarker.geometry) globalPathMarker.geometry.dispose()
-  if (globalPathMarker.material) globalPathMarker.material.dispose()
-  globalPathMarker = null
+  globalPathMarker = clearSceneObject(globalPathMarker)
+}
+
+const clearGlobalPathAnchors = () => {
+  globalPathStartMarker = clearSceneObject(globalPathStartMarker)
+  globalPathGoalMarker = clearSceneObject(globalPathGoalMarker)
 }
 
 const clearLocalTraj = () => {
-  if (!scene || !localTrajMesh) return
-  scene.remove(localTrajMesh)
-  if (localTrajMesh.geometry) localTrajMesh.geometry.dispose()
-  if (localTrajMesh.material) localTrajMesh.material.dispose()
-  localTrajMesh = null
+  localTrajMesh = clearSceneObject(localTrajMesh)
 }
 
 const clearLocalTrajMarker = () => {
-  if (!scene || !localTrajMarker) return
-  scene.remove(localTrajMarker)
-  if (localTrajMarker.geometry) localTrajMarker.geometry.dispose()
-  if (localTrajMarker.material) localTrajMarker.material.dispose()
-  localTrajMarker = null
+  localTrajMarker = clearSceneObject(localTrajMarker)
+}
+
+const clearLocalTrajAnchors = () => {
+  localTrajEndMarker = clearSceneObject(localTrajEndMarker)
 }
 
 // 更新全局路径 (TubeGeometry)
@@ -576,6 +721,8 @@ const updateGlobalPath = (pathPoints) => {
   if (!pathPoints || pathPoints.length === 0) {
     clearGlobalPath()
     clearGlobalPathMarker()
+    clearGlobalPathAnchors()
+    resetAutoFrameIfSceneEmpty()
     return
   }
   
@@ -584,19 +731,19 @@ const updateGlobalPath = (pathPoints) => {
   if (vectors.length < 2) {
       clearGlobalPath()
       clearGlobalPathMarker()
+      clearGlobalPathAnchors()
       if (vectors.length === 1) {
         globalPathMarker = createPathMarker(vectors[0], 0x3288fa, 0.75)
         globalPathMarker.renderOrder = 8
         scene.add(globalPathMarker)
       }
+      resetAutoFrameIfSceneEmpty()
       return;
   }
 
   clearGlobalPathMarker()
+  clearGlobalPathAnchors()
 
-  const startPoint = vectors[0];
-  // console.log(`[ThreeJS Debug] Path Start: x=${startPoint.x.toFixed(1)}, y=${startPoint.y.toFixed(1)}, z=${startPoint.z.toFixed(1)}`);
-  
   // 1. 清理旧模型
   clearGlobalPath()
 
@@ -622,6 +769,12 @@ const updateGlobalPath = (pathPoints) => {
   globalPathMesh.castShadow = false
   globalPathMesh.renderOrder = 4
   scene.add(globalPathMesh)
+
+  globalPathStartMarker = createLabeledPathMarker(vectors[0], 0x35d07f, 0.55, 'START', '#7fffd4')
+  globalPathGoalMarker = createLabeledPathMarker(vectors[vectors.length - 1], 0xffb020, 0.68, 'GOAL', '#ffd166')
+  scene.add(globalPathStartMarker)
+  scene.add(globalPathGoalMarker)
+  frameTelemetryScene()
 }
 
 // 更新局部轨迹 (TubeGeometry)
@@ -630,6 +783,8 @@ const updateLocalTraj = (trajPoints) => {
   if (!trajPoints || trajPoints.length === 0) {
     clearLocalTraj()
     clearLocalTrajMarker()
+    clearLocalTrajAnchors()
+    resetAutoFrameIfSceneEmpty()
     return
   }
   
@@ -638,15 +793,18 @@ const updateLocalTraj = (trajPoints) => {
   if (vectors.length < 2) {
     clearLocalTraj()
     clearLocalTrajMarker()
+    clearLocalTrajAnchors()
     if (vectors.length === 1) {
       localTrajMarker = createPathMarker(vectors[0], 0x4caf50, 0.42)
       localTrajMarker.renderOrder = 10
       scene.add(localTrajMarker)
     }
+    resetAutoFrameIfSceneEmpty()
     return
   }
 
   clearLocalTrajMarker()
+  clearLocalTrajAnchors()
 
   // 1. 清理旧模型
   clearLocalTraj()
@@ -667,6 +825,10 @@ const updateLocalTraj = (trajPoints) => {
   localTrajMesh.castShadow = true
   localTrajMesh.renderOrder = 6
   scene.add(localTrajMesh)
+
+  localTrajEndMarker = createLabeledPathMarker(vectors[vectors.length - 1], 0x4caf50, 0.32, 'LOCAL', '#7CFC8D')
+  scene.add(localTrajEndMarker)
+  frameTelemetryScene()
 }
 
 // 更新障碍物可视化
@@ -676,12 +838,14 @@ const updateObstacleVisualization = (obstacles) => {
   // 1. 清理旧障碍物
   obstacleMeshes.forEach(mesh => {
     scene.remove(mesh)
-    if (mesh.geometry) mesh.geometry.dispose()
-    if (mesh.material) mesh.material.dispose()
+    disposeObject3D(mesh)
   })
   obstacleMeshes = []
 
-  if (!obstacles || obstacles.length === 0) return
+  if (!obstacles || obstacles.length === 0) {
+    resetAutoFrameIfSceneEmpty()
+    return
+  }
   
   const rawObstacles = toRaw(obstacles)
   
@@ -695,31 +859,38 @@ const updateObstacleVisualization = (obstacles) => {
      const sy = Number(obs.sy) || 1.0;
      const sz = Number(obs.sz) || 1.0;
      
-     // BoxGeometry(width, height, depth) -> ThreeJS (x, y, z)
-     // ENU Size: x(East), y(North), z(Up)
-     // Map to Three: x->x, z->y, y->z
-     const geometry = new THREE.BoxGeometry(sx, sz, sy); 
-     
+     const group = new THREE.Group()
+     const geometry = new THREE.BoxGeometry(Math.max(sx, 0.35), Math.max(sz, 0.35), Math.max(sy, 0.35))
      const material = new THREE.MeshStandardMaterial({
-       color: 0xff00ff,
+       color: 0xff4fd8,
        transparent: true,
-       opacity: 0.6,
-       roughness: 0.4,
-       metalness: 0.2
-     });
-     
-     const mesh = new THREE.Mesh(geometry, material);
-     
-     // 坐标转换 ENU -> ThreeJS (Right Handed Y-up)
-     // x -> x
-     // y -> -z (North is negative Z)
-     // z -> y (Up is Y)
-     // 假设 position 是中心点
-     mesh.position.set(px, pz, -py);
-     
-     scene.add(mesh);
-     obstacleMeshes.push(mesh);
+       opacity: 0.24,
+       roughness: 0.35,
+       metalness: 0.1
+     })
+     const mesh = new THREE.Mesh(geometry, material)
+     const edges = new THREE.LineSegments(
+       new THREE.EdgesGeometry(geometry),
+       new THREE.LineBasicMaterial({ color: 0xff9ae8, transparent: true, opacity: 0.9 })
+     )
+     const footprint = new THREE.Mesh(
+       new THREE.RingGeometry(Math.max(Math.min(sx, sy) * 0.22, 0.2), Math.max(Math.max(sx, sy) * 0.52, 0.35), 24),
+       new THREE.MeshBasicMaterial({ color: 0xff9ae8, transparent: true, opacity: 0.28, side: THREE.DoubleSide })
+     )
+     footprint.rotation.x = -Math.PI / 2
+     footprint.position.y = -Math.max(sz, 0.35) / 2 + 0.02
+
+     group.add(mesh)
+     group.add(edges)
+     group.add(footprint)
+     group.position.set(px, pz, -py)
+     group.renderOrder = 9
+
+     scene.add(group)
+     obstacleMeshes.push(group)
   });
+
+  frameTelemetryScene()
 }
 
 // 更新历史轨迹
@@ -782,11 +953,6 @@ const updateDroneAttitude = () => {
     const roll = renderedPose.roll
     const yaw = renderedPose.yaw
 
-    // 更新场景数据引用（用于可能的显示）
-    sceneData.value.pitch = pitch;
-    sceneData.value.roll = roll;
-    sceneData.value.yaw = yaw;
-
     const euler = new THREE.Euler(pitch, yaw, roll, 'XYZ')
     droneGroup.setRotationFromEuler(euler)
     
@@ -803,20 +969,9 @@ const updateDroneAttitude = () => {
       // 环保持水平，只跟随航向
       horizonRing.rotation.y = -yaw
     }
-    
-    // 自动跟随模式下，只更新controls.target，不强制相机位置
-    // 这样鼠标交互仍然有效
-    if (currentViewMode.value === 'chase') {
-      // 只更新目标点，让OrbitControls处理相机位置
+
+    if (controls) {
       controls.target.lerp(droneGroup.position, 0.05)
-    }
-    else if (currentViewMode.value === 'fpv') {
-      // FPV模式：更新相机位置到无人机前方
-      const forward = new THREE.Vector3(0, 1, 8)
-      forward.applyEuler(droneGroup.rotation)
-      const targetPos = droneGroup.position.clone().add(forward)
-      camera.position.lerp(targetPos, 0.1)
-      controls.target.lerp(droneGroup.position.clone().add(new THREE.Vector3(0, 1, 5)), 0.1)
     }
   }
 }
@@ -859,7 +1014,7 @@ const updateRenderPose = () => {
 
 // 动画循环
 const animate = () => {
-  requestAnimationFrame(animate)
+  animationFrameId = requestAnimationFrame(animate)
 
   // 旋转螺旋桨
   rotors.forEach(rotor => {
@@ -894,36 +1049,24 @@ const onWindowResize = () => {
   }
 }
 
-// 监听 props 变化
-watch(() => props.pitch, (newVal) => {
-  sceneData.value.pitch = newVal
-})
-
-watch(() => props.roll, (newVal) => {
-  sceneData.value.roll = newVal
-})
-
-watch(() => props.yaw, (newVal) => {
-  sceneData.value.yaw = newVal
-})
-
 // 监听全局路径数据
-watch(() => droneStore.globalPath, (newPath) => {
+watch(alignedGlobalPath, (newPath) => {
   updateGlobalPath(newPath)
 }, { deep: true, immediate: true })
 
 // 监听局部轨迹数据
-watch(() => droneStore.localTraj, (newTraj) => {
+watch(alignedLocalTraj, (newTraj) => {
   updateLocalTraj(newTraj)
 }, { deep: true, immediate: true })
 
-watch(() => droneStore.trajectory, (newTrajectory) => {
+watch(alignedTrajectory, (newTrajectory) => {
   historyPoints = (newTrajectory || []).slice(-maxHistoryPoints).map(point => ({
     x: Number(point.x) || 0,
     y: Number(point.z) || 0,
     z: -(Number(point.y) || 0)
   }))
   updateHistoryTrail()
+  resetAutoFrameIfSceneEmpty()
 }, { deep: true, immediate: true })
 
 // 监听规划遥测派生的障碍物数据
@@ -931,14 +1074,34 @@ watch(activeObstacles, (newObstacles) => {
   updateObstacleVisualization(newObstacles)
 }, { deep: true, immediate: true })
 
+// 使用 ResizeObserver 响应容器尺寸变化（分隔线拖拽、面板切换等）
+let resizeObserver = null
+
 // 生命周期钩子
 onMounted(() => {
   initScene()
+  hydrateSceneFromStore()
   window.addEventListener('resize', onWindowResize)
+
+  if (container.value) {
+    resizeObserver = new ResizeObserver(() => {
+      onWindowResize()
+    })
+    resizeObserver.observe(container.value)
+  }
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onWindowResize)
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
+
+  if (animationFrameId !== null) {
+    cancelAnimationFrame(animationFrameId)
+    animationFrameId = null
+  }
   
   if (renderer) {
     renderer.dispose()
@@ -971,19 +1134,28 @@ onBeforeUnmount(() => {
   }
 
   if (globalPathMarker) {
-    globalPathMarker.geometry.dispose()
-    globalPathMarker.material.dispose()
+    disposeObject3D(globalPathMarker)
+  }
+
+  if (globalPathStartMarker) {
+    disposeObject3D(globalPathStartMarker)
+  }
+
+  if (globalPathGoalMarker) {
+    disposeObject3D(globalPathGoalMarker)
   }
 
   if (localTrajMarker) {
-    localTrajMarker.geometry.dispose()
-    localTrajMarker.material.dispose()
+    disposeObject3D(localTrajMarker)
+  }
+
+  if (localTrajEndMarker) {
+    disposeObject3D(localTrajEndMarker)
   }
   
   // 清理障碍物
   obstacleMeshes.forEach(mesh => {
-      if (mesh.geometry) mesh.geometry.dispose()
-      if (mesh.material) mesh.material.dispose()
+      disposeObject3D(mesh)
   })
 })
 </script>

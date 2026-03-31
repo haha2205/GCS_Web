@@ -21,6 +21,10 @@ const props = defineProps({
   position: {
     type: String,
     default: 'right', // 'left' or 'right'
+  },
+  direction: {
+    type: String,
+    default: 'vertical'
   }
 })
 
@@ -30,32 +34,31 @@ const isDragging = ref(false)
 const startX = ref(0)
 const startWidth = ref(0)
 
-const startDrag = (e) => {
+const getTargetPanel = () => document.querySelector('.monitor-panel')
+
+const startDrag = (mouseEvent) => {
   isDragging.value = true
-  startX.value = e.clientX
-  
-  // 获取相关面板的当前宽度
-  const panelClass = props.position === 'left'
-    ? '.left-panel-wrapper'
-    : '.right-panel-container'
-  const panel = document.querySelector(panelClass)
+  startX.value = mouseEvent.clientX
+
+  const panel = getTargetPanel()
   startWidth.value = panel ? panel.offsetWidth : 400
   
   document.addEventListener('mousemove', onDrag)
   document.addEventListener('mouseup', stopDrag)
   
   // 阻止默认选择行为
-  e.preventDefault()
+  mouseEvent.preventDefault()
 }
 
-const onDrag = (e) => {
+const onDrag = (mouseEvent) => {
   if (!isDragging.value) return
   
   const deltaX = props.position === 'left'
-    ? e.clientX - startX.value
-    : startX.value - e.clientX
+    ? mouseEvent.clientX - startX.value
+    : startX.value - mouseEvent.clientX
   
-  const newWidth = Math.max(250, Math.min(600, startWidth.value + deltaX))
+  const maxWidth = Math.min(900, Math.round(window.innerWidth * 0.72))
+  const newWidth = Math.max(250, Math.min(maxWidth, startWidth.value + deltaX))
   emit('resize', newWidth)
 }
 
