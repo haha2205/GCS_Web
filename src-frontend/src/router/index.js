@@ -1,5 +1,13 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHashHistory, createWebHistory } from 'vue-router'
 import ApolloLayout from '@/components/layout/ApolloLayout.vue'
+
+function createAppHistory() {
+  if (typeof window !== 'undefined' && window.location.protocol === 'file:') {
+    return createWebHashHistory()
+  }
+
+  return createWebHistory()
+}
 
 const routes = [
   {
@@ -16,7 +24,7 @@ const routes = [
 ]
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createAppHistory(),
   routes
 })
 

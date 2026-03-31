@@ -1,10 +1,6 @@
 <template>
   <div class="home-view">
-    <ThreeDroneView
-      :pitch="droneStore.fcsStates?.states_theta ?? 0"
-      :roll="droneStore.fcsStates?.states_phi ?? 0"
-      :yaw="droneStore.fcsStates?.states_psi ?? 0"
-    />
+    <ThreeDroneView />
   </div>
 </template>
 

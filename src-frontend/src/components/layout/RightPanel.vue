@@ -37,16 +37,6 @@ defineProps({
   background: linear-gradient(180deg, #f8fbff 0%, #eef4fb 100%);
 }
 
-.maximized .right-sidebar-content {
-  max-width: 800px !important;
-  margin: 0 auto !important;
-}
-
-.hidden .right-sidebar-content {
-  width: 0 !important;
-  overflow: hidden !important;
-}
-
 /* ==================== 面板内容区域 ==================== */
 .panel-content {
   flex: 1 !important;

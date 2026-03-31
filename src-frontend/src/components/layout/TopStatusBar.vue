@@ -3,12 +3,6 @@
     <div class="status-section brand-section">
       <div class="logo-text">TJU-GCS</div>
       <div class="recording-strip">
-        <select class="case-select" :value="selectedPlanCaseId" @change="changeExperimentCase($event.target.value)">
-          <option value="">选择实验 Case</option>
-          <option v-for="item in planCases" :key="item.case_id" :value="item.case_id">
-            {{ item.case_id }} | {{ item.task_name }} | {{ item.scenario_name }}
-          </option>
-        </select>
         <div class="recording-pill" :class="{ active: recordingEnabled }">
           <span class="record-dot"></span>
           <span>{{ recordingEnabled ? '记录中' : '未记录' }}</span>
@@ -20,15 +14,11 @@
           停止记录
         </button>
         <div class="record-meta">
-          <span>{{ caseIdLabel }}</span>
-          <span>{{ planCaseLabel }}</span>
-          <span>{{ taskLabel }}</span>
-          <span>{{ missionPhaseLabel }}</span>
-          <span>{{ scenarioLabel }}</span>
-          <span>{{ architectureLabel }}</span>
           <span>{{ elapsedLabel }}</span>
           <span>{{ currentSessionLabel }}</span>
           <span>{{ totalBytesLabel }}</span>
+          <span>{{ listenPortLabel }}</span>
+          <span>{{ planningPortLabel }}</span>
         </div>
       </div>
     </div>
@@ -58,43 +48,34 @@ const droneStore = useDroneStore()
 const currentTime = ref('')
 const recordingLoading = ref(false)
 
-const updateTime = () => {
-  const now = new Date()
-  const hours = String(now.getHours()).padStart(2, '0')
-  const minutes = String(now.getMinutes()).padStart(2, '0')
-  const seconds = String(now.getSeconds()).padStart(2, '0')
-  currentTime.value = `${hours}:${minutes}:${seconds}`
-}
-
 let timeInterval = null
 let recordingPoll = null
 let udpPoll = null
 
+const updateTime = () => {
+  const now = new Date()
+  currentTime.value = [now.getHours(), now.getMinutes(), now.getSeconds()]
+    .map((value) => String(value).padStart(2, '0'))
+    .join(':')
+}
+
 onMounted(() => {
   updateTime()
   timeInterval = setInterval(updateTime, 1000)
-  droneStore.fetchExperimentPlan()
-  droneStore.fetchExperimentRuntime()
-  droneStore.fetchRecordingStatus()
-  droneStore.fetchUdpStatus()
+  void droneStore.fetchRecordingStatus()
+  void droneStore.fetchUdpStatus()
   recordingPoll = setInterval(() => {
-    droneStore.fetchRecordingStatus()
+    void droneStore.fetchRecordingStatus()
   }, 1500)
   udpPoll = setInterval(() => {
-    droneStore.fetchUdpStatus()
+    void droneStore.fetchUdpStatus()
   }, 1500)
 })
 
 onUnmounted(() => {
-  if (timeInterval) {
-    clearInterval(timeInterval)
-  }
-  if (recordingPoll) {
-    clearInterval(recordingPoll)
-  }
-  if (udpPoll) {
-    clearInterval(udpPoll)
-  }
+  if (timeInterval) clearInterval(timeInterval)
+  if (recordingPoll) clearInterval(recordingPoll)
+  if (udpPoll) clearInterval(udpPoll)
 })
 
 const udpClass = computed(() => {
@@ -105,28 +86,17 @@ const udpClass = computed(() => {
 })
 
 const udpStatusText = computed(() => (droneStore.isUdpConnected ? '已连接' : '未连接'))
-const wsClass = computed(() => ({
-  connected: droneStore.isConnected,
-  disconnected: !droneStore.isConnected
-}))
+const wsClass = computed(() => ({ connected: droneStore.isConnected, disconnected: !droneStore.isConnected }))
 const wsStatusText = computed(() => (droneStore.isConnected ? '已连接' : '未连接'))
 const recordingEnabled = computed(() => droneStore.dataRecording.enabled)
 const currentSessionLabel = computed(() => droneStore.dataRecording.sessionId || '无会话')
 const totalBytesLabel = computed(() => formatBytes(droneStore.dataRecording.totalBytes || 0))
-const caseIdLabel = computed(() => droneStore.experimentContext.caseId || 'case001')
-const planCaseLabel = computed(() => droneStore.experimentContext.planCaseId || 'UNPLANNED')
-const missionPhaseLabel = computed(() => droneStore.experimentContext.missionPhase || 'idle')
-const taskLabel = computed(() => droneStore.experimentContext.task.taskName || 'Idle')
-const scenarioLabel = computed(() => droneStore.experimentContext.scenarioName || droneStore.experimentContext.scenarioId || 'scenario_default')
-const architectureLabel = computed(() => droneStore.experimentContext.architecture.displayName || 'Baseline Balanced')
-const planCases = computed(() => droneStore.experimentContext.availableCases || [])
-const selectedPlanCaseId = computed(() => droneStore.experimentContext.selectedPlanCaseId || '')
+const listenPortLabel = computed(() => `飞控主入口 ${droneStore.config.hostPort || 30509}`)
+const planningPortLabel = computed(() => `规划口 ${droneStore.config.planningRecvPort || 18511}`)
 const elapsedLabel = computed(() => {
   currentTime.value
   const startTime = droneStore.dataRecording.recordingStartTime
-  if (!startTime) {
-    return '00:00:00'
-  }
+  if (!startTime) return '00:00:00'
   const endTime = droneStore.dataRecording.enabled ? Date.now() : (droneStore.dataRecording.lastRecordTime || Date.now())
   const totalSeconds = Math.max(0, Math.floor((endTime - startTime) / 1000))
   const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0')
@@ -140,13 +110,6 @@ const formatBytes = (value) => {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)}MB`
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)}KB`
   return `${bytes}B`
-}
-
-const changeExperimentCase = async (caseId) => {
-  if (!caseId || caseId === droneStore.experimentContext.selectedPlanCaseId) {
-    return
-  }
-  await droneStore.selectExperimentCase(caseId)
 }
 
 const startRecording = async () => {
@@ -176,7 +139,6 @@ const stopRecording = async () => {
   min-height: 56px;
   padding: 0 14px;
   background-color: transparent;
-  border-bottom: 0;
   color: var(--text-primary);
   gap: 12px;
 }
@@ -214,18 +176,6 @@ const stopRecording = async () => {
   min-width: 0;
 }
 
-.case-select {
-  min-width: 210px;
-  max-width: 320px;
-  height: 30px;
-  padding: 0 8px;
-  border-radius: 8px;
-  border: 1px solid var(--border-color);
-  background: rgba(255, 255, 255, 0.9);
-  color: var(--text-primary);
-  font-size: 11px;
-}
-
 .recording-pill {
   display: flex;
   align-items: center;
@@ -258,26 +208,25 @@ const stopRecording = async () => {
 
 .record-btn {
   height: 30px;
+  padding: 0 12px;
+  border: none;
   border-radius: 8px;
-  padding: 0 10px;
-  border: 1px solid var(--border-color);
+  font-size: 12px;
   cursor: pointer;
-  font-size: 11px;
-  font-weight: 600;
 }
 
 .record-btn.start {
-  background: rgba(22, 163, 74, 0.1);
-  color: #166534;
+  background: #0f766e;
+  color: #fff;
 }
 
 .record-btn.stop {
-  background: rgba(220, 38, 38, 0.08);
-  color: #b91c1c;
+  background: #b91c1c;
+  color: #fff;
 }
 
 .record-btn:disabled {
-  opacity: 0.45;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
@@ -285,94 +234,40 @@ const stopRecording = async () => {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
+  min-width: 0;
   color: var(--text-secondary);
   font-size: 11px;
-  white-space: nowrap;
 }
 
-.link-section {
+.status-item {
   display: flex;
-  gap: 24px;
   align-items: center;
-  flex-shrink: 0;
+  gap: 4px;
+  font-size: 12px;
 }
-
 
 .status-label {
-  color: var(--text-tertiary);
-  font-weight: 400;
+  color: var(--text-secondary);
 }
 
-.status-text {
-  color: var(--text-primary);
-  font-weight: 500;
-  font-family: 'Consolas', 'Monaco', monospace;
+.connected,
+.good {
+  color: #15803d;
 }
 
-/* 链路状态样式 */
-.link-section .status-item .good {
-  color: var(--success-color);
-  font-weight: 500;
+.medium {
+  color: #b45309;
 }
 
-.link-section .status-item .medium {
-  color: var(--warning-color);
-  font-weight: 500;
-}
-
-.link-section .status-item .poor {
-  color: var(--error-color);
-  font-weight: 500;
-}
-
-.ws-status.connected {
-  color: var(--success-color);
-}
-
-.ws-status.disconnected {
-  color: var(--error-color);
-}
-
-/* 系统模式样式 */
-.mode-section {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.mode-item .mode-realtime {
-  color: var(--success-color);
-  font-weight: 600;
-}
-
-.mode-item .mode-standby {
-  color: var(--warning-color);
-  font-weight: 600;
-}
-
-.time-section {
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
+.disconnected,
+.poor {
+  color: #b91c1c;
 }
 
 .time-text {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-weight: 400;
-  font-family: 'Consolas', 'Monaco', monospace;
-  letter-spacing: 0.3px;
-}
-
-@media (max-width: 1400px) {
-  .top-status-bar {
-    padding: 0 10px;
-    gap: 8px;
-  }
-
-  .recording-strip {
-    gap: 6px;
-  }
+  font-family: 'Roboto Mono', monospace;
+  font-size: 14px;
+  color: var(--text-primary);
 }
 </style>

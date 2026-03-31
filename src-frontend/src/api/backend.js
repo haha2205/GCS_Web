@@ -7,31 +7,119 @@ function normalizeBaseUrl(url) {
   return url ? url.replace(/\/$/, '') : ''
 }
 
-function getDefaultBackendBaseUrl() {
-  const browserHost = typeof window !== 'undefined' ? window.location.hostname : ''
+const DEFAULT_BACKEND_BASE_URL = 'http://localhost:8000'
 
-  if (browserHost === 'localhost' || browserHost === '127.0.0.1') {
-    return 'http://localhost:8000'
+function isTransientNetworkError(error) {
+  if (!error) {
+    return false
   }
 
-  return 'http://192.168.16.13:8000'
+  return error.name === 'AbortError' || error.message === 'Failed to fetch'
+}
+
+function buildBackendUnavailableError() {
+  return new Error('后端暂未就绪，请稍后重试')
+}
+
+export function isBackendUnavailableError(error) {
+  return error?.message === '后端暂未就绪，请稍后重试'
+}
+
+function getDesktopRuntimeBaseUrl() {
+  if (typeof window === 'undefined') {
+    return ''
+  }
+
+  const runtimeBaseUrl = window.electronAPI?.runtime?.backendBaseUrl
+  return normalizeBaseUrl(runtimeBaseUrl)
+}
+
+let cachedBackendBaseUrl = null
+
+function uniqueBaseUrls(urls = []) {
+  return [...new Set(urls.filter(Boolean).map((url) => normalizeBaseUrl(url)))]
+}
+
+function getBackendBaseUrlCandidates() {
+  const envBaseUrl = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL)
+  if (envBaseUrl) {
+    return [envBaseUrl]
+  }
+
+  const desktopRuntimeBaseUrl = getDesktopRuntimeBaseUrl()
+  if (desktopRuntimeBaseUrl) {
+    return uniqueBaseUrls([desktopRuntimeBaseUrl])
+  }
+
+  const browserHost = typeof window !== 'undefined' ? window.location.hostname : ''
+  const normalizedHost = browserHost && browserHost !== '0.0.0.0' ? browserHost : 'localhost'
+
+  return uniqueBaseUrls([
+    `http://${normalizedHost}:8000`,
+    DEFAULT_BACKEND_BASE_URL,
+    'http://127.0.0.1:8000'
+  ])
+}
+
+async function probeBackendBaseUrl(baseUrl, timeoutMs = 900) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(`${baseUrl}/health`, {
+      method: 'GET',
+      signal: controller.signal,
+      cache: 'no-store'
+    })
+    return response.ok
+  } catch (error) {
+    return false
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function getDefaultBackendBaseUrl() {
+  return getBackendBaseUrlCandidates()[0] || DEFAULT_BACKEND_BASE_URL
 }
 
 export function getBackendBaseUrl() {
-  const envBaseUrl = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL)
-  if (envBaseUrl) {
-    return envBaseUrl
+  if (cachedBackendBaseUrl) {
+    return cachedBackendBaseUrl
   }
 
   return getDefaultBackendBaseUrl()
+}
+
+export function clearBackendBaseUrlCache() {
+  cachedBackendBaseUrl = null
+}
+
+export async function resolveBackendBaseUrl(forceRefresh = false) {
+  if (!forceRefresh && cachedBackendBaseUrl) {
+    const cachedHealthy = await probeBackendBaseUrl(cachedBackendBaseUrl)
+    if (cachedHealthy) {
+      return cachedBackendBaseUrl
+    }
+  }
+
+  const candidates = getBackendBaseUrlCandidates()
+  for (const candidate of candidates) {
+    const healthy = await probeBackendBaseUrl(candidate)
+    if (healthy) {
+      cachedBackendBaseUrl = candidate
+      return candidate
+    }
+  }
+
+  cachedBackendBaseUrl = getDefaultBackendBaseUrl()
+  return cachedBackendBaseUrl
 }
 
 export function buildApiUrl(endpoint = '') {
   const normalizedEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`
   return `${getBackendBaseUrl()}${normalizedEndpoint}`
 }
-
-const API_BASE_URL = getBackendBaseUrl()
 
 /**
  * 通用 API 请求封装
@@ -41,7 +129,8 @@ const API_BASE_URL = getBackendBaseUrl()
  * @returns {Promise<any>}
  */
 async function apiRequest(endpoint, data = null, method = 'GET') {
-  const url = `${API_BASE_URL}${endpoint}`
+  const baseUrl = await resolveBackendBaseUrl()
+  const url = `${baseUrl}${endpoint}`
   
   try {
     const options = {
@@ -64,6 +153,12 @@ async function apiRequest(endpoint, data = null, method = 'GET') {
     
     return await response.json()
   } catch (error) {
+    clearBackendBaseUrlCache()
+
+    if (isTransientNetworkError(error)) {
+      throw buildBackendUnavailableError()
+    }
+
     console.error(`API错误 [${endpoint}]:`, error)
     throw error
   }
@@ -178,70 +273,6 @@ export const recordingApi = {
 }
 
 /**
- * 在线实验上下文 API
- */
-export const experimentApi = {
-  /**
-   * 获取实验矩阵
-   */
-  getPlan: async () => {
-    return await apiRequest('/api/experiment/plan')
-  },
-
-  /**
-   * 获取当前运行时上下文
-   */
-  getRuntime: async () => {
-    return await apiRequest('/api/experiment/runtime')
-  },
-
-  /**
-   * 选择当前实验 case
-   * @param {object} payload - {case_id}
-   */
-  selectCase: async (payload) => {
-    return await apiRequest('/api/experiment/select-case', payload, 'POST')
-  }
-}
-
-/**
- * DSM报告生成 API
- */
-export const dsmApi = {
-  /**
-   * 生成DSM报告
-   * @param {object} config - DSM生成配置
-   */
-  generateReport: async (config) => {
-    return await apiRequest('/api/dsm/generate', config, 'POST')
-  },
-  
-  /**
-   * 获取DSM配置
-   */
-  getConfig: async () => {
-    return await apiRequest('/api/dsm/config')
-  },
-  
-  /**
-   * 更新DSM配置
-   * @param {object} config - DSM配置对象
-   */
-  updateConfig: async (config) => {
-    return await apiRequest('/api/dsm/config', config, 'POST')
-  },
-  
-  /**
-   * 导出DSM数据
-   * @param {string} sessionId - 会话ID
-   * @param {string} format - 导出格式 (json/csv)
-   */
-  exportData: async (sessionId, format = 'json') => {
-    return await apiRequest(`/api/dsm/export/${sessionId}?format=${format}`)
-  }
-}
-
-/**
  * 回放数据 API
  */
 export const replayApi = {
@@ -316,8 +347,6 @@ export default {
   connection: connectionApi,
   log: logApi,
   recording: recordingApi,
-  experiment: experimentApi,
-  dsm: dsmApi,
   replay: replayApi,
   udp: udpApi,
   request: apiRequest
@@ -330,9 +359,3 @@ export const apiGetRecordingSessions = () => recordingApi.getSessions()
 export const apiStartRecording = (config) => recordingApi.startRecording(config)
 export const apiStopRecording = () => recordingApi.stopRecording()
 export const apiGetRecordingStatus = () => recordingApi.getStatus()
-export const apiGetExperimentPlan = () => experimentApi.getPlan()
-export const apiGetExperimentRuntime = () => experimentApi.getRuntime()
-export const apiGenerateDSMReport = (config) => dsmApi.generateReport(config)
-export const apiGetDSMConfig = () => dsmApi.getConfig()
-export const apiUpdateDSMConfig = (config) => dsmApi.updateConfig(config)
-export const apiExportDSMData = (sessionId, format) => dsmApi.exportData(sessionId, format)

@@ -18,8 +18,16 @@
                 <div class="config-value">{{ listenAddress }}</div>
               </div>
               <div class="config-row">
-                <label>监听端口</label>
+                <label>主聚合接收口</label>
                 <div class="config-value">{{ hostPort }}</div>
+              </div>
+              <div class="config-row">
+                <label>飞控遥测降级监听口</label>
+                <div class="config-value">{{ sendOnlyPort }}</div>
+              </div>
+              <div class="config-row">
+                <label>规划遥测专用口</label>
+                <div class="config-value">{{ planningRecvPort }}</div>
               </div>
             </div>
             
@@ -34,7 +42,7 @@
                 <div class="config-value">{{ commandRecvPort }}</div>
               </div>
               <div class="config-row">
-                <label>遥测下行</label>
+                <label>飞控遥测发送口</label>
                 <div class="config-value">{{ sendOnlyPort }}</div>
               </div>
               <div class="config-row">
@@ -46,12 +54,17 @@
                 <div class="config-value">{{ planningSendPort }}</div>
               </div>
               <div class="config-row">
-                <label>规划下行</label>
+                <label>规划遥测发送口</label>
                 <div class="config-value">{{ planningRecvPort }}</div>
               </div>
             </div>
           </div>
-          <div class="fixed-config-note">链路参数已固定，页面仅展示当前部署口径，不再允许运行时改写。</div>
+          <div class="fixed-config-note">
+            <div>HTTP / WebSocket 后端绑定 {{ backendHttpBindUrl }}</div>
+            <div>前端访问后端地址：{{ backendHttpUrl }}</div>
+            <div>前端页面访问入口：{{ frontendDisplayUrls.join(' / ') }}</div>
+            <div>UDP 口径固定为 GCS {{ listenAddress }} 以 30509 作为飞控遥测主入口，18506 仅作兼容降级监听，18511 接收规划遥测；UAV {{ remoteIp }} 使用 18504 / 18506 / 18510 / 18511。</div>
+          </div>
           <div class="config-actions">
             <button
               :class="['connect-btn', { connected: isConnected, loading: loading }]"
@@ -76,7 +89,7 @@
 <script setup>
 import { ref, watch, onMounted } from 'vue'
 import { useDroneStore } from '@/store/drone'
-import backend from '@/api/backend'
+import backend, { isBackendUnavailableError } from '@/api/backend'
 
 const droneStore = useDroneStore()
 const connectionApi = backend.connection
@@ -97,6 +110,9 @@ const sendOnlyPort = ref(18506)
 const lidarSendPort = ref(18507)
 const planningSendPort = ref(18510)
 const planningRecvPort = ref(18511)
+const backendHttpBindUrl = ref('http://0.0.0.0:8000')
+const backendHttpUrl = ref('http://localhost:8000')
+const frontendDisplayUrls = ref(['http://localhost:5173', 'http://127.0.0.1:5173'])
 
 // 加载状态
 const loading = ref(false)
@@ -121,11 +137,16 @@ const loadConfig = async () => {
       lidarSendPort.value = connConfig.data.lidarSendPort || 18507
       planningSendPort.value = connConfig.data.planningSendPort
       planningRecvPort.value = connConfig.data.planningRecvPort
+      backendHttpBindUrl.value = connConfig.data.semantics?.backend_http_bind_url || 'http://0.0.0.0:8000'
+      backendHttpUrl.value = connConfig.data.semantics?.backend_http_url || 'http://localhost:8000'
+      frontendDisplayUrls.value = connConfig.data.semantics?.frontend_access_urls || ['http://localhost:5173', 'http://127.0.0.1:5173']
       droneStore.updateConfig(connConfig.data)
     }
   } catch (error) {
-    console.error('加载配置失败:', error)
-    droneStore.addLog('加载配置失败: ' + error.message, 'error')
+    if (!isBackendUnavailableError(error)) {
+      console.error('加载配置失败:', error)
+      droneStore.addLog('加载配置失败: ' + error.message, 'error')
+    }
   } finally {
     loading.value = false
   }
@@ -204,8 +225,12 @@ watch(() => droneStore.lastBackendMessage, (newMessage) => {
       // 状态变化时记录日志
       if (previousState !== isConnected.value) {
         if (isConnected.value) {
+          const primaryPort = data.flight_telemetry_primary_port || data.flight_telemetry_port || data.primary_receive_port || data.config?.hostPort
+          const fallbackPort = data.flight_telemetry_fallback_port || data.config?.sendOnlyPort
+          const planningPort = data.planning_telemetry_port || data.config?.planningRecvPort
           droneStore.addLog('UDP连接已建立', 'success')
-          droneStore.addLog(`监听端口: ${data.config?.hostPort}, 遥测/LiDAR/规划端口: ${data.config?.sendOnlyPort}/${data.config?.lidarSendPort}/${data.config?.planningRecvPort}`, 'info')
+          droneStore.addLog(`GCS监听: ${primaryPort}(飞控主入口) / ${fallbackPort}(飞控降级监听) / ${planningPort}(规划遥测)`, 'info')
+          droneStore.addLog(`后端地址: ${data.backend_http_url || backendHttpUrl.value}`, 'info')
         } else {
           droneStore.addLog('UDP连接已断开', 'warning')
         }
@@ -230,7 +255,9 @@ onMounted(async () => {
       isConnected.value = statusResult.data.connected
     }
   } catch (error) {
-    console.warn('获取UDP状态失败:', error)
+    if (!isBackendUnavailableError(error)) {
+      console.warn('获取UDP状态失败:', error)
+    }
   }
 })
 </script>
