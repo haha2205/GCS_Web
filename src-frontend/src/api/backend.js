@@ -267,6 +267,18 @@ export const recordingApi = {
 }
 
 /**
+ * 链路流量统计 API
+ */
+export const trafficApi = {
+  /**
+   * 获取链路流量与队列统计
+   */
+  getStats: async () => {
+    return await apiRequest('/api/traffic/stats')
+  }
+}
+
+/**
  * 回放数据 API
  */
 export const replayApi = {
@@ -342,6 +354,7 @@ export default {
   log: logApi,
   recording: recordingApi,
   replay: replayApi,
+  traffic: trafficApi,
   udp: udpApi,
   request: apiRequest
 }

@@ -1,13 +1,22 @@
 <template>
   <div class="right-sidebar-content">
     <div class="panel-content">
-      <RightMonitorTabsPanel :show-control-panel="showControlPanel" :show-system-panel="showSystemPanel" />
+      <RightMonitorTabsPanel
+        :show-control-panel="showControlPanel"
+        :show-system-panel="showSystemPanel"
+        :show-link-health="showLinkHealth"
+        :show-online-analysis="showOnlineAnalysis"
+        @close-link-health="$emit('close-link-health')"
+        @close-online-analysis="$emit('close-online-analysis')"
+      />
     </div>
   </div>
 </template>
 
 <script setup>
 import RightMonitorTabsPanel from './RightMonitorTabsPanel.vue'
+
+defineEmits(['close-link-health', 'close-online-analysis'])
 
 // 接收props而不是内部管理状态
 defineProps({
@@ -20,6 +29,14 @@ defineProps({
     default: true
   },
   showSystemPanel: {
+    type: Boolean,
+    default: false
+  },
+  showLinkHealth: {
+    type: Boolean,
+    default: false
+  },
+  showOnlineAnalysis: {
     type: Boolean,
     default: false
   }

@@ -1,6 +1,22 @@
 <template>
   <div class="monitor-tabs-panel">
-    <OnlineAnalysisSummaryCard class="online-summary-block" />
+    <transition name="health-drawer-fade">
+      <div v-if="showLinkHealth" class="overlay-drawer-shell">
+        <div class="overlay-backdrop" @click="$emit('close-link-health')"></div>
+        <div class="overlay-drawer">
+          <LinkHealthCard closable @close="$emit('close-link-health')" />
+        </div>
+      </div>
+    </transition>
+
+    <transition name="health-drawer-fade">
+      <div v-if="showOnlineAnalysis" class="overlay-drawer-shell">
+        <div class="overlay-backdrop" @click="$emit('close-online-analysis')"></div>
+        <div class="overlay-drawer">
+          <OnlineAnalysisDrawer closable @close="$emit('close-online-analysis')" />
+        </div>
+      </div>
+    </transition>
 
     <div class="monitor-content" :class="monitorContentClass">
       <section v-if="showControlPanel" class="monitor-column">
@@ -83,7 +99,10 @@
 import { computed } from 'vue'
 import { useDroneStore } from '@/store/drone'
 import EChartWrapper from '@/components/monitor/EChartWrapper.vue'
-import OnlineAnalysisSummaryCard from './OnlineAnalysisSummaryCard.vue'
+import LinkHealthCard from './LinkHealthCard.vue'
+import OnlineAnalysisDrawer from './OnlineAnalysisDrawer.vue'
+
+defineEmits(['close-link-health', 'close-online-analysis'])
 
 const props = defineProps({
   showControlPanel: {
@@ -93,12 +112,22 @@ const props = defineProps({
   showSystemPanel: {
     type: Boolean,
     default: false
+  },
+  showLinkHealth: {
+    type: Boolean,
+    default: false
+  },
+  showOnlineAnalysis: {
+    type: Boolean,
+    default: false
   }
 })
 
 const droneStore = useDroneStore()
 const showControlPanel = computed(() => props.showControlPanel)
 const showSystemPanel = computed(() => props.showSystemPanel)
+const showLinkHealth = computed(() => props.showLinkHealth)
+const showOnlineAnalysis = computed(() => props.showOnlineAnalysis)
 const monitorContentClass = computed(() => ({
   'single-column': showControlPanel.value !== showSystemPanel.value,
   'empty-panel': !showControlPanel.value && !showSystemPanel.value
@@ -278,8 +307,40 @@ const escPowerSeries = computed(() =>
   scrollbar-color: rgba(37, 99, 235, 0.38) rgba(219, 228, 239, 0.7);
 }
 
-.online-summary-block {
-  margin: 12px 12px 0;
+.overlay-drawer-shell {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 12px;
+}
+
+.overlay-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.32);
+  backdrop-filter: blur(4px);
+}
+
+.overlay-drawer {
+  position: relative;
+  z-index: 1;
+  width: min(920px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  overflow: auto;
+  border-radius: 20px;
+}
+
+.health-drawer-fade-enter-active,
+.health-drawer-fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+
+.health-drawer-fade-enter-from,
+.health-drawer-fade-leave-to {
+  opacity: 0;
 }
 
 .monitor-tabs-panel::-webkit-scrollbar {

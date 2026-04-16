@@ -109,6 +109,43 @@ function buildMetricTrends() {
   }
 }
 
+function buildTrafficStatsState() {
+  return {
+    lastUpdated: null,
+    available: false,
+    isRunning: false,
+    uptimeSec: 0,
+    windowSeconds: 0,
+    rxPacketsTotal: 0,
+    parsedMessagesTotal: 0,
+    txPacketsTotal: 0,
+    parserRejectionsTotal: 0,
+    parserIssuesTotal: 0,
+    recentRxPps: 0,
+    recentParsedPps: 0,
+    recentTxPps: 0,
+    recentPayloadKbps: 0,
+    packetQueueSize: 0,
+    recordingQueueSize: 0,
+    onlineAnalysisQueueSize: 0,
+    listeningPorts: [],
+    parserRejectionReasons: {},
+    parserIssueReasons: {}
+  }
+}
+
+function buildTrafficTrendState() {
+  return {
+    rxPps: buildTimedSeries(),
+    parsedPps: buildTimedSeries(),
+    txPps: buildTimedSeries(),
+    payloadKbps: buildTimedSeries(),
+    packetQueueSize: buildTimedSeries(),
+    recordingQueueSize: buildTimedSeries(),
+    onlineAnalysisQueueSize: buildTimedSeries()
+  }
+}
+
 function buildDefaultRecommendedArchitecture() {
   return {
     title: '最优架构方案',
@@ -163,6 +200,57 @@ function buildDefaultRecommendedArchitecture() {
         ]
       }
     ]
+  }
+}
+
+function buildOnlineAnalysisHistoryState() {
+  return {
+    composite: buildTimedSeries(),
+    perception: buildTimedSeries(),
+    decision: buildTimedSeries(),
+    control: buildTimedSeries(),
+    communication: buildTimedSeries(),
+    safety: buildTimedSeries()
+  }
+}
+
+function buildOnlineAnalysisMetricsState() {
+  return {
+    perceptionLatencyMs: null,
+    perceptionCpuLoad: null,
+    resourceMargin: null,
+    planningTimeMs: null,
+    trackingRmseM: null,
+    missionReliability: null,
+    controlJitterMs: null,
+    attitudeOvershootPct: null,
+    motorResponseMs: null,
+    downlinkLossRate: null,
+    busBandwidthUtil: null,
+    crossLatencyMs: null,
+    obstacleCount: null,
+    avoidTriggerCount: null,
+    systemPowerW: null
+  }
+}
+
+function buildOnlineAnalysisMetricHistoryState() {
+  return {
+    perceptionLatencyMs: buildTimedSeries(),
+    perceptionCpuLoad: buildTimedSeries(),
+    resourceMargin: buildTimedSeries(),
+    planningTimeMs: buildTimedSeries(),
+    trackingRmseM: buildTimedSeries(),
+    missionReliability: buildTimedSeries(),
+    controlJitterMs: buildTimedSeries(),
+    attitudeOvershootPct: buildTimedSeries(),
+    motorResponseMs: buildTimedSeries(),
+    downlinkLossRate: buildTimedSeries(),
+    busBandwidthUtil: buildTimedSeries(),
+    crossLatencyMs: buildTimedSeries(),
+    obstacleCount: buildTimedSeries(),
+    avoidTriggerCount: buildTimedSeries(),
+    systemPowerW: buildTimedSeries()
   }
 }
 
@@ -417,11 +505,14 @@ export const useDroneStore = defineStore('drone', {
       availableChannels: [],
       missingRequiredChannels: [],
       missingMeasuredEnhancementChannels: [],
+      metrics: buildOnlineAnalysisMetricsState(),
       recommendedArchitecture: buildDefaultRecommendedArchitecture(),
-      history: {
-        composite: buildTimedSeries()
-      }
+      history: buildOnlineAnalysisHistoryState(),
+      metricHistory: buildOnlineAnalysisMetricHistoryState()
     },
+
+    trafficStats: buildTrafficStatsState(),
+    trafficTrend: buildTrafficTrendState(),
 
     systemMode: 'REALTIME',
 
@@ -468,7 +559,37 @@ export const useDroneStore = defineStore('drone', {
     telemetryCommandIdx: (state) => state.lastTelemetryCmdIdx || state.gcsData.Tele_GCS_CmdIdx || 0,
     planningCommandIdx: (state) => state.latchedPlanningCmdIdx || state.selectedCmdIdx || state.lastTelemetryCmdIdx || state.gcsData.Tele_GCS_CmdIdx || 0,
     activeCommandIdx: (state) => state.selectedCmdIdx || state.lastTelemetryCmdIdx || state.gcsData.Tele_GCS_CmdIdx || 0,
-    displaySystemLogs: (state) => state.systemLogs
+    displaySystemLogs: (state) => state.systemLogs,
+    trafficHealthLevel: (state) => {
+      if (!state.trafficStats.available) return 'idle'
+      if (!state.trafficStats.isRunning) return 'offline'
+
+      const backlog = Math.max(
+        state.trafficStats.packetQueueSize,
+        state.trafficStats.recordingQueueSize,
+        state.trafficStats.onlineAnalysisQueueSize
+      )
+      const hasRecentFlow = state.trafficStats.recentRxPps > 0 || state.trafficStats.recentPayloadKbps > 0
+
+      if (backlog >= 50) return 'blocked'
+      if (!hasRecentFlow && state.trafficStats.rxPacketsTotal > 0) return 'stale'
+      if (state.trafficStats.parserRejectionsTotal > 0 || state.trafficStats.parserIssuesTotal > 0 || backlog >= 10) return 'warning'
+      if (state.trafficStats.parsedMessagesTotal > 0 && hasRecentFlow) return 'healthy'
+      return 'watch'
+    },
+    trafficHealthSummary: (state) => {
+      if (!state.trafficStats.available) return '未采集'
+      if (!state.trafficStats.isRunning) return 'UDP未运行'
+
+      const rx = state.trafficStats.recentRxPps.toFixed(1)
+      const parsed = state.trafficStats.recentParsedPps.toFixed(1)
+      const backlog = Math.max(
+        state.trafficStats.packetQueueSize,
+        state.trafficStats.recordingQueueSize,
+        state.trafficStats.onlineAnalysisQueueSize
+      )
+      return `RX ${rx}pps / 解析 ${parsed}pps / 队列 ${backlog}`
+    }
   },
 
   actions: {
@@ -571,6 +692,94 @@ export const useDroneStore = defineStore('drone', {
       this.onlineAnalysis.history.composite.push({ value: numericValue, timestamp })
       if (this.onlineAnalysis.history.composite.length > maxPoints) {
         this.onlineAnalysis.history.composite = this.onlineAnalysis.history.composite.slice(-maxPoints)
+      }
+    },
+
+    _pushOnlineAnalysisSeries(targetKey, value, timestamp = Date.now(), maxPoints = 180) {
+      if (!this.onlineAnalysis.history[targetKey]) {
+        return
+      }
+
+      const numericValue = Number(value)
+      if (!Number.isFinite(numericValue)) {
+        return
+      }
+
+      this.onlineAnalysis.history[targetKey].push({ value: numericValue, timestamp })
+      if (this.onlineAnalysis.history[targetKey].length > maxPoints) {
+        this.onlineAnalysis.history[targetKey] = this.onlineAnalysis.history[targetKey].slice(-maxPoints)
+      }
+    },
+
+    _pushOnlineAnalysisMetricHistory(targetKey, value, timestamp = Date.now(), maxPoints = 180) {
+      if (!this.onlineAnalysis.metricHistory[targetKey]) {
+        return
+      }
+
+      const numericValue = Number(value)
+      if (!Number.isFinite(numericValue)) {
+        return
+      }
+
+      this.onlineAnalysis.metricHistory[targetKey].push({ value: numericValue, timestamp })
+      if (this.onlineAnalysis.metricHistory[targetKey].length > maxPoints) {
+        this.onlineAnalysis.metricHistory[targetKey] = this.onlineAnalysis.metricHistory[targetKey].slice(-maxPoints)
+      }
+    },
+
+    _pushTrafficTrend(targetKey, value, timestamp = Date.now(), maxPoints = 180) {
+      if (!this.trafficTrend[targetKey]) {
+        return
+      }
+
+      const numericValue = Number(value)
+      if (!Number.isFinite(numericValue)) {
+        return
+      }
+
+      this.trafficTrend[targetKey].push({ value: numericValue, timestamp })
+      if (this.trafficTrend[targetKey].length > maxPoints) {
+        this.trafficTrend[targetKey] = this.trafficTrend[targetKey].slice(-maxPoints)
+      }
+    },
+
+    applyTrafficStats(payload = {}) {
+      const data = payload?.data || {}
+      const pipeline = payload?.pipeline || {}
+      const rxRecent = data?.rx_datagrams?.recent?.overall || {}
+      const parsedRecent = data?.parsed_messages?.recent?.overall || {}
+      const txRecent = data?.tx_packets?.recent?.overall || {}
+      const timestamp = payload?.timestamp || Date.now()
+
+      this._pushTrafficTrend('rxPps', rxRecent?.pps, timestamp)
+      this._pushTrafficTrend('parsedPps', parsedRecent?.pps, timestamp)
+      this._pushTrafficTrend('txPps', txRecent?.pps, timestamp)
+      this._pushTrafficTrend('payloadKbps', rxRecent?.payload_kbps, timestamp)
+      this._pushTrafficTrend('packetQueueSize', pipeline?.packet_queue_size, timestamp)
+      this._pushTrafficTrend('recordingQueueSize', pipeline?.recording_queue_size, timestamp)
+      this._pushTrafficTrend('onlineAnalysisQueueSize', pipeline?.online_analysis_queue_size, timestamp)
+
+      this.trafficStats = {
+        lastUpdated: timestamp,
+        available: true,
+        isRunning: !!data?.is_running,
+        uptimeSec: this._safeNumber(data?.uptime_sec),
+        windowSeconds: this._safeNumber(data?.window_seconds),
+        rxPacketsTotal: this._safeNumber(data?.rx_datagrams?.packets_total),
+        parsedMessagesTotal: this._safeNumber(data?.parsed_messages?.messages_total),
+        txPacketsTotal: this._safeNumber(data?.tx_packets?.packets_total),
+        parserRejectionsTotal: this._safeNumber(data?.parser_rejections?.total),
+        parserIssuesTotal: this._safeNumber(data?.parser_issues?.total),
+        recentRxPps: this._safeNumber(rxRecent?.pps),
+        recentParsedPps: this._safeNumber(parsedRecent?.pps),
+        recentTxPps: this._safeNumber(txRecent?.pps),
+        recentPayloadKbps: this._safeNumber(rxRecent?.payload_kbps),
+        packetQueueSize: this._safeNumber(pipeline?.packet_queue_size),
+        recordingQueueSize: this._safeNumber(pipeline?.recording_queue_size),
+        onlineAnalysisQueueSize: this._safeNumber(pipeline?.online_analysis_queue_size),
+        listeningPorts: Array.isArray(data?.listening_ports) ? data.listening_ports : [],
+        parserRejectionReasons: data?.parser_rejections?.by_reason_total || {},
+        parserIssueReasons: data?.parser_issues?.by_reason_total || {}
       }
     },
 
@@ -1040,6 +1249,27 @@ export const useDroneStore = defineStore('drone', {
       const domainScores = scores.domain_scores || {}
       const dependencyAudit = payload.dependency_audit || {}
       const recommendedArchitecture = payload.recommended_architecture || {}
+      const dimensions = payload.dimensions || {}
+      const windowMetrics = payload.window_metrics || payload.views?.system_performance || {}
+      const indicators = payload.indicators || {}
+
+      const metrics = {
+        perceptionLatencyMs: this._safeNumber(windowMetrics.perception_latency_ms ?? indicators.Ind_Perception_Latency, null),
+        perceptionCpuLoad: this._safeNumber(dimensions.computing?.perception_cpu_load ?? indicators.Ind_Perception_CPU_Load, null),
+        resourceMargin: this._safeNumber(dimensions.computing?.resource_margin ?? indicators.Ind_Resource_Margin, null),
+        planningTimeMs: this._safeNumber(windowMetrics.planning_time_ms ?? dimensions.mission?.planning_time_ms ?? indicators.Ind_Planning_Time, null),
+        trackingRmseM: this._safeNumber(windowMetrics.tracking_rmse ?? dimensions.mission?.tracking_rmse_m ?? indicators.Ind_Tracking_RMSE, null),
+        missionReliability: this._safeNumber(dimensions.mission?.mission_reliability ?? indicators.Ind_Mission_Reliability, null),
+        controlJitterMs: this._safeNumber(windowMetrics.control_jitter_ms ?? dimensions.communication?.jitter_ms ?? indicators.Ind_Control_Jitter, null),
+        attitudeOvershootPct: this._safeNumber(dimensions.performance?.attitude_overshoot_pct ?? indicators.Ind_Attitude_Overshoot, null),
+        motorResponseMs: this._safeNumber(dimensions.performance?.motor_response_ms ?? indicators.Ind_Motor_Response, null),
+        downlinkLossRate: this._safeNumber(windowMetrics.downlink_loss_rate ?? dimensions.communication?.downlink_loss_rate ?? indicators.Ind_Downlink_Loss, null),
+        busBandwidthUtil: this._safeNumber(dimensions.communication?.bus_bandwidth_util ?? indicators.Ind_Bus_Bandwidth, null),
+        crossLatencyMs: this._safeNumber(dimensions.communication?.cross_latency_ms ?? indicators.Ind_Cross_Latency, null),
+        obstacleCount: this._safeNumber(windowMetrics.obstacle_count ?? indicators.Ind_Obstacle_Count, null),
+        avoidTriggerCount: this._safeNumber(windowMetrics.avoid_trigger_count, null),
+        systemPowerW: this._safeNumber(dimensions.energy?.system_power_w ?? indicators.Ind_System_Power, null)
+      }
 
       this.onlineAnalysis.lastUpdated = timestamp
       this.onlineAnalysis.sessionId = payload.session_id || ''
@@ -1064,10 +1294,19 @@ export const useDroneStore = defineStore('drone', {
         description: recommendedArchitecture.description || '',
         groupedAllocation: recommendedArchitecture.grouped_allocation || []
       }
+      this.onlineAnalysis.metrics = metrics
 
       if (this.onlineAnalysis.compositeScore !== null) {
         this._pushOnlineAnalysisHistory(this.onlineAnalysis.compositeScore, timestamp)
       }
+
+      Object.entries(this.onlineAnalysis.domainScores).forEach(([key, value]) => {
+        this._pushOnlineAnalysisSeries(key, value, timestamp)
+      })
+
+      Object.entries(metrics).forEach(([key, value]) => {
+        this._pushOnlineAnalysisMetricHistory(key, value, timestamp)
+      })
     },
 
     _handleUdpInnerMessage(messageType, payload) {
@@ -1443,6 +1682,23 @@ export const useDroneStore = defineStore('drone', {
         this.udpConnected = false
         if (!isBackendUnavailableError(error)) {
           this.addLog(`获取UDP状态失败: ${error.message}`, 'warning')
+        }
+        return null
+      }
+    },
+
+    async fetchTrafficStats() {
+      try {
+        const stats = await backend.traffic.getStats()
+        this.applyTrafficStats(stats)
+        return stats
+      } catch (error) {
+        this.trafficStats = {
+          ...buildTrafficStatsState(),
+          lastUpdated: Date.now()
+        }
+        if (!isBackendUnavailableError(error)) {
+          this.addLog(`获取链路统计失败: ${error.message}`, 'warning')
         }
         return null
       }

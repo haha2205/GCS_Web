@@ -55,6 +55,7 @@ const recordingLoading = ref(false)
 let timeInterval = null
 let recordingPoll = null
 let udpPoll = null
+let trafficPoll = null
 
 const updateTime = () => {
   const now = new Date()
@@ -68,18 +69,23 @@ onMounted(() => {
   timeInterval = setInterval(updateTime, 1000)
   void droneStore.fetchRecordingStatus()
   void droneStore.fetchUdpStatus()
+  void droneStore.fetchTrafficStats()
   recordingPoll = setInterval(() => {
     void droneStore.fetchRecordingStatus()
   }, 1500)
   udpPoll = setInterval(() => {
     void droneStore.fetchUdpStatus()
   }, 1500)
+  trafficPoll = setInterval(() => {
+    void droneStore.fetchTrafficStats()
+  }, 2000)
 })
 
 onUnmounted(() => {
   if (timeInterval) clearInterval(timeInterval)
   if (recordingPoll) clearInterval(recordingPoll)
   if (udpPoll) clearInterval(udpPoll)
+  if (trafficPoll) clearInterval(trafficPoll)
 })
 
 const udpClass = computed(() => {

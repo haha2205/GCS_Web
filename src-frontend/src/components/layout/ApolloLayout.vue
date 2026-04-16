@@ -18,6 +18,26 @@
           </button>
           <button
             v-if="showMonitorPanel"
+            class="icon-btn health-btn"
+            :class="[{ active: showLinkHealth }, trafficHealthLevel]"
+            @click="toggleLinkHealth()"
+            title="显示链路健康"
+          >
+            <span class="health-icon">⛓</span>
+            <span class="health-dot" :class="trafficHealthLevel"></span>
+          </button>
+          <button
+            v-if="showMonitorPanel"
+            class="icon-btn health-btn"
+            :class="[{ active: showOnlineAnalysisDrawer }, onlineAnalysisLevel]"
+            @click="toggleOnlineAnalysisDrawer()"
+            title="显示在线评测"
+          >
+            <span class="health-icon">◔</span>
+            <span class="health-dot" :class="onlineAnalysisLevel"></span>
+          </button>
+          <button
+            v-if="showMonitorPanel"
             class="icon-btn"
             :class="{ active: showControlStatus }"
             @click="showControlStatus = !showControlStatus"
@@ -68,6 +88,10 @@
               :is-maximized="isMonitorMaximized"
               :show-control-panel="showControlStatus"
               :show-system-panel="showSystemPerformance"
+              :show-link-health="showLinkHealth"
+              :show-online-analysis="showOnlineAnalysisDrawer"
+              @close-link-health="showLinkHealth = false"
+              @close-online-analysis="showOnlineAnalysisDrawer = false"
             />
           </div>
         </transition>
@@ -103,8 +127,16 @@ const isMonitorMaximized = ref(false)
 const isBottomCollapsed = ref(false)
 const showControlStatus = ref(true)
 const showSystemPerformance = ref(true)
+const showLinkHealth = ref(false)
+const showOnlineAnalysisDrawer = ref(false)
 const vizFlex = ref(44)
 const panelFlex = ref(56)
+const trafficHealthLevel = computed(() => droneStore.trafficHealthLevel)
+const onlineAnalysisLevel = computed(() => {
+  if (!droneStore.onlineAnalysis.enabled) return 'idle'
+  if (droneStore.onlineAnalysis.ready) return 'healthy'
+  return 'warning'
+})
 
 const vizContainerStyle = computed(() => {
   if (!showMonitorPanel.value) return { flex: '1' }
@@ -124,6 +156,22 @@ const onSplitterResize = (pixelWidth) => {
   if (percentage > 0) {
     panelFlex.value = Math.round(percentage)
     vizFlex.value = Math.round(100 - percentage)
+  }
+}
+
+const toggleLinkHealth = () => {
+  const next = !showLinkHealth.value
+  showLinkHealth.value = next
+  if (next) {
+    showOnlineAnalysisDrawer.value = false
+  }
+}
+
+const toggleOnlineAnalysisDrawer = () => {
+  const next = !showOnlineAnalysisDrawer.value
+  showOnlineAnalysisDrawer.value = next
+  if (next) {
+    showLinkHealth.value = false
   }
 }
 
@@ -172,6 +220,7 @@ onMounted(() => {
 }
 
 .icon-btn {
+  position: relative;
   width: 34px;
   height: 34px;
   border: 1px solid var(--border-color);
@@ -182,6 +231,47 @@ onMounted(() => {
 
 .icon-btn.active {
   background: rgba(37, 99, 235, 0.12);
+}
+
+.health-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.health-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.health-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  border: 1.5px solid rgba(255, 255, 255, 0.95);
+  background: #94a3b8;
+}
+
+.health-dot.healthy {
+  background: #16a34a;
+}
+
+.health-dot.warning,
+.health-dot.watch {
+  background: #d97706;
+}
+
+.health-dot.blocked,
+.health-dot.stale {
+  background: #dc2626;
+}
+
+.health-dot.offline,
+.health-dot.idle {
+  background: #94a3b8;
 }
 
 .content-area {
