@@ -19,6 +19,3 @@ PyYAML==6.0.1
 
 # 日志系统
 python-json-logger==2.0.7
-
-# 科学计算（可选，用于DSM数据分析）
-scipy==1.11.4

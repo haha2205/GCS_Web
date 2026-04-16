@@ -5,6 +5,8 @@ MiniQGCLinkV2.0 协议解析器（精简版）
 
 import asyncio
 import logging
+import socket
+import time
 from typing import Optional, Callable, Any, Dict, List
 
 from .nclink_protocol import (
@@ -13,7 +15,7 @@ from .nclink_protocol import (
     PortType,
 )
 # 导入config模块：直接导入（main.py已将src-python添加到sys.path）
-from config import config
+from config import config, FIXED_COMMAND_SOURCE_PORT
 
 # 配置日志
 logging.basicConfig(
@@ -25,6 +27,191 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+
+class _RollingTrafficWindow:
+    def __init__(self, window_seconds: int = 10):
+        self.window_seconds = max(1, int(window_seconds))
+        self._overall: Dict[int, Dict[str, int]] = {}
+        self._by_key: Dict[str, Dict[int, Dict[str, int]]] = {}
+
+    def add(self, key: Optional[str], payload_bytes: int, frame_bytes: int, packets: int = 1) -> None:
+        now_sec = int(time.monotonic())
+        self._add_bucket(self._overall, now_sec, packets, payload_bytes, frame_bytes)
+        if key:
+            self._add_bucket(self._by_key.setdefault(key, {}), now_sec, packets, payload_bytes, frame_bytes)
+        self._prune(now_sec)
+
+    def snapshot(self) -> Dict[str, Any]:
+        now_sec = int(time.monotonic())
+        self._prune(now_sec)
+        cutoff = now_sec - self.window_seconds + 1
+        by_key: Dict[str, Dict[str, Any]] = {}
+        for key, buckets in sorted(self._by_key.items()):
+            summary = self._summarize(buckets, cutoff)
+            if summary['packets'] > 0:
+                by_key[key] = self._build_rate_snapshot(summary)
+        return {
+            'window_seconds': self.window_seconds,
+            'overall': self._build_rate_snapshot(self._summarize(self._overall, cutoff)),
+            'by_key': by_key,
+        }
+
+    def _add_bucket(
+        self,
+        container: Dict[int, Dict[str, int]],
+        second_key: int,
+        packets: int,
+        payload_bytes: int,
+        frame_bytes: int,
+    ) -> None:
+        bucket = container.setdefault(second_key, {'packets': 0, 'payload_bytes': 0, 'frame_bytes': 0})
+        bucket['packets'] += int(packets)
+        bucket['payload_bytes'] += max(0, int(payload_bytes))
+        bucket['frame_bytes'] += max(0, int(frame_bytes))
+
+    def _summarize(self, buckets: Dict[int, Dict[str, int]], cutoff: int) -> Dict[str, int]:
+        summary = {'packets': 0, 'payload_bytes': 0, 'frame_bytes': 0}
+        for second_key, values in buckets.items():
+            if second_key < cutoff:
+                continue
+            summary['packets'] += values['packets']
+            summary['payload_bytes'] += values['payload_bytes']
+            summary['frame_bytes'] += values['frame_bytes']
+        return summary
+
+    def _build_rate_snapshot(self, summary: Dict[str, int]) -> Dict[str, Any]:
+        duration = float(self.window_seconds)
+        return {
+            'packets': summary['packets'],
+            'payload_bytes': summary['payload_bytes'],
+            'frame_bytes': summary['frame_bytes'],
+            'pps': round(summary['packets'] / duration, 3),
+            'payload_kbps': round((summary['payload_bytes'] * 8.0) / 1000.0 / duration, 3),
+            'frame_kbps': round((summary['frame_bytes'] * 8.0) / 1000.0 / duration, 3),
+        }
+
+    def _prune(self, now_sec: int) -> None:
+        cutoff = now_sec - self.window_seconds + 1
+        self._prune_bucket_map(self._overall, cutoff)
+        for key in list(self._by_key.keys()):
+            buckets = self._by_key[key]
+            self._prune_bucket_map(buckets, cutoff)
+            if not buckets:
+                del self._by_key[key]
+
+    @staticmethod
+    def _prune_bucket_map(buckets: Dict[int, Dict[str, int]], cutoff: int) -> None:
+        for second_key in [key for key in buckets.keys() if key < cutoff]:
+            del buckets[second_key]
+
+
+class RuntimeTrafficMonitor:
+    def __init__(self, window_seconds: int = 10):
+        self.started_at = time.monotonic()
+        self.window_seconds = window_seconds
+        self._rx_window = _RollingTrafficWindow(window_seconds)
+        self._tx_window = _RollingTrafficWindow(window_seconds)
+        self._parsed_window = _RollingTrafficWindow(window_seconds)
+        self._reject_window = _RollingTrafficWindow(window_seconds)
+        self._issue_window = _RollingTrafficWindow(window_seconds)
+        self.rx_totals = {'packets': 0, 'payload_bytes': 0}
+        self.tx_totals = {'packets': 0, 'payload_bytes': 0}
+        self.parsed_totals = {'messages': 0, 'payload_bytes': 0, 'frame_bytes': 0}
+        self.rejected_total = 0
+        self.issue_total = 0
+        self.rx_by_port: Dict[str, Dict[str, int]] = {}
+        self.tx_by_source_port: Dict[str, Dict[str, int]] = {}
+        self.tx_by_target: Dict[str, Dict[str, int]] = {}
+        self.parsed_by_type: Dict[str, Dict[str, int]] = {}
+        self.rejected_by_reason: Dict[str, int] = {}
+        self.issues_by_reason: Dict[str, int] = {}
+
+    def record_rx_datagram(self, local_port: int, size: int) -> None:
+        key = str(local_port)
+        self.rx_totals['packets'] += 1
+        self.rx_totals['payload_bytes'] += size
+        self._bump_counter(self.rx_by_port, key, packets=1, payload_bytes=size)
+        self._rx_window.add(key, size, size)
+
+    def record_tx_packet(self, source_port: Optional[int], target_host: str, target_port: int, size: int) -> None:
+        self.tx_totals['packets'] += 1
+        self.tx_totals['payload_bytes'] += size
+        source_key = str(source_port) if source_port is not None else 'unknown'
+        target_key = f'{target_host}:{target_port}'
+        self._bump_counter(self.tx_by_source_port, source_key, packets=1, payload_bytes=size)
+        self._bump_counter(self.tx_by_target, target_key, packets=1, payload_bytes=size)
+        self._tx_window.add(target_key, size, size)
+
+    def record_parsed_message(self, message: dict) -> None:
+        msg_type = str(message.get('type') or 'unknown')
+        payload_size = int(message.get('payload_size', 0) or 0)
+        frame_size = int(message.get('frame_size', payload_size) or payload_size)
+        self.parsed_totals['messages'] += 1
+        self.parsed_totals['payload_bytes'] += payload_size
+        self.parsed_totals['frame_bytes'] += frame_size
+        self._bump_counter(self.parsed_by_type, msg_type, packets=1, payload_bytes=payload_size, frame_bytes=frame_size)
+        self._parsed_window.add(msg_type, payload_size, frame_size)
+
+    def record_parser_rejection(self, reason: str, frame_size: int = 0) -> None:
+        self.rejected_total += 1
+        self.rejected_by_reason[reason] = self.rejected_by_reason.get(reason, 0) + 1
+        self._reject_window.add(reason, 0, frame_size)
+
+    def record_parser_issue(self, reason: str, frame_size: int = 0) -> None:
+        self.issue_total += 1
+        self.issues_by_reason[reason] = self.issues_by_reason.get(reason, 0) + 1
+        self._issue_window.add(reason, 0, frame_size)
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            'window_seconds': self.window_seconds,
+            'uptime_sec': round(max(0.0, time.monotonic() - self.started_at), 3),
+            'rx_datagrams': {
+                'packets_total': self.rx_totals['packets'],
+                'payload_bytes_total': self.rx_totals['payload_bytes'],
+                'recent': self._rx_window.snapshot(),
+                'by_port_total': self.rx_by_port,
+            },
+            'tx_packets': {
+                'packets_total': self.tx_totals['packets'],
+                'payload_bytes_total': self.tx_totals['payload_bytes'],
+                'recent': self._tx_window.snapshot(),
+                'by_source_port_total': self.tx_by_source_port,
+                'by_target_total': self.tx_by_target,
+            },
+            'parsed_messages': {
+                'messages_total': self.parsed_totals['messages'],
+                'payload_bytes_total': self.parsed_totals['payload_bytes'],
+                'frame_bytes_total': self.parsed_totals['frame_bytes'],
+                'recent': self._parsed_window.snapshot(),
+                'by_type_total': self.parsed_by_type,
+            },
+            'parser_rejections': {
+                'total': self.rejected_total,
+                'by_reason_total': self.rejected_by_reason,
+                'recent': self._reject_window.snapshot(),
+            },
+            'parser_issues': {
+                'total': self.issue_total,
+                'by_reason_total': self.issues_by_reason,
+                'recent': self._issue_window.snapshot(),
+            },
+        }
+
+    @staticmethod
+    def _bump_counter(
+        container: Dict[str, Dict[str, int]],
+        key: str,
+        *,
+        packets: int = 0,
+        payload_bytes: int = 0,
+        frame_bytes: int = 0,
+    ) -> None:
+        counter = container.setdefault(key, {'packets': 0, 'payload_bytes': 0, 'frame_bytes': 0})
+        counter['packets'] += packets
+        counter['payload_bytes'] += payload_bytes
+        counter['frame_bytes'] += frame_bytes
 
 
 # ================================================================
@@ -42,12 +229,12 @@ class UDPHandler:
             on_message: 消息回调函数
         """
         self.on_message = on_message
-        self.parser = NCLinkProtocolParser()
         self._loop: Optional[asyncio.BaseEventLoop] = None
         
         # 多个UDP传输对象（每个端口一个）
         self._transports: Dict[int, asyncio.DatagramTransport] = {}
         self._protocols: Dict[int, NCLinkUDPServerProtocol] = {}
+        self.runtime_monitor = RuntimeTrafficMonitor()
         
         # 从配置加载目标地址
         udp_config = config.get_udp_config()
@@ -170,8 +357,17 @@ class UDPHandler:
             return
         
         try:
-            transport = next(iter(self._transports.values()))
+            transport = self._transports.get(FIXED_COMMAND_SOURCE_PORT)
+            if transport is None:
+                listen_port = config.get_udp_config().listen_port
+                transport = self._transports.get(listen_port)
+            if transport is None:
+                transport = next(iter(self._transports.values()))
+
             transport.sendto(data, (host, port))
+            sockname = transport.get_extra_info('sockname')
+            source_port = sockname[1] if isinstance(sockname, tuple) and len(sockname) > 1 else None
+            self.runtime_monitor.record_tx_packet(source_port, host, port, len(data))
             logger.info(f"已发送 {len(data)} 字节到 {host}:{port}")
 
             # 打印数据包头部用于调试（兼容Python 3.7）
@@ -192,16 +388,25 @@ class UDPHandler:
             port_type: 端口类型
         """
         try:
-            # 使用协议解析器解析数据
-            messages = self.parser.feed_data(data, port_type)
-            
-            # 调用回调函数
-            if self.on_message:
-                for message in messages:
-                    self.on_message(message)
-                    
+            # 保留兼容入口，UDP 场景下实际解析在各端口协议实例内完成。
+            messages = NCLinkProtocolParser().feed_data(data, port_type)
+            self.dispatch_messages(messages)
         except Exception as e:
             logger.error(f"处理UDP数据异常: {e}")
+
+    def dispatch_messages(self, messages: List[dict]) -> None:
+        """分发已解析消息。"""
+        if not self.on_message or not messages:
+            return
+
+        for message in messages:
+            self.on_message(message)
+
+    def get_runtime_stats(self) -> Dict[str, Any]:
+        stats = self.runtime_monitor.snapshot()
+        stats['is_running'] = self.is_running()
+        stats['listening_ports'] = sorted(self._transports.keys())
+        return stats
 
 
 # ================================================================
@@ -217,6 +422,8 @@ class NCLinkUDPServerProtocol(asyncio.DatagramProtocol):
         self.port = port
         self.port_type = PortType.PORT_18504_RECEIVE
         self.loop = asyncio.get_event_loop()
+        # UDP 端口之间不能共享帧缓冲状态，避免多端口数据交叉污染。
+        self.parser = NCLinkProtocolParser(on_event=self._handle_parser_event)
     
     def set_port_type(self, port_type: PortType):
         """设置端口类型"""
@@ -225,11 +432,21 @@ class NCLinkUDPServerProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport):
         """连接建立时调用"""
         self.transport = transport
+        sock = transport.get_extra_info('socket')
+        if sock is not None:
+            try:
+                # Increase the UDP receive buffer to reduce packet drops under sustained high-rate telemetry.
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+                actual_size = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+                logger.info(f"UDP端口 {self.port} 接收缓冲区已设置为 {actual_size} 字节")
+            except OSError as exc:
+                logger.warning(f"UDP端口 {self.port} 设置接收缓冲区失败: {exc}")
         logger.info(f"UDP端口 {self.port} 连接已建立 (类型: {self.port_type.name})")
     
     def datagram_received(self, data: bytes, addr):
         """收到UDP数据包的回调"""
-        logger.info(f"[端口{self.port}] 收到来自 {addr} 的数据，长度: {len(data)}")
+        logger.debug(f"[端口{self.port}] 收到来自 {addr} 的数据，长度: {len(data)}")
+        self.handler.runtime_monitor.record_rx_datagram(self.port, len(data))
 
         # 打印前10字节用于调试（兼容Python 3.7）
         import binascii
@@ -239,14 +456,29 @@ class NCLinkUDPServerProtocol(asyncio.DatagramProtocol):
         logger.debug(f"[端口{self.port}] 数据预览: {hex_preview}")
         
         try:
-            # 在主事件循环中调用处理函数
-            self.loop.call_soon_threadsafe(
-                self.handler.process_data,
-                data,
-                self.port_type
-            )
+            messages = self.parser.feed_data(data, self.port_type)
+            self.handler.dispatch_messages(messages)
         except Exception as e:
             logger.error(f"[端口{self.port}] 处理UDP数据包失败: {e}")
+
+    def _handle_parser_event(self, event: dict) -> None:
+        event_type = str(event.get('type') or '')
+        if event_type == 'message_parsed':
+            message = event.get('message')
+            if isinstance(message, dict):
+                self.handler.runtime_monitor.record_parsed_message(message)
+            return
+
+        if event_type == 'frame_rejected':
+            reason = str(event.get('reason') or 'unknown')
+            frame_size = int(event.get('frame_size', 0) or 0)
+            self.handler.runtime_monitor.record_parser_rejection(reason, frame_size)
+            return
+
+        if event_type == 'frame_issue':
+            reason = str(event.get('reason') or 'unknown')
+            frame_size = int(event.get('frame_size', 0) or 0)
+            self.handler.runtime_monitor.record_parser_issue(reason, frame_size)
     
     def error_received(self, exc):
         """错误处理"""
@@ -260,5 +492,3 @@ class NCLinkUDPServerProtocol(asyncio.DatagramProtocol):
             logger.info(f"[端口{self.port}] UDP连接已关闭")
 
 
-# 注意：实际协议解析使用 nclink_protocol.NCLinkProtocolParser，
-# UDPHandler.parser 就是 NCLinkProtocolParser 的实例。

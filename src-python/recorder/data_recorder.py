@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 import recorder.csv_helper_full as csv_helper
 
 logger = logging.getLogger(__name__)
+_OPEN = open
 
 PLANNING_TRAJECTORY_DT_SECONDS = 0.01
 
@@ -21,14 +22,9 @@ PLANNING_OUTPUT_DIRNAME = 'planning'
 LIDAR_OUTPUT_DIRNAME = 'lidar'
 CAMERA_OUTPUT_DIRNAME = 'camera'
 FUNCTION_PACKETS_OUTPUT_DIRNAME = 'function_packets'
+COMMUNICATION_OUTPUT_DIRNAME = 'communication'
 
 FCS_ONBOARD_EXTRA_HEADERS = [
-    'ParamAil_YaccLMT',
-    'ParamEle_XaccLMT',
-    'ParamGuide_Hground',
-    'ParamGuide_AutoTakeoffHcmd',
-    'ftb_intterrupt_plan',
-    'TimeStamp',
     'receive_time',
 ]
 
@@ -73,7 +69,6 @@ FCS_VIEW_PRIMER_TYPES = (
 
 FCS_VIEW_SNAPSHOT_TRIGGER_TYPES = {
     'fcs_param',
-    'fcs_root',
 }
 
 FCS_VIEW_MEANINGFUL_TYPES = {
@@ -117,7 +112,6 @@ BUS_LOGICAL_ROUTE_MAP = {
     'fcs_line_ab': ('LF_Path_Planning', 'LF_Flight_Control'),
     'fcs_param': ('LF_Flight_Control', 'LF_SoC_Adapter'),
     'fcs_esc': ('LF_Motor_Driver', 'LF_SoC_Adapter'),
-    'fcs_root': ('LF_Flight_Control', 'LF_SoC_Adapter'),
     'planning_telemetry': ('LF_Path_Planning', 'LF_Flight_Control'),
 }
 
@@ -164,6 +158,7 @@ class RawDataRecorder:
         self.lidar_directory = os.path.join(self.records_directory, LIDAR_OUTPUT_DIRNAME)
         self.camera_directory = os.path.join(self.records_directory, CAMERA_OUTPUT_DIRNAME)
         self.function_directory = os.path.join(self.records_directory, FUNCTION_PACKETS_OUTPUT_DIRNAME)
+        self.communication_directory = os.path.join(self.records_directory, COMMUNICATION_OUTPUT_DIRNAME)
 
         self.enabled_ports: List[int] = []
         self.is_recording = False
@@ -175,6 +170,7 @@ class RawDataRecorder:
         self.csv_writers: Dict[str, object] = {}
         self.function_file_handles: Dict[int, object] = {}
         self.function_csv_writers: Dict[int, object] = {}
+        self.backend_log_handle: Optional[object] = None
 
         self.data_counters = defaultdict(int)
         self.func_code_stats = defaultdict(lambda: {
@@ -191,14 +187,6 @@ class RawDataRecorder:
         self.fcs_snapshot_pending = False
         self.fcs_last_receive_time = ''
         self.fcs_last_timestamp_ms = ''
-        self.fcs_root_snapshot = {
-            'ParamAil_YaccLMT': '',
-            'ParamEle_XaccLMT': '',
-            'ParamGuide_Hground': '',
-            'ParamGuide_AutoTakeoffHcmd': '',
-            'ftb_intterrupt_plan': '',
-        }
-
         for directory in [
             self.session_directory,
             self.records_directory,
@@ -208,6 +196,7 @@ class RawDataRecorder:
             self.lidar_directory,
             self.camera_directory,
             self.function_directory,
+            self.communication_directory,
         ]:
             os.makedirs(directory, exist_ok=True)
 
@@ -219,6 +208,7 @@ class RawDataRecorder:
         self.is_recording = True
         self.start_time = time.time()
         self._init_fcs_cycle_cache()
+        self._init_backend_communication_log_file()
         self._init_fcs_telemetry_file()
         self._init_planning_telemetry_file()
         self._init_lidar_telemetry_file()
@@ -244,6 +234,13 @@ class RawDataRecorder:
             except Exception as exc:
                 logger.error('关闭功能字文件失败: %s', exc)
 
+        if self.backend_log_handle is not None:
+            try:
+                self.backend_log_handle.close()
+            except Exception as exc:
+                logger.error('关闭通信日志文件失败: %s', exc)
+            self.backend_log_handle = None
+
         self.file_handles.clear()
         self.csv_writers.clear()
         self.function_file_handles.clear()
@@ -263,15 +260,36 @@ class RawDataRecorder:
 
     def _init_fcs_telemetry_file(self):
         path = os.path.join(self.fcs_directory, 'fcs_telemetry.csv')
-        handle = open(path, 'w', newline='', encoding='utf-8')
+        handle = _OPEN(path, 'w', newline='', encoding='utf-8')
         writer = csv.writer(handle)
         writer.writerow(_get_fcs_onboard_headers())
         self.file_handles['fcs_telemetry'] = handle
         self.csv_writers['fcs_telemetry'] = writer
 
+    def _init_backend_communication_log_file(self):
+        path = os.path.join(self.communication_directory, 'backend_communication.log')
+        self.backend_log_handle = _OPEN(path, 'w', encoding='utf-8')
+
+    def append_backend_communication_log(
+        self,
+        logger_name: str,
+        level_name: str,
+        message: str,
+        created_ts: Optional[float] = None,
+    ) -> None:
+        if not self.is_recording or self.backend_log_handle is None:
+            return
+        log_dt = datetime.fromtimestamp(created_ts if created_ts is not None else time.time())
+        self.backend_log_handle.write(
+            f'{log_dt.strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]} - {logger_name} - {level_name} - {message}\n'
+        )
+        self.data_counters['backend_communication_log'] += 1
+        if self.data_counters['backend_communication_log'] % 20 == 0:
+            self.backend_log_handle.flush()
+
     def _init_planning_telemetry_file(self):
         path = os.path.join(self.planning_directory, 'planning_telemetry.csv')
-        handle = open(path, 'w', newline='', encoding='utf-8')
+        handle = _OPEN(path, 'w', newline='', encoding='utf-8')
         writer = csv.writer(handle)
         writer.writerow(PLANNING_TELEMETRY_HEADERS)
         self.file_handles['planning_telemetry'] = handle
@@ -279,7 +297,7 @@ class RawDataRecorder:
 
     def _init_lidar_telemetry_file(self):
         path = os.path.join(self.lidar_directory, 'radar_data.csv')
-        handle = open(path, 'w', newline='', encoding='utf-8')
+        handle = _OPEN(path, 'w', newline='', encoding='utf-8')
         writer = csv.writer(handle)
         writer.writerow(LIDAR_TELEMETRY_HEADERS)
         self.file_handles['radar_data'] = handle
@@ -287,7 +305,7 @@ class RawDataRecorder:
 
     def _init_bus_traffic_file(self):
         path = os.path.join(self.bus_directory, 'bus_traffic.csv')
-        handle = open(path, 'w', newline='', encoding='utf-8')
+        handle = _OPEN(path, 'w', newline='', encoding='utf-8')
         writer = csv.writer(handle)
         writer.writerow(BUS_TRAFFIC_HEADERS)
         self.file_handles['bus_traffic'] = handle
@@ -313,7 +331,7 @@ class RawDataRecorder:
                 if not os.path.exists(meta_path):
                     continue
                 try:
-                    with open(meta_path, 'r', encoding='utf-8') as meta_file:
+                    with _OPEN(meta_path, 'r', encoding='utf-8') as meta_file:
                         case_id = json.load(meta_file).get('case_id', '')
                     match = re.match(r'^case(\d{3,4})(?:_\d{8})?$', str(case_id))
                     if match:
@@ -435,15 +453,7 @@ class RawDataRecorder:
         row = [f'{relative_seconds:.6f}']
         for header_name in source_headers[1:]:
             row.append(cache_map.get(header_name, ''))
-        row.extend([
-            self.fcs_root_snapshot.get('ParamAil_YaccLMT', ''),
-            self.fcs_root_snapshot.get('ParamEle_XaccLMT', ''),
-            self.fcs_root_snapshot.get('ParamGuide_Hground', ''),
-            self.fcs_root_snapshot.get('ParamGuide_AutoTakeoffHcmd', ''),
-            self.fcs_root_snapshot.get('ftb_intterrupt_plan', ''),
-            self.fcs_last_timestamp_ms,
-            self.fcs_last_receive_time,
-        ])
+        row.append(self.fcs_last_receive_time)
         writer.writerow(row)
         self.data_counters['fcs_telemetry'] += 1
         if self.data_counters['fcs_telemetry'] % 50 == 0:
@@ -569,7 +579,7 @@ class RawDataRecorder:
             return self.function_csv_writers[func_code]
         safe_name = (func_name or f'0x{func_code:02X}').replace('/', '_').replace(' ', '_')
         path = os.path.join(self.function_directory, f'func_0x{func_code:02X}_{safe_name}.csv')
-        handle = open(path, 'w', newline='', encoding='utf-8')
+        handle = _OPEN(path, 'w', newline='', encoding='utf-8')
         writer = csv.writer(handle)
         writer.writerow(FUNCTION_PACKET_HEADERS)
         self.function_file_handles[func_code] = handle
@@ -605,15 +615,6 @@ class RawDataRecorder:
         if packet_ts is not None:
             self.fcs_last_timestamp_ms = str(packet_ts)
             self.fcs_last_receive_time = f'{float(packet_ts) / 1000.0:.6f}'
-
-        if msg_type == 'fcs_root' and isinstance(data, dict):
-            self.fcs_root_snapshot.update({
-                'ParamAil_YaccLMT': data.get('YaccLMT', data.get('ParamAil_YaccLMT', self.fcs_root_snapshot['ParamAil_YaccLMT'])),
-                'ParamEle_XaccLMT': data.get('XaccLMT', data.get('ParamEle_XaccLMT', self.fcs_root_snapshot['ParamEle_XaccLMT'])),
-                'ParamGuide_Hground': data.get('Hground', data.get('ParamGuide_Hground', self.fcs_root_snapshot['ParamGuide_Hground'])),
-                'ParamGuide_AutoTakeoffHcmd': data.get('AutoTakeoffHcmd', data.get('ParamGuide_AutoTakeoffHcmd', self.fcs_root_snapshot['ParamGuide_AutoTakeoffHcmd'])),
-                'ftb_intterrupt_plan': data.get('ftb_intterrupt_plan', self.fcs_root_snapshot['ftb_intterrupt_plan']),
-            })
 
         if msg_type == 'fcs_pwms':
             self._flush_fcs_snapshot_if_pending()
@@ -686,7 +687,7 @@ class RawDataRecorder:
         if msg_type in {
             'fcs_pwms', 'fcs_states', 'fcs_datactrl', 'fcs_gncbus', 'avoiflag',
             'fcs_datafutaba', 'fcs_param', 'fcs_esc', 'fcs_line_aim2ab',
-            'fcs_line_ab', 'fcs_datagcs', 'fcs_root',
+            'fcs_line_ab', 'fcs_datagcs',
         }:
             self.record_fcs_telemetry(msg_type, data, decoded_data)
         elif msg_type == 'planning_telemetry':
@@ -710,6 +711,7 @@ class RawDataRecorder:
                 'fcs': self.fcs_directory,
                 'planning': self.planning_directory,
                 'lidar': self.lidar_directory,
+                'communication': self.communication_directory,
                 'camera': self.camera_directory,
             },
             'record_categories': {
@@ -718,16 +720,17 @@ class RawDataRecorder:
                 'fcs': '飞控遥测 CSV',
                 'planning': '规划遥测 CSV',
                 'lidar': '从规划遥测提取出的雷达障碍物 CSV',
+                'communication': '后端上下行通信日志',
                 'camera': '目录保留，当前不落盘',
             },
             'enabled_record_streams': [
-                key for key in ['fcs_telemetry', 'planning_telemetry', 'radar_data', 'bus_traffic', 'function_packets']
+                key for key in ['fcs_telemetry', 'planning_telemetry', 'radar_data', 'bus_traffic', 'function_packets', 'backend_communication_log']
                 if self.data_counters.get(key, 0) > 0
             ],
             'data_counters': dict(self.data_counters),
         }
         payload.update(self.session_meta_patch)
-        with open(meta_path, 'w', encoding='utf-8') as meta_file:
+        with _OPEN(meta_path, 'w', encoding='utf-8') as meta_file:
             json.dump(payload, meta_file, ensure_ascii=False, indent=2)
 
     def _write_data_quality_report(self):
@@ -742,7 +745,7 @@ class RawDataRecorder:
             else:
                 generated_files.extend([os.path.join(rel_root, file_name) for file_name in files])
         report['generated_files'] = sorted(set(generated_files) | {'data_quality_report.json'})
-        with open(report_path, 'w', encoding='utf-8') as report_file:
+        with _OPEN(report_path, 'w', encoding='utf-8') as report_file:
             json.dump(report, report_file, ensure_ascii=False, indent=2)
 
     def get_session_info(self) -> dict:
@@ -777,5 +780,8 @@ class RawDataRecorder:
         }
 
     def __del__(self):
-        if self.is_recording:
-            self.stop_recording()
+        try:
+            if getattr(self, 'is_recording', False):
+                self.stop_recording()
+        except Exception:
+            pass

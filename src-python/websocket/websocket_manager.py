@@ -3,8 +3,10 @@ WebSocket 连接管理器
 负责将UDP解析的数据实时推送到前端Vue应用
 """
 
+import asyncio
+import json
 import logging
-from typing import Dict, Set
+from typing import Dict, Optional, Set
 from fastapi import WebSocket
 from fastapi.websockets import WebSocketState
 
@@ -25,8 +27,11 @@ class WebSocketManager:
         # 存储所有活跃的WebSocket连接
         self.active_connections: Set[WebSocket] = set()
         self._snapshot_messages: Dict[str, dict] = {}
+        self._pending_latest_messages: Dict[str, dict] = {}
+        self._latest_broadcast_task: Optional[asyncio.Task] = None
         self._broadcast_error_count = 0  # 连续广播错误计数
         self._max_consecutive_errors = 50  # 超过此阈值打印告警
+        self._send_timeout_seconds = 0.25
     
     async def connect(self, websocket: WebSocket):
         """接受新的WebSocket连接"""
@@ -56,7 +61,8 @@ class WebSocketManager:
         """向特定客户端发送消息"""
         try:
             if websocket.client_state == WebSocketState.CONNECTED:
-                await websocket.send_json(message)
+                payload = json.dumps(message, ensure_ascii=False, separators=(',', ':'))
+                await asyncio.wait_for(websocket.send_text(payload), timeout=self._send_timeout_seconds)
         except Exception as e:
             logger.debug(f"发送个人消息失败(客户端可能已刷新): {e}")
             self.disconnect(websocket)
@@ -106,22 +112,30 @@ class WebSocketManager:
         """向所有连接的客户端广播消息（容错：单个连接异常不影响其他连接）"""
         if not self.active_connections:
             return
-        
+
         # 复制连接集合,避免迭代时修改
         connections = list(self.active_connections)
         disconnected = []
-        
-        for websocket in connections:
+        payload = json.dumps(message, ensure_ascii=False, separators=(',', ':'))
+
+        async def _send_to_connection(websocket: WebSocket):
+            if websocket.client_state != WebSocketState.CONNECTED:
+                return websocket
+
             try:
-                if websocket.client_state == WebSocketState.CONNECTED:
-                    await websocket.send_json(message)
-                else:
-                    disconnected.append(websocket)
+                await asyncio.wait_for(websocket.send_text(payload), timeout=self._send_timeout_seconds)
+                return None
             except Exception as e:
-                # 降低日志级别——前端刷新导致断开是正常行为
                 logger.debug(f"广播写入失败(客户端可能已刷新): {e}")
-                disconnected.append(websocket)
-        
+                return websocket
+
+        results = await asyncio.gather(*[_send_to_connection(websocket) for websocket in connections], return_exceptions=True)
+        for result in results:
+            if isinstance(result, WebSocket):
+                disconnected.append(result)
+            elif isinstance(result, Exception):
+                logger.debug(f"广播任务执行异常: {result}")
+
         # 批量清理断开的连接
         for ws in disconnected:
             self.active_connections.discard(ws)
@@ -136,6 +150,24 @@ class WebSocketManager:
                 self._broadcast_error_count = 0
         else:
             self._broadcast_error_count = 0
+
+    def schedule_latest_broadcast(self, message: dict, cache_key: str):
+        """对高频遥测只保留每类最新一条，避免广播任务积压。"""
+        if not cache_key:
+            asyncio.create_task(self.broadcast(message))
+            return
+
+        self._pending_latest_messages[cache_key] = dict(message)
+        if self._latest_broadcast_task is None or self._latest_broadcast_task.done():
+            self._latest_broadcast_task = asyncio.create_task(self._flush_latest_broadcasts())
+
+    async def _flush_latest_broadcasts(self):
+        while self._pending_latest_messages:
+            pending_messages = list(self._pending_latest_messages.values())
+            self._pending_latest_messages.clear()
+            await asyncio.gather(*(self.broadcast(message) for message in pending_messages))
+
+        self._latest_broadcast_task = None
     
     async def broadcast_telemetry(self, message: dict):
         """

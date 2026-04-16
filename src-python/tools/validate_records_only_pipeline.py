@@ -29,6 +29,10 @@ def _assert(condition, message):
         raise AssertionError(message)
 
 
+def _index_map(header):
+    return {name: idx for idx, name in enumerate(header)}
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix='apollo-records-only-') as temp_dir:
         recorder = RawDataRecorder(
@@ -41,6 +45,7 @@ def main():
             },
         )
         recorder.start_recording()
+        recorder.append_backend_communication_log('apollo.communication', 'INFO', 'local validation communication log ready')
 
         recorder.record_decoded_packet({
             'type': 'fcs_pwms',
@@ -71,6 +76,7 @@ def main():
             'func_code': 0x4B,
             'port_type': 'RECEIVE_EXTY',
             'timestamp': 1711814400015,
+            'skip_recording': True,
             'data': {
                 'YaccLMT': 1.2,
                 'XaccLMT': 2.3,
@@ -152,6 +158,8 @@ def main():
         lidar_file = records_dir / 'lidar' / 'radar_data.csv'
         bus_file = records_dir / 'bus' / 'bus_traffic.csv'
         camera_dir = records_dir / 'camera'
+        communication_dir = records_dir / 'communication'
+        communication_log_file = communication_dir / 'backend_communication.log'
         function_dir = records_dir / 'function_packets'
         session_meta_file = session_dir / 'session_meta.json'
         quality_report_file = session_dir / 'data_quality_report.json'
@@ -161,15 +169,20 @@ def main():
             planning_file,
             lidar_file,
             bus_file,
+            communication_log_file,
             session_meta_file,
             quality_report_file,
         ]:
             _assert(path.exists(), f'missing expected output: {path}')
 
         _assert(camera_dir.exists() and camera_dir.is_dir(), 'camera directory must exist')
+        _assert(communication_dir.exists() and communication_dir.is_dir(), 'communication directory must exist')
         _assert((session_dir / 'analysis').exists() is False, 'analysis directory should not exist')
         _assert((session_dir / 'runtime').exists() is False, 'runtime directory should not exist')
         _assert((session_dir / 'raw').exists() is False, 'raw directory should not exist')
+
+        communication_log = communication_log_file.read_text(encoding='utf-8')
+        _assert('local validation communication log ready' in communication_log, 'communication log content mismatch')
 
         _assert(_read_header(planning_file) == PLANNING_TELEMETRY_HEADERS, 'planning header mismatch')
         _assert(_read_header(lidar_file) == LIDAR_TELEMETRY_HEADERS, 'lidar header mismatch')
@@ -178,17 +191,27 @@ def main():
         fcs_header = _read_header(fcs_file)
         expected_fcs_header = _get_fcs_onboard_headers()
         _assert(fcs_header == expected_fcs_header, 'fcs header mismatch')
+        fcs_index = _index_map(fcs_header)
 
-        _assert(len(_read_rows(fcs_file)) == 2, 'expected two fcs telemetry rows')
+        fcs_rows = _read_rows(fcs_file)
+        _assert(len(fcs_rows) == 1, 'expected one fcs telemetry row')
         _assert(len(_read_rows(planning_file)) == 1, 'expected one planning row')
         planning_rows = _read_rows(planning_file)
         lidar_rows = _read_rows(lidar_file)
         _assert(len(planning_rows) == 1, 'expected one planning row')
         _assert(len(lidar_rows) == 2, 'expected two lidar rows')
-        _assert(len(_read_rows(bus_file)) == 6, 'expected six bus rows')
+        _assert(len(_read_rows(bus_file)) == 5, 'expected five bus rows')
 
         function_files = sorted(function_dir.glob('*.csv'))
-        _assert(len(function_files) == 6, 'expected six function packet files')
+        _assert(len(function_files) == 5, 'expected five function packet files')
+        _assert(all('0x4B' not in path.name for path in function_files), '0x4B function packet file should not be recorded')
+
+        fcs_row = fcs_rows[0]
+        _assert(fcs_row[fcs_index['ParamAil_F_KaPHI']] == '0.8000', 'ParamAil_F_KaPHI missing from fcs row')
+        _assert(fcs_row[fcs_index['ParamAil_YaccLMT']] == '1.2000', 'ParamAil_YaccLMT missing from fcs row')
+        _assert(fcs_row[fcs_index['ParamEle_XaccLMT']] == '2.3000', 'ParamEle_XaccLMT missing from fcs row')
+        _assert(fcs_row[fcs_index['ParamGuide_Hground']] == '10.0000', 'ParamGuide_Hground missing from fcs row')
+        _assert(fcs_row[fcs_index['ParamGuide_AutoTakeoffHcmd']] == '35.0000', 'ParamGuide_AutoTakeoffHcmd missing from fcs row')
 
         planning_row = planning_rows[0]
         _assert(planning_row[3:7] == ['100.0', '20.0', '50.0', '12.5'], 'planning fixed fields mismatch')
@@ -213,6 +236,7 @@ def main():
                 'records/lidar/radar_data.csv',
                 'records/bus/bus_traffic.csv',
                 'records/function_packets/*.csv',
+                'records/communication/backend_communication.log',
                 'records/camera/',
             ],
         }, ensure_ascii=False, indent=2))
