@@ -173,106 +173,10 @@
         </div>
       </div>
 
-      <!-- 系统参数配置 -->
-      <div class="params-group">
-        <div class="section-header">
-          <h4 class="section-title" @click="toggleSection('system')">
-            <span class="section-icon" :class="{ expanded: expandedSections.system }">▼</span>
-            系统参数配置
-          </h4>
-          <button class="icon-btn refresh" @click="readSystemConfig" title="读取配置">↻</button>
-        </div>
-        
-        <div v-show="expandedSections.system" class="params-content">
-          <div class="config-grid">
-            <div class="config-row">
-              <label>最大速度 (m/s)</label>
-              <input v-model.number="systemConfig.max_speed" type="number" class="config-input" step="0.1" placeholder="15.0" />
-            </div>
-            <div class="config-row">
-              <label>最大高度 (m)</label>
-              <input v-model.number="systemConfig.max_altitude" type="number" class="config-input" step="0.1" placeholder="120.0" />
-            </div>
-            <div class="config-row">
-              <label>起飞准备时间 (s)</label>
-              <input v-model.number="systemConfig.takeoff_prep_time" type="number" class="config-input" step="0.1" placeholder="5.0" />
-            </div>
-            <div class="config-row">
-              <label>着陆下降速度 (m/s)</label>
-              <input v-model.number="systemConfig.land_speed" type="number" class="config-input" step="0.1" placeholder="1.0" />
-            </div>
-            <div class="config-row switch-row">
-              <label>运动补偿</label>
-              <label class="toggle-switch">
-                <input type="checkbox" v-model="systemConfig.motion_compensation" />
-                <span class="slider"></span>
-              </label>
-            </div>
-            <div class="config-row switch-row">
-              <label>航点自动平滑</label>
-              <label class="toggle-switch">
-                <input type="checkbox" v-model="systemConfig.waypoint_smoothing" />
-                <span class="slider"></span>
-              </label>
-            </div>
-          </div>
-          <div class="section-actions">
-            <button class="action-btn apply" @click="writeSystemConfig">应用系统配置</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- 滤波器参数配置 -->
-      <div class="params-group">
-        <div class="section-header">
-          <h4 class="section-title" @click="toggleSection('filter')">
-            <span class="section-icon" :class="{ expanded: expandedSections.filter }">▼</span>
-            障碍过滤配置
-          </h4>
-          <button class="icon-btn refresh" @click="readFilterConfig" title="读取配置">↻</button>
-        </div>
-        
-        <div v-show="expandedSections.filter" class="params-content">
-          <div class="config-grid">
-            <div class="config-header">体素滤波</div>
-            <div class="config-row">
-              <label>体素大小 (m)</label>
-              <input v-model.number="filterConfig.voxel_size" type="number" class="config-input" step="0.01" placeholder="0.1" />
-            </div>
-            <div class="config-row">
-              <label>最小点数</label>
-              <input v-model.number="filterConfig.min_points" type="number" class="config-input" placeholder="5" />
-            </div>
-            
-            <div class="config-header sor-header">SOR异常值过滤</div>
-            <div class="config-row">
-              <label>平均距离均值 (m)</label>
-              <input v-model.number="filterConfig.sor_mean" type="number" class="config-input" step="0.01" placeholder="0.1" />
-            </div>
-            <div class="config-row">
-              <label>标准差倍数</label>
-              <input v-model.number="filterConfig.sor_std" type="number" class="config-input" step="0.1" placeholder="1.5" />
-            </div>
-            
-            <div class="config-header">聚类参数</div>
-            <div class="config-row">
-              <label>聚类半径 (m)</label>
-              <input v-model.number="filterConfig.cluster_radius" type="number" class="config-input" step="0.01" placeholder="0.3" />
-            </div>
-            <div class="config-row">
-              <label>最小聚类点数</label>
-              <input v-model.number="filterConfig.min_cluster_size" type="number" class="config-input" placeholder="10" />
-            </div>
-          </div>
-          <div class="section-actions">
-            <button class="action-btn apply" @click="writeFilterConfig">应用滤波配置</button>
-          </div>
-        </div>
-        </div>
-      </div>
       </div>
     </div>
   </div>
+</div>
 </template>
 
 <script setup>
@@ -283,9 +187,7 @@ const droneStore = useDroneStore()
 const connected = computed(() => droneStore.connected)
 
 const expandedSections = ref({
-  pid: true,
-  system: true,
-  filter: false
+  pid: true
 })
 
 const toggleSection = (section) => {
@@ -339,26 +241,6 @@ const pid = ref({
   AutoTakeoffHcmd: 10.0 // 自动起飞高度指令
 })
 
-// 系统参数配置
-const systemConfig = ref({
-  max_speed: 15.0,
-  max_altitude: 120.0,
-  takeoff_prep_time: 5.0,
-  land_speed: 1.0,
-  motion_compensation: true,
-  waypoint_smoothing: true
-})
-
-// 滤波器配置
-const filterConfig = ref({
-  voxel_size: 0.1,
-  min_points: 5,
-  sor_mean: 0.1,
-  sor_std: 1.5,
-  cluster_radius: 0.3,
-  min_cluster_size: 10
-})
-
 // PID操作
 const readPids = () => {
   console.log('读取PID参数')
@@ -371,34 +253,8 @@ const writePids = () => {
   droneStore.addLog('PID参数已更新', 'info')
 }
 
-// 系统参数配置操作
-const readSystemConfig = () => {
-  console.log('读取系统参数配置')
-  droneStore.addLog('正在读取系统参数配置...', 'warning')
-}
-
-const writeSystemConfig = () => {
-  console.log('写入系统参数配置', systemConfig.value)
-  droneStore.sendCommand('set_system_config', systemConfig.value)
-  droneStore.addLog('系统参数配置已更新', 'info')
-}
-
-// 滤波器配置操作
-const readFilterConfig = () => {
-  console.log('读取滤波器配置')
-  droneStore.addLog('正在读取滤波器配置...', 'warning')
-}
-
-const writeFilterConfig = () => {
-  console.log('写入滤波器配置', filterConfig.value)
-  droneStore.sendCommand('set_filter_config', filterConfig.value)
-  droneStore.addLog('滤波器配置已更新', 'info')
-}
-
 onMounted(() => {
   readPids()
-  readSystemConfig()
-  readFilterConfig()
 })
 </script>
 
