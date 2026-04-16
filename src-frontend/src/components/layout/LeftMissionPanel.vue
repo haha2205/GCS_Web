@@ -344,21 +344,6 @@ const totalDistance = computed(() => {
   return dist
 })
 
-const uploadMission = () => {
-  if (waypoints.value.length === 0) {
-    droneStore.addLog('无法上传空的任务', 'error')
-    return
-  }
-  
-  const missionData = {
-    waypoints: waypoints.value,
-    totalDistance: totalDistance.value
-  }
-  
-  droneStore.sendCommand('upload_mission', missionData)
-  droneStore.addLog(`任务已上传: ${waypoints.value.length} 个航点`, 'info')
-}
-
 const downloadMission = () => {
   if (waypoints.value.length === 0) {
     droneStore.addLog('没有可导出的任务数据', 'error')
