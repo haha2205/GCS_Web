@@ -123,40 +123,11 @@
 </template>
 
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed } from 'vue'
 import { useDroneStore } from '@/store/drone'
 
 const droneStore = useDroneStore()
 const connected = computed(() => droneStore.connected)
-
-// API基础URL
-const API_BASE_URL = 'http://localhost:8000'
-
-/**
- * 发送POST请求到后端
- */
-async function sendPostRequest(endpoint, data) {
-  try {
-    const url = `${API_BASE_URL}${endpoint}`
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(data)
-    })
-    
-    if (!response.ok) {
-      const errorText = await response.text()
-      throw new Error(`API 请求失败: ${response.status} - ${errorText}`)
-    }
-    
-    return await response.json()
-  } catch (error) {
-    console.error('API请求错误:', error)
-    throw error
-  }
-}
 
 // 目标位置（ENU坐标系）
 const targetPos = ref({
@@ -171,21 +142,18 @@ const cruiseSpeed = ref(5.0)
 // 任务使能标志
 const enableMission = ref(false)
 
-// 当前指令序号（从飞控指令面板获取，具有保持功能）
-// 由于后端逻辑会在发送指令后重置为0，这里需要保持最后一个非零有效指令
-const currentCmdIdx = ref(0)
+const normalizeCmdIdx = (value) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0
+}
 
-// 监听store中的指令变化，保持最新的非零指令
-// import { watch } from 'vue' // Removed duplicate import
-watch(() => droneStore.gcsData.Tele_GCS_CmdIdx, (newVal) => {
-  if (newVal !== 0 && newVal !== undefined) {
-    currentCmdIdx.value = newVal
-  }
-}, { immediate: true })
+const selectedCmdIdx = computed(() => normalizeCmdIdx(droneStore.selectedCmdIdx))
+const telemetryCmdIdx = computed(() => normalizeCmdIdx(droneStore.lastTelemetryCmdIdx || droneStore.gcsData?.Tele_GCS_CmdIdx))
+const planningCmdIdx = computed(() => normalizeCmdIdx(droneStore.latchedPlanningCmdIdx || droneStore.selectedCmdIdx || droneStore.lastTelemetryCmdIdx || droneStore.gcsData?.Tele_GCS_CmdIdx))
 
 // 当前指令信息显示
 const currentCmdIdxInfo = computed(() => {
-  if (currentCmdIdx.value === 0) return '无指令'
+  if (planningCmdIdx.value === 0) return '无指令'
   
   // 指令名称映射
   const cmdMap = {
@@ -216,7 +184,14 @@ const currentCmdIdxInfo = computed(() => {
     25: '避障关'
   }
   
-  return `ID:${currentCmdIdx.value} ${cmdMap[currentCmdIdx.value] || '未知'}`
+  const planningLabel = `规划发送 ID:${planningCmdIdx.value} ${cmdMap[planningCmdIdx.value] || '未知'}`
+  const telemetryLabel = telemetryCmdIdx.value === 0
+    ? '飞控回传: 无'
+    : `飞控回传 ID:${telemetryCmdIdx.value} ${cmdMap[telemetryCmdIdx.value] || '未知'}`
+  const selectedLabel = selectedCmdIdx.value === 0
+    ? '前端选择: 无'
+    : `前端选择 ID:${selectedCmdIdx.value} ${cmdMap[selectedCmdIdx.value] || '未知'}`
+  return `${planningLabel} | ${selectedLabel} | ${telemetryLabel}`
 })
 
 // 序号计数器
@@ -241,18 +216,14 @@ const sendPlanningCommand = async () => {
       targetZ: targetPos.value.z,
       cruiseSpeed: cruiseSpeed.value,
       enable: enableMission.value ? 1 : 0,
-      cmdId: currentCmdIdx.value
+      cmdId: planningCmdIdx.value
     }
-    
-    // 使用后端 API 发送指令
-    const response = await sendPostRequest('/api/command', {
-      type: 'gcs_command',
-      params: planningData
-    })
+
+    const response = await droneStore.sendCommandREST('gcs_command', planningData)
     
     if (response && response.status === 'success') {
       droneStore.addLog(
-        `发送规划指令到规划模块: 目标(${targetPos.value.x}, ${targetPos.value.y}, ${targetPos.value.z}), 速度=${cruiseSpeed.value}m/s, CmdIdx=${currentCmdIdx.value}`,
+        `发送规划指令到规划模块: 目标(${targetPos.value.x}, ${targetPos.value.y}, ${targetPos.value.z}), 速度=${cruiseSpeed.value}m/s, CmdIdx=${planningCmdIdx.value}`,
         'info'
       )
       console.log('规划指令发送成功:', planningData)
@@ -272,13 +243,6 @@ const resetInputs = () => {
   enableMission.value = false
   droneStore.addLog('规划指令已重置', 'info')
 }
-
-// 监听飞控指令变化
-watch(() => currentCmdIdx.value, (newVal, oldVal) => {
-  if (newVal !== oldVal && newVal !== 0) {
-    droneStore.addLog(`收到飞控指令: CmdIdx=${newVal}`, 'info')
-  }
-})
 
 // 保留旧的航点相关变量以避免错误
 const waypoints = ref([])

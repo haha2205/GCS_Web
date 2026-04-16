@@ -1,5 +1,7 @@
 <template>
   <div class="monitor-tabs-panel">
+    <OnlineAnalysisSummaryCard class="online-summary-block" />
+
     <div class="monitor-content" :class="monitorContentClass">
       <section v-if="showControlPanel" class="monitor-column">
         <div class="column-header">
@@ -20,7 +22,7 @@
           </div>
 
           <div class="monitor-section gcs-section">
-            <div class="section-subtitle">GCS回传</div>
+            <div class="section-subtitle">GCS回传（飞控DATAGCS遥测）</div>
             <div class="gcs-grid">
               <div class="metric-card compact-card" v-for="item in gcsCards" :key="item.label">
                 <div class="metric-label">{{ item.label }}</div>
@@ -74,23 +76,6 @@
         </div>
       </section>
     </div>
-
-    <section class="trend-band">
-      <div class="trend-card">
-        <EChartWrapper key="path-deviation-trend-chart" title="轨迹偏差趋势" unit="m" :series="pathDeviationSeries" :showLegend="true" :height="180" :optionOverrides="defaultTimeChartOverrides" />
-      </div>
-      <div class="trend-card">
-        <EChartWrapper
-          key="trajectory-track-chart"
-          title="航迹跟踪"
-          unit="m"
-          :series="trajectorySeries"
-          :showLegend="true"
-          :height="180"
-          :optionOverrides="trajectoryChartOverrides"
-        />
-      </div>
-    </section>
   </div>
 </template>
 
@@ -98,6 +83,7 @@
 import { computed } from 'vue'
 import { useDroneStore } from '@/store/drone'
 import EChartWrapper from '@/components/monitor/EChartWrapper.vue'
+import OnlineAnalysisSummaryCard from './OnlineAnalysisSummaryCard.vue'
 
 const props = defineProps({
   showControlPanel: {
@@ -119,7 +105,6 @@ const monitorContentClass = computed(() => ({
 }))
 
 const trimTimedSeries = (entries = [], limit = 120) => (entries || []).slice(-limit).map((item) => [item.timestamp, item.value])
-const trimTrack = (entries = [], limit = 180) => (entries || []).slice(-limit)
 
 const padTime = (value) => String(value).padStart(2, '0')
 const formatTimeTick = (value) => {
@@ -188,10 +173,6 @@ const statesTheta = computed(() => droneStore.realtimeViews?.flightState?.theta 
 const statesPsi = computed(() => droneStore.realtimeViews?.flightState?.psi ?? droneStore.attitude?.yaw ?? 0)
 const hasFlightTelemetry = computed(() => !!droneStore.telemetryTimestamps?.flightState)
 const hasGcsTelemetry = computed(() => !!droneStore.telemetryTimestamps?.gcsData)
-const alignedTargetPath = computed(() => {
-  const source = droneStore.localTraj.length ? droneStore.localTraj : droneStore.globalPath
-  return (source || []).map((point) => droneStore._alignPlanningPoint(point))
-})
 
 const gcsCards = computed(() => {
   const gcs = droneStore.gcsData || {}
@@ -283,57 +264,6 @@ const escPowerSeries = computed(() =>
   }))
 )
 
-const pathDeviationSeries = computed(() => [
-  { name: 'Error X', data: trimTimedSeries(droneStore.metricTrends.pathErrorX, 160), lineStyle: { color: '#2563eb' }, itemStyle: { color: '#2563eb' } },
-  { name: 'Error Y', data: trimTimedSeries(droneStore.metricTrends.pathErrorY, 160), lineStyle: { color: '#22c55e' }, itemStyle: { color: '#22c55e' } },
-  { name: 'Error Z', data: trimTimedSeries(droneStore.metricTrends.pathErrorZ, 160), lineStyle: { color: '#ef4444' }, itemStyle: { color: '#ef4444' } },
-  { name: 'Total', data: trimTimedSeries(droneStore.metricTrends.pathDeviationM, 160), lineStyle: { color: '#111827' }, itemStyle: { color: '#111827' } }
-])
-
-const trajectorySeries = computed(() => {
-  const actualPath = trimTrack(droneStore.trajectory, 220).map((point) => [point.x, point.y])
-  const targetPath = trimTrack(alignedTargetPath.value, 220).map((point) => [point.x, point.y])
-
-  return [
-    {
-      name: '实际航迹',
-      data: actualPath,
-      lineStyle: { color: '#2563eb', width: 2.5 },
-      itemStyle: { color: '#2563eb' },
-      symbol: 'none'
-    },
-    {
-      name: '目标航迹',
-      data: targetPath,
-      lineStyle: { color: '#94a3b8', type: 'dashed', width: 2 },
-      itemStyle: { color: '#94a3b8' },
-      symbol: 'none'
-    }
-  ]
-})
-
-const trajectoryChartOverrides = computed(() => ({
-  xAxis: {
-    type: 'value',
-    name: 'X (m)',
-    nameLocation: 'middle',
-    nameGap: 24,
-    axisLine: { lineStyle: { color: '#94a3b8' } },
-    axisLabel: { color: '#475569' },
-    splitLine: { lineStyle: { color: '#dbe4ef', type: 'dashed' } }
-  },
-  yAxis: {
-    type: 'value',
-    name: 'Y (m)',
-    nameLocation: 'middle',
-    nameGap: 32,
-    axisLine: { lineStyle: { color: '#94a3b8' } },
-    axisLabel: { color: '#475569' },
-    splitLine: { lineStyle: { color: '#dbe4ef', type: 'dashed' } }
-  },
-  tooltip: { trigger: 'item' }
-}))
-
 </script>
 
 <style scoped>
@@ -346,6 +276,10 @@ const trajectoryChartOverrides = computed(() => ({
   color: var(--text-primary);
   scrollbar-width: thin;
   scrollbar-color: rgba(37, 99, 235, 0.38) rgba(219, 228, 239, 0.7);
+}
+
+.online-summary-block {
+  margin: 12px 12px 0;
 }
 
 .monitor-tabs-panel::-webkit-scrollbar {
@@ -497,25 +431,8 @@ const trajectoryChartOverrides = computed(() => ({
   grid-column: span 2;
 }
 
-.trend-band {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  padding: 0 12px 12px;
-}
-
-.trend-card {
-  min-height: 0;
-  background: rgba(255, 255, 255, 0.98);
-  border: 1px solid var(--border-color);
-  border-radius: 14px;
-  box-shadow: var(--shadow-sm);
-  overflow: hidden;
-}
-
 .pwm-shell :deep(.chart-header),
-.chart-cell :deep(.chart-header),
-.trend-card :deep(.chart-header) {
+.chart-cell :deep(.chart-header) {
   padding: 10px 12px 6px;
 }
 

@@ -109,6 +109,63 @@ function buildMetricTrends() {
   }
 }
 
+function buildDefaultRecommendedArchitecture() {
+  return {
+    title: '最优架构方案',
+    preset: 'native',
+    paradigm: '联合式',
+    description: '当前按论文最优预设展示模块到硬件节点的推荐部署，实时评测结果到达后可继续覆盖更新。',
+    groupedAllocation: [
+      {
+        hardware: 'SoC_NPU',
+        hardware_label: 'SoC NPU',
+        modules: [
+          { function: 'LF_Perception_Radar', function_label: '雷达感知' }
+        ]
+      },
+      {
+        hardware: 'SoC_ISP',
+        hardware_label: 'SoC ISP',
+        modules: [
+          { function: 'LF_Perception_Camera', function_label: '相机感知' }
+        ]
+      },
+      {
+        hardware: 'SoC_CPU',
+        hardware_label: 'SoC CPU',
+        modules: [
+          { function: 'LF_Path_Planning', function_label: '路径规划' },
+          { function: 'LF_Comm_Telemery', function_label: '遥测通信' },
+          { function: 'LF_Comm_MCU', function_label: 'MCU 通信' }
+        ]
+      },
+      {
+        hardware: 'MCU_GP4',
+        hardware_label: 'MCU GP4',
+        modules: [
+          { function: 'LF_RC_Parser', function_label: '遥控解析' },
+          { function: 'LF_INS_Parser', function_label: '惯导解析' }
+        ]
+      },
+      {
+        hardware: 'MCU_GP2',
+        hardware_label: 'MCU GP2',
+        modules: [
+          { function: 'LF_Flight_Control', function_label: '飞控核心' },
+          { function: 'LF_SoC_Adapter', function_label: 'SoC 适配' }
+        ]
+      },
+      {
+        hardware: 'MCU_GP3',
+        hardware_label: 'MCU GP3',
+        modules: [
+          { function: 'LF_Motor_Driver', function_label: '电机驱动' }
+        ]
+      }
+    ]
+  }
+}
+
 export const useDroneStore = defineStore('drone', {
   state: () => ({
     connected: false,
@@ -246,6 +303,7 @@ export const useDroneStore = defineStore('drone', {
 
     selectedCmdIdx: 0,
     lastTelemetryCmdIdx: 0,
+    latchedPlanningCmdIdx: 0,
 
     telemetryTimestamps: {
       flightState: null,
@@ -292,6 +350,8 @@ export const useDroneStore = defineStore('drone', {
 
     trajectory: [],
     globalPath: [],
+    globalPathLine: [],
+    globalPathSignature: '',
     localTraj: [],
     obstacles: [],
     logs: [],
@@ -337,6 +397,32 @@ export const useDroneStore = defineStore('drone', {
       functionStats: []
     },
 
+    onlineAnalysis: {
+      enabled: false,
+      baseUrl: '',
+      timeoutMs: 0,
+      lastUpdated: null,
+      sessionId: '',
+      ready: false,
+      strictMeasuredReady: false,
+      evidenceMode: 'waiting',
+      compositeScore: null,
+      domainScores: {
+        perception: null,
+        decision: null,
+        control: null,
+        communication: null,
+        safety: null
+      },
+      availableChannels: [],
+      missingRequiredChannels: [],
+      missingMeasuredEnhancementChannels: [],
+      recommendedArchitecture: buildDefaultRecommendedArchitecture(),
+      history: {
+        composite: buildTimedSeries()
+      }
+    },
+
     systemMode: 'REALTIME',
 
     config: {
@@ -378,6 +464,9 @@ export const useDroneStore = defineStore('drone', {
       if (state.systemStatus.linkQuality > 30) return '一般'
       return '差'
     },
+    selectedCommandIdx: (state) => state.selectedCmdIdx || 0,
+    telemetryCommandIdx: (state) => state.lastTelemetryCmdIdx || state.gcsData.Tele_GCS_CmdIdx || 0,
+    planningCommandIdx: (state) => state.latchedPlanningCmdIdx || state.selectedCmdIdx || state.lastTelemetryCmdIdx || state.gcsData.Tele_GCS_CmdIdx || 0,
     activeCommandIdx: (state) => state.selectedCmdIdx || state.lastTelemetryCmdIdx || state.gcsData.Tele_GCS_CmdIdx || 0,
     displaySystemLogs: (state) => state.systemLogs
   },
@@ -426,6 +515,9 @@ export const useDroneStore = defineStore('drone', {
       const normalizedCmdId = Math.max(0, parseInt(cmdId, 10) || 0)
       if (source === 'telemetry') {
         this.lastTelemetryCmdIdx = normalizedCmdId
+        if (!this.latchedPlanningCmdIdx && normalizedCmdId > 0) {
+          this.latchedPlanningCmdIdx = normalizedCmdId
+        }
         if (!this.selectedCmdIdx && normalizedCmdId > 0) {
           this.selectedCmdIdx = normalizedCmdId
         }
@@ -433,6 +525,9 @@ export const useDroneStore = defineStore('drone', {
       }
 
       this.selectedCmdIdx = normalizedCmdId
+      if (normalizedCmdId > 0) {
+        this.latchedPlanningCmdIdx = normalizedCmdId
+      }
     },
 
     _pushHistoryPoint(targetKey, value, timestamp = Date.now(), maxPoints = 500) {
@@ -467,6 +562,18 @@ export const useDroneStore = defineStore('drone', {
       }
     },
 
+    _pushOnlineAnalysisHistory(value, timestamp = Date.now(), maxPoints = 180) {
+      const numericValue = Number(value)
+      if (!Number.isFinite(numericValue)) {
+        return
+      }
+
+      this.onlineAnalysis.history.composite.push({ value: numericValue, timestamp })
+      if (this.onlineAnalysis.history.composite.length > maxPoints) {
+        this.onlineAnalysis.history.composite = this.onlineAnalysis.history.composite.slice(-maxPoints)
+      }
+    },
+
     _extractPathPoint(point = {}) {
       return {
         x: this._safeNumber(point.x ?? point.pos_x ?? point.current_pos_x ?? point[0]),
@@ -483,6 +590,69 @@ export const useDroneStore = defineStore('drone', {
       return path
         .map((point) => this._extractPathPoint(point))
         .filter((point) => Number.isFinite(point.x) && Number.isFinite(point.y) && Number.isFinite(point.z))
+    },
+
+    _buildPathSignature(path = []) {
+      if (!Array.isArray(path) || !path.length) {
+        return ''
+      }
+
+      return path
+        .map((point) => {
+          const normalized = this._extractPathPoint(point)
+          return [normalized.x, normalized.y, normalized.z]
+            .map((value) => this._safeNumber(value).toFixed(3))
+            .join(',')
+        })
+        .join('|')
+    },
+
+    _captureGlobalPathLine(path = [], timestamp = Date.now()) {
+      const normalizedPath = this._normalizePlanningPathPoints(path)
+      if (!normalizedPath.length) {
+        this.globalPathLine = []
+        this.globalPathSignature = ''
+        return
+      }
+
+      const signature = this._buildPathSignature(normalizedPath)
+      if (signature === this.globalPathSignature && this.globalPathLine.length >= 2) {
+        return
+      }
+
+      const actualPose = this.actualPose?.source === 'fcs_states'
+        ? {
+            x: this._safeNumber(this.actualPose.x),
+            y: this._safeNumber(this.actualPose.y),
+            z: this._safeNumber(this.actualPose.z)
+          }
+        : null
+
+      const latestFlightPose = this._buildActualFlightPose(timestamp)
+      const actualReference = actualPose || (latestFlightPose?.source === 'fcs_states'
+        ? { x: latestFlightPose.x, y: latestFlightPose.y, z: latestFlightPose.z }
+        : null)
+
+      if (!actualReference) {
+        this.globalPathLine = []
+        return
+      }
+
+      const planningReference = this._getPlanningReferencePoint()
+      const targetPlanningPoint = normalizedPath[0]
+      const targetPoint = planningReference
+        ? {
+            x: targetPlanningPoint.x + (actualReference.x - planningReference.x),
+            y: targetPlanningPoint.y + (actualReference.y - planningReference.y),
+            z: targetPlanningPoint.z + (actualReference.z - planningReference.z)
+          }
+        : { ...targetPlanningPoint }
+
+      this.globalPathLine = [
+        { ...actualReference },
+        targetPoint
+      ]
+      this.globalPathSignature = signature
     },
 
     _normalizePlanningObstacles(obstacles = []) {
@@ -808,6 +978,12 @@ export const useDroneStore = defineStore('drone', {
         }
 
         switch (data.type) {
+          case 'online_analysis_config':
+            this.updateOnlineAnalysisConfig(data.data || {})
+            break
+          case 'online_analysis_status':
+            this.updateOnlineAnalysisStatus(data)
+            break
           case 'recording_status':
             this.applyRecordingStatus(data)
             break
@@ -849,6 +1025,48 @@ export const useDroneStore = defineStore('drone', {
         }
       } catch (error) {
         console.error('处理消息失败:', error)
+      }
+    },
+
+    updateOnlineAnalysisConfig(payload = {}) {
+      this.onlineAnalysis.enabled = !!payload.enabled
+      this.onlineAnalysis.baseUrl = payload.base_url || ''
+      this.onlineAnalysis.timeoutMs = Number(payload.timeout_ms || 0)
+    },
+
+    updateOnlineAnalysisStatus(payload = {}) {
+      const timestamp = Number(payload.timestamp || Date.now())
+      const scores = payload.scores || {}
+      const domainScores = scores.domain_scores || {}
+      const dependencyAudit = payload.dependency_audit || {}
+      const recommendedArchitecture = payload.recommended_architecture || {}
+
+      this.onlineAnalysis.lastUpdated = timestamp
+      this.onlineAnalysis.sessionId = payload.session_id || ''
+      this.onlineAnalysis.ready = !!payload.ready_for_live_scoring
+      this.onlineAnalysis.strictMeasuredReady = !!payload.strict_measured_ready
+      this.onlineAnalysis.evidenceMode = scores.evidence_mode || 'waiting'
+      this.onlineAnalysis.compositeScore = Number.isFinite(Number(scores.composite_score)) ? Number(scores.composite_score) : null
+      this.onlineAnalysis.domainScores = {
+        perception: Number.isFinite(Number(domainScores.perception)) ? Number(domainScores.perception) : null,
+        decision: Number.isFinite(Number(domainScores.decision)) ? Number(domainScores.decision) : null,
+        control: Number.isFinite(Number(domainScores.control)) ? Number(domainScores.control) : null,
+        communication: Number.isFinite(Number(domainScores.communication)) ? Number(domainScores.communication) : null,
+        safety: Number.isFinite(Number(domainScores.safety)) ? Number(domainScores.safety) : null
+      }
+      this.onlineAnalysis.availableChannels = dependencyAudit.available_channels || []
+      this.onlineAnalysis.missingRequiredChannels = dependencyAudit.missing_required_channels || []
+      this.onlineAnalysis.missingMeasuredEnhancementChannels = dependencyAudit.missing_measured_enhancement_channels || []
+      this.onlineAnalysis.recommendedArchitecture = {
+        title: recommendedArchitecture.title || '',
+        preset: recommendedArchitecture.preset || '',
+        paradigm: recommendedArchitecture.paradigm || '',
+        description: recommendedArchitecture.description || '',
+        groupedAllocation: recommendedArchitecture.grouped_allocation || []
+      }
+
+      if (this.onlineAnalysis.compositeScore !== null) {
+        this._pushOnlineAnalysisHistory(this.onlineAnalysis.compositeScore, timestamp)
       }
     },
 
@@ -1140,6 +1358,7 @@ export const useDroneStore = defineStore('drone', {
 
       if (globalPath) {
         this.globalPath = globalPath
+        this._captureGlobalPathLine(globalPath, timestamp)
       }
       if (localTraj) {
         this.localTraj = localTraj
@@ -1348,6 +1567,21 @@ export const useDroneStore = defineStore('drone', {
 
     async sendCommandREST(type, payload) {
       try {
+        if (type === 'cmd_idx' && payload?.cmdId !== undefined) {
+          this.setSelectedCommandIdx(payload.cmdId, 'ui')
+        }
+
+        if (type === 'gcs_command') {
+          const requestedCmdId = Math.max(0, parseInt(payload?.cmdId, 10) || 0)
+          const latchedCmdId = Math.max(0, parseInt(this.latchedPlanningCmdIdx, 10) || 0)
+          if (requestedCmdId <= 0 && latchedCmdId > 0) {
+            payload = {
+              ...payload,
+              cmdId: latchedCmdId
+            }
+          }
+        }
+
         const response = await fetch(buildApiUrl('/api/command'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1446,6 +1680,8 @@ export const useDroneStore = defineStore('drone', {
 
     clearTrajectory() {
       this.trajectory = []
+      this.globalPathLine = []
+      this.globalPathSignature = ''
       this.actualPose = {
         x: 0,
         y: 0,

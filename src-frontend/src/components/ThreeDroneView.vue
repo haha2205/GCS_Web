@@ -1,5 +1,31 @@
 <template>
-  <div class="three-drone-view" ref="container"></div>
+  <div class="three-drone-view" ref="container">
+    <div class="scene-legend">
+      <div class="scene-legend__title">3D 图例</div>
+      <div class="scene-legend__item">
+        <span class="scene-legend__swatch scene-legend__swatch--actual"></span>
+        <span>红色轨迹：实际飞行轨迹</span>
+      </div>
+      <div class="scene-legend__item">
+        <span class="scene-legend__swatch scene-legend__swatch--local"></span>
+        <span>绿色轨迹：当前局部规划轨迹</span>
+      </div>
+      <div class="scene-legend__item">
+        <span class="scene-legend__swatch scene-legend__swatch--global"></span>
+        <span>蓝色轨迹：飞控当前位置到全局目标点</span>
+      </div>
+      <div class="scene-legend__item">
+        <span class="scene-legend__swatch scene-legend__swatch--target"></span>
+        <span>琥珀标记：目标位置 / 轨迹终点</span>
+      </div>
+      <div class="scene-legend__item">
+        <span class="scene-legend__swatch scene-legend__swatch--obstacle"></span>
+        <span>粉色框体：障碍物</span>
+      </div>
+      <div class="scene-legend__meta">{{ globalPathStatusText }}</div>
+      <div class="scene-legend__meta">{{ localTrajStatusText }}</div>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -24,8 +50,8 @@ let localTrajMesh = null    // 局部轨迹 Mesh (Tube)
 let globalPathMarker = null
 let localTrajMarker = null
 let globalPathStartMarker = null
-let globalPathGoalMarker = null
 let localTrajEndMarker = null
+let targetMarker = null
 let globalPathMaterial = null
 let localTrajMaterial = null
 let obstacleMeshes = []
@@ -91,6 +117,47 @@ const toThreeVector = (point = {}) => {
 
 const alignedGlobalPath = computed(() => (droneStore.globalPath || []).map((point) => droneStore._alignPlanningPoint(point)))
 const alignedLocalTraj = computed(() => (droneStore.localTraj || []).map((point) => droneStore._alignPlanningPoint(point)))
+const frozenGlobalPath = computed(() => Array.isArray(droneStore.globalPathLine) ? droneStore.globalPathLine : [])
+const globalTargetPoint = computed(() => {
+  if (frozenGlobalPath.value.length) {
+    return normalizePoint(frozenGlobalPath.value[frozenGlobalPath.value.length - 1])
+  }
+
+  const firstRenderablePoint = alignedGlobalPath.value.find((point) => hasMeaningfulPoint(point))
+  return firstRenderablePoint ? normalizePoint(firstRenderablePoint) : null
+})
+const hasRenderableGlobalPath = computed(() => frozenGlobalPath.value.length >= 2)
+const hasRenderableLocalTraj = computed(() => alignedLocalTraj.value.length >= 2)
+const globalPathStatusText = computed(() => {
+  const renderedCount = alignedGlobalPath.value.length
+  const telemetryCount = Number(droneStore.planningTelemetry?.globalPathCount || 0)
+
+  if (hasRenderableGlobalPath.value) {
+    return '全局轨迹已冻结：起点为接收全局点时的飞控位置，终点为规划全局点'
+  }
+
+  if (globalTargetPoint.value) {
+    return '已收到全局点，等待有效飞控位置后冻结蓝线'
+  }
+
+  if (telemetryCount > 0 || renderedCount > 0) {
+    return `全局轨迹计数=${telemetryCount || renderedCount}，当前按单个全局目标点解释`
+  }
+
+  return '当前规划遥测未提供可绘制的全局目标点'
+})
+const localTrajStatusText = computed(() => {
+  const renderedCount = alignedLocalTraj.value.length
+  if (renderedCount >= 2) {
+    return `局部轨迹按最新规划窗口显示：${renderedCount} 个点，跨帧暂不自动拼接`
+  }
+
+  if (renderedCount === 1) {
+    return '局部轨迹仅收到 1 个点，当前不足以形成连续曲线'
+  }
+
+  return '局部轨迹未接入，当前无法形成连续轨迹'
+})
 
 const scenePose = computed(() => {
   const actualPose = droneStore.actualPose || {}
@@ -469,22 +536,21 @@ const createGroundShadow = () => {
 
 // 创建历史轨迹（简单的暗红色细线）
 const createHistoryTrail = () => {
-  const positions = new Float32Array(maxHistoryPoints * 3)
-  const colors = new Float32Array(maxHistoryPoints * 3)
-  
   const histGeometry = new THREE.BufferGeometry()
-  histGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-  histGeometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-  
-  const histMaterial = new THREE.LineBasicMaterial({
-    vertexColors: true,
-    linewidth: 1,
+  const histMaterial = new THREE.MeshPhongMaterial({
+    color: 0xff5a4f,
+    emissive: 0x6b1711,
+    emissiveIntensity: 0.35,
     transparent: true,
-    opacity: 0.6
+    opacity: 0.92,
+    side: THREE.DoubleSide,
+    depthWrite: false
   })
-  
-  trajectoryLine = new THREE.Line(histGeometry, histMaterial)
+
+  trajectoryLine = new THREE.Mesh(histGeometry, histMaterial)
   trajectoryLine.frustumCulled = false
+  trajectoryLine.renderOrder = 5
+  trajectoryLine.visible = false
   scene.add(trajectoryLine)
 
   updateHistoryTrail()
@@ -513,7 +579,7 @@ const createLocalTraj = () => {
 }
 
 const hydrateSceneFromStore = () => {
-  updateGlobalPath(alignedGlobalPath.value)
+  updateGlobalPath(frozenGlobalPath.value)
   updateLocalTraj(alignedLocalTraj.value)
   updateObstacleVisualization(activeObstacles.value)
   updateHistoryTrail()
@@ -637,7 +703,7 @@ const frameTelemetryScene = () => {
   }
 
   const points = []
-  buildPathVectors(alignedGlobalPath.value).forEach((point) => points.push(point))
+  buildPathVectors(frozenGlobalPath.value).forEach((point) => points.push(point))
   buildPathVectors(alignedLocalTraj.value).forEach((point) => points.push(point))
   alignedTrajectory.value.slice(-maxHistoryPoints).forEach((point) => points.push(toThreeVector(point)))
   activeObstacles.value.forEach((obstacle) => points.push(toThreeVector(obstacle)))
@@ -700,7 +766,6 @@ const clearGlobalPathMarker = () => {
 
 const clearGlobalPathAnchors = () => {
   globalPathStartMarker = clearSceneObject(globalPathStartMarker)
-  globalPathGoalMarker = clearSceneObject(globalPathGoalMarker)
 }
 
 const clearLocalTraj = () => {
@@ -715,6 +780,34 @@ const clearLocalTrajAnchors = () => {
   localTrajEndMarker = clearSceneObject(localTrajEndMarker)
 }
 
+const clearTargetMarker = () => {
+  targetMarker = clearSceneObject(targetMarker)
+}
+
+const updateTargetMarker = () => {
+  if (!scene) {
+    return
+  }
+
+  clearTargetMarker()
+
+  const sourcePath = globalTargetPoint.value
+    ? [globalTargetPoint.value]
+    : alignedLocalTraj.value
+
+  if (!Array.isArray(sourcePath) || sourcePath.length === 0) {
+    return
+  }
+
+  const vectors = buildPathVectors(sourcePath)
+  if (!vectors.length) {
+    return
+  }
+
+  targetMarker = createLabeledPathMarker(vectors[vectors.length - 1], 0xffb020, 0.48, 'TARGET', '#ffd166')
+  scene.add(targetMarker)
+}
+
 // 更新全局路径 (TubeGeometry)
 const updateGlobalPath = (pathPoints) => {
   if (!scene) return; 
@@ -722,6 +815,7 @@ const updateGlobalPath = (pathPoints) => {
     clearGlobalPath()
     clearGlobalPathMarker()
     clearGlobalPathAnchors()
+    updateTargetMarker()
     resetAutoFrameIfSceneEmpty()
     return
   }
@@ -737,6 +831,7 @@ const updateGlobalPath = (pathPoints) => {
         globalPathMarker.renderOrder = 8
         scene.add(globalPathMarker)
       }
+      updateTargetMarker()
       resetAutoFrameIfSceneEmpty()
       return;
   }
@@ -770,10 +865,7 @@ const updateGlobalPath = (pathPoints) => {
   globalPathMesh.renderOrder = 4
   scene.add(globalPathMesh)
 
-  globalPathStartMarker = createLabeledPathMarker(vectors[0], 0x35d07f, 0.55, 'START', '#7fffd4')
-  globalPathGoalMarker = createLabeledPathMarker(vectors[vectors.length - 1], 0xffb020, 0.68, 'GOAL', '#ffd166')
-  scene.add(globalPathStartMarker)
-  scene.add(globalPathGoalMarker)
+  updateTargetMarker()
   frameTelemetryScene()
 }
 
@@ -784,6 +876,7 @@ const updateLocalTraj = (trajPoints) => {
     clearLocalTraj()
     clearLocalTrajMarker()
     clearLocalTrajAnchors()
+    updateTargetMarker()
     resetAutoFrameIfSceneEmpty()
     return
   }
@@ -799,6 +892,7 @@ const updateLocalTraj = (trajPoints) => {
       localTrajMarker.renderOrder = 10
       scene.add(localTrajMarker)
     }
+    updateTargetMarker()
     resetAutoFrameIfSceneEmpty()
     return
   }
@@ -828,6 +922,7 @@ const updateLocalTraj = (trajPoints) => {
 
   localTrajEndMarker = createLabeledPathMarker(vectors[vectors.length - 1], 0x4caf50, 0.32, 'LOCAL', '#7CFC8D')
   scene.add(localTrajEndMarker)
+  updateTargetMarker()
   frameTelemetryScene()
 }
 
@@ -896,29 +991,22 @@ const updateObstacleVisualization = (obstacles) => {
 // 更新历史轨迹
 const updateHistoryTrail = () => {
   if (!trajectoryLine) return
-  
-  const positions = trajectoryLine.geometry.attributes.position.array
-  const colors = trajectoryLine.geometry.attributes.color.array
-  
-  for (let i = 0; i < historyPoints.length; i++) {
-    const point = historyPoints[i]
-    const idx = i * 3
-    
-    positions[idx] = point.x
-    positions[idx + 1] = point.y
-    positions[idx + 2] = point.z
-    
-    const alpha = 0.3 + (i / historyPoints.length) * 0.7
-    const color = new THREE.Color().setHSL(0.02, 0.8, 0.5)
-    
-    colors[idx] = color.r * alpha
-    colors[idx + 1] = color.g * alpha
-    colors[idx + 2] = color.b * alpha
+
+  if (historyPoints.length < 2) {
+    trajectoryLine.visible = false
+    const emptyGeometry = new THREE.BufferGeometry()
+    trajectoryLine.geometry.dispose()
+    trajectoryLine.geometry = emptyGeometry
+    return
   }
-  
-  trajectoryLine.geometry.setDrawRange(0, historyPoints.length)
-  trajectoryLine.geometry.attributes.position.needsUpdate = true
-  trajectoryLine.geometry.attributes.color.needsUpdate = true
+
+  const vectors = historyPoints.map((point) => new THREE.Vector3(point.x, point.y, point.z))
+  const curve = new THREE.CatmullRomCurve3(vectors)
+  const tubeGeometry = new THREE.TubeGeometry(curve, Math.max(12, vectors.length * 3), 0.12, 10, false)
+
+  trajectoryLine.geometry.dispose()
+  trajectoryLine.geometry = tubeGeometry
+  trajectoryLine.visible = true
 }
 
 
@@ -1050,7 +1138,7 @@ const onWindowResize = () => {
 }
 
 // 监听全局路径数据
-watch(alignedGlobalPath, (newPath) => {
+watch(frozenGlobalPath, (newPath) => {
   updateGlobalPath(newPath)
 }, { deep: true, immediate: true })
 
@@ -1141,16 +1229,16 @@ onBeforeUnmount(() => {
     disposeObject3D(globalPathStartMarker)
   }
 
-  if (globalPathGoalMarker) {
-    disposeObject3D(globalPathGoalMarker)
-  }
-
   if (localTrajMarker) {
     disposeObject3D(localTrajMarker)
   }
 
   if (localTrajEndMarker) {
     disposeObject3D(localTrajEndMarker)
+  }
+
+  if (targetMarker) {
+    disposeObject3D(targetMarker)
   }
   
   // 清理障碍物
@@ -1167,6 +1255,76 @@ onBeforeUnmount(() => {
   height: 100%;
   overflow: hidden;
   background: #050508;
+}
+
+.scene-legend {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  z-index: 40;
+  min-width: 240px;
+  max-width: 360px;
+  padding: 12px 14px;
+  border: 1px solid rgba(121, 140, 168, 0.22);
+  border-radius: 12px;
+  background: rgba(8, 12, 20, 0.76);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+}
+
+.scene-legend__title {
+  margin-bottom: 10px;
+  color: #eef4ff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.scene-legend__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: rgba(234, 241, 255, 0.92);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.scene-legend__swatch {
+  flex: 0 0 auto;
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18) inset;
+}
+
+.scene-legend__swatch--actual {
+  background: linear-gradient(135deg, #ff8b7a 0%, #ff554a 100%);
+}
+
+.scene-legend__swatch--local {
+  background: linear-gradient(135deg, #8df7a5 0%, #31b864 100%);
+}
+
+.scene-legend__swatch--global {
+  background: linear-gradient(135deg, #81c9ff 0%, #2f88fa 100%);
+}
+
+.scene-legend__swatch--target {
+  background: linear-gradient(135deg, #ffe08a 0%, #ffb020 100%);
+}
+
+.scene-legend__swatch--obstacle {
+  background: linear-gradient(135deg, #ffb3ef 0%, #ff4fd8 100%);
+}
+
+.scene-legend__meta {
+  margin-top: 6px;
+  color: rgba(183, 198, 223, 0.82);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 /* 信息开关 */
