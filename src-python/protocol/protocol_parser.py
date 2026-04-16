@@ -354,7 +354,7 @@ class UDPHandler:
 
         if not self._transports:
             logger.error(f"没有可用的UDP transport，无法发送数据到 {host}:{port}")
-            return
+            return False
         
         try:
             transport = self._transports.get(FIXED_COMMAND_SOURCE_PORT)
@@ -376,9 +376,11 @@ class UDPHandler:
                 hex_bytes = binascii.hexlify(data[:10]).decode('ascii')
                 hex_preview = ' '.join([hex_bytes[i:i+2] for i in range(0, len(hex_bytes), 2)])
                 logger.debug(f"发送数据预览: {hex_preview}")
+            return True
                 
         except Exception as e:
             logger.error(f"发送UDP数据失败: {e}")
+            return False
     
     def process_data(self, data: bytes, port_type: PortType = PortType.PORT_18504_RECEIVE):
         """处理接收到的数据
