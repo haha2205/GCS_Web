@@ -1262,7 +1262,7 @@ async def send_command_to_drone(request: CommandRequest) -> dict:
                 'timestamp': int(time.time() * 1000),
             }
 
-        if not packet or not udp_handler:
+        if not packet or not udp_handler or not udp_handler.is_running():
             return {
                 'type': 'command_response',
                 'command': command_type,
@@ -1289,7 +1289,14 @@ async def send_command_to_drone(request: CommandRequest) -> dict:
                 cmd_id = params.get('cmdId', 0)
                 if 1 <= cmd_id <= 25:
                     for repeat_index in range(CMD_IDX_REPEAT_COUNT):
-                        udp_handler.send_data(packet, target_host, target_port)
+                        if not udp_handler.send_data(packet, target_host, target_port):
+                            return {
+                                'type': 'command_response',
+                                'command': command_type,
+                                'status': 'error',
+                                'message': 'UDP发送失败，指令未发往机载端',
+                                'timestamp': int(time.time() * 1000),
+                            }
                         await _mark_command_sent(channel)
                         if repeat_index < CMD_IDX_REPEAT_COUNT - 1:
                             await asyncio.sleep(COMMAND_SEND_MIN_INTERVAL_SEC)
@@ -1302,7 +1309,14 @@ async def send_command_to_drone(request: CommandRequest) -> dict:
                             cmd_mission_val=0.0,
                         )
                         packet_zero = encode_command_packet(NCLINK_SEND_EXTU_FCS, payload_zero)
-                        udp_handler.send_data(packet_zero, target_host, target_port)
+                        if not udp_handler.send_data(packet_zero, target_host, target_port):
+                            return {
+                                'type': 'command_response',
+                                'command': command_type,
+                                'status': 'error',
+                                'message': 'UDP发送失败，归零指令未发往机载端',
+                                'timestamp': int(time.time() * 1000),
+                            }
                         await _mark_command_sent(channel)
                         response_message = (
                             f'指令{cmd_id}已按{int(COMMAND_SEND_MIN_INTERVAL_SEC * 1000)}ms间隔'
@@ -1314,12 +1328,26 @@ async def send_command_to_drone(request: CommandRequest) -> dict:
                             f'连续发送{CMD_IDX_REPEAT_COUNT}次'
                         )
                 else:
-                    udp_handler.send_data(packet, target_host, target_port)
+                    if not udp_handler.send_data(packet, target_host, target_port):
+                        return {
+                            'type': 'command_response',
+                            'command': command_type,
+                            'status': 'error',
+                            'message': 'UDP发送失败，指令未发往机载端',
+                            'timestamp': int(time.time() * 1000),
+                        }
                     await _mark_command_sent(channel)
                     response_message = f'指令{cmd_id}已发送'
             elif command_type == 'gcs_command':
                 for repeat_index in range(PLANNING_COMMAND_REPEAT_COUNT):
-                    udp_handler.send_data(packet, target_host, target_port)
+                    if not udp_handler.send_data(packet, target_host, target_port):
+                        return {
+                            'type': 'command_response',
+                            'command': command_type,
+                            'status': 'error',
+                            'message': 'UDP发送失败，规划指令未发往机载端',
+                            'timestamp': int(time.time() * 1000),
+                        }
                     await _mark_command_sent(channel)
                     if repeat_index < PLANNING_COMMAND_REPEAT_COUNT - 1:
                         await asyncio.sleep(PLANNING_COMMAND_REPEAT_INTERVAL_SEC)
@@ -1329,7 +1357,14 @@ async def send_command_to_drone(request: CommandRequest) -> dict:
                     f'连续发送{PLANNING_COMMAND_REPEAT_COUNT}次'
                 )
             else:
-                udp_handler.send_data(packet, target_host, target_port)
+                if not udp_handler.send_data(packet, target_host, target_port):
+                    return {
+                        'type': 'command_response',
+                        'command': command_type,
+                        'status': 'error',
+                        'message': 'UDP发送失败，指令未发往机载端',
+                        'timestamp': int(time.time() * 1000),
+                    }
                 await _mark_command_sent(channel)
 
             _append_session_communication_log(

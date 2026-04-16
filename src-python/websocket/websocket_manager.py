@@ -31,7 +31,7 @@ class WebSocketManager:
         self._latest_broadcast_task: Optional[asyncio.Task] = None
         self._broadcast_error_count = 0  # 连续广播错误计数
         self._max_consecutive_errors = 50  # 超过此阈值打印告警
-        self._send_timeout_seconds = 0.25
+        self._send_timeout_seconds = 1.0
     
     async def connect(self, websocket: WebSocket):
         """接受新的WebSocket连接"""
@@ -63,6 +63,8 @@ class WebSocketManager:
             if websocket.client_state == WebSocketState.CONNECTED:
                 payload = json.dumps(message, ensure_ascii=False, separators=(',', ':'))
                 await asyncio.wait_for(websocket.send_text(payload), timeout=self._send_timeout_seconds)
+        except asyncio.TimeoutError:
+            logger.warning('发送个人消息超时，保留连接等待后续消息恢复')
         except Exception as e:
             logger.debug(f"发送个人消息失败(客户端可能已刷新): {e}")
             self.disconnect(websocket)
@@ -124,6 +126,9 @@ class WebSocketManager:
 
             try:
                 await asyncio.wait_for(websocket.send_text(payload), timeout=self._send_timeout_seconds)
+                return None
+            except asyncio.TimeoutError:
+                logger.debug('广播写入超时，跳过本次消息但保留连接')
                 return None
             except Exception as e:
                 logger.debug(f"广播写入失败(客户端可能已刷新): {e}")
