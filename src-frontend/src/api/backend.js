@@ -239,7 +239,7 @@ export const logApi = {
 }
 
 /**
- * DSM录制 API
+ * 录制 API
  */
 export const recordingApi = {
   /**
@@ -264,12 +264,6 @@ export const recordingApi = {
     return await apiRequest('/api/recording/stop', {}, 'POST')
   },
   
-  /**
-   * 获取录制会话列表
-   */
-  getSessions: async () => {
-    return await apiRequest('/api/recording/sessions')
-  }
 }
 
 /**
@@ -355,7 +349,6 @@ export default {
 /**
  * 便捷导出函数
  */
-export const apiGetRecordingSessions = () => recordingApi.getSessions()
 export const apiStartRecording = (config) => recordingApi.startRecording(config)
 export const apiStopRecording = () => recordingApi.stopRecording()
 export const apiGetRecordingStatus = () => recordingApi.getStatus()

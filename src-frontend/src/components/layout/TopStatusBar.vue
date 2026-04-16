@@ -32,6 +32,10 @@
         <span class="status-label">WS:</span>
         <span :class="wsClass">{{ wsStatusText }}</span>
       </div>
+      <div class="status-item online-analysis-item" :class="onlineAnalysisClass">
+        <span class="status-label">评测:</span>
+        <span class="online-analysis-text">{{ onlineAnalysisSummary }}</span>
+      </div>
     </div>
 
     <div class="status-section time-section">
@@ -91,6 +95,17 @@ const wsStatusText = computed(() => (droneStore.isConnected ? '已连接' : '未
 const recordingEnabled = computed(() => droneStore.dataRecording.enabled)
 const currentSessionLabel = computed(() => droneStore.dataRecording.sessionId || '无会话')
 const totalBytesLabel = computed(() => formatBytes(droneStore.dataRecording.totalBytes || 0))
+const onlineAnalysisClass = computed(() => ({
+  connected: droneStore.onlineAnalysis.ready,
+  medium: !droneStore.onlineAnalysis.ready && droneStore.onlineAnalysis.enabled,
+  disconnected: !droneStore.onlineAnalysis.enabled
+}))
+const onlineAnalysisSummary = computed(() => {
+  if (!droneStore.onlineAnalysis.enabled) return '未启用'
+  if (droneStore.onlineAnalysis.compositeScore === null) return '等待数据'
+  const mode = droneStore.onlineAnalysis.strictMeasuredReady ? '实测' : '代理'
+  return `${droneStore.onlineAnalysis.compositeScore.toFixed(1)} / ${mode}`
+})
 const listenPortLabel = computed(() => `飞控主入口 ${droneStore.config.hostPort || 30509}`)
 const planningPortLabel = computed(() => `规划口 ${droneStore.config.planningRecvPort || 18511}`)
 const elapsedLabel = computed(() => {
@@ -245,6 +260,17 @@ const stopRecording = async () => {
   align-items: center;
   gap: 4px;
   font-size: 12px;
+}
+
+.online-analysis-item {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #eef2f8;
+  border: 1px solid var(--border-color);
+}
+
+.online-analysis-text {
+  font-weight: 600;
 }
 
 .status-label {

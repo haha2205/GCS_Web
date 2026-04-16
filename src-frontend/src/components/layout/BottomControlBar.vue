@@ -6,7 +6,7 @@
           <div class="console-header">
             <span class="console-title">PLANNING COMMAND</span>
             <div class="planning-header-actions">
-              <span class="planning-summary">{{ currentCmdIdxInfo }}</span>
+              <span class="planning-summary">{{ planningCmdIdxInfo }}</span>
               <button class="planning-btn primary compact-header-btn" @click="sendPlanningCommand" :disabled="!droneStore.canSendCommands">发送</button>
               <button class="planning-btn compact-header-btn" @click="resetPlanning">重置</button>
             </div>
@@ -91,7 +91,14 @@ const cruiseSpeed = ref(5)
 const enableMission = ref(false)
 const seqIdCounter = ref(0)
 
-const currentCmdIdx = computed(() => droneStore.activeCommandIdx)
+const normalizeCmdIdx = (value) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? Math.max(0, Math.trunc(parsed)) : 0
+}
+
+const selectedCmdIdx = computed(() => normalizeCmdIdx(droneStore.selectedCmdIdx))
+const telemetryCmdIdx = computed(() => normalizeCmdIdx(droneStore.lastTelemetryCmdIdx || droneStore.gcsData?.Tele_GCS_CmdIdx))
+const planningCmdIdx = computed(() => normalizeCmdIdx(droneStore.latchedPlanningCmdIdx || droneStore.selectedCmdIdx || droneStore.lastTelemetryCmdIdx || droneStore.gcsData?.Tele_GCS_CmdIdx))
 const sysLogs = computed(() => droneStore.displaySystemLogs)
 
 watch(() => sysLogs.value.length, () => {
@@ -102,15 +109,21 @@ watch(() => sysLogs.value.length, () => {
   }, 80)
 })
 
-const currentCmdIdxInfo = computed(() => {
-  if (currentCmdIdx.value === 0) return 'CmdIdx: 无'
+const formatCmdLabel = (cmdIdx) => {
+  if (cmdIdx === 0) return '无'
   const cmdMap = {
     1: '外控', 2: '混控', 3: '程控', 4: '爬升', 5: '巡航', 6: '下降', 7: '解除定高', 8: '航向保持',
     9: '左盘旋', 10: '右盘旋', 11: '航向锁定', 12: '发动机启动', 13: '发动机停止', 14: '自动起飞',
     15: '自动着陆', 16: '悬停', 17: '复原', 18: '预控', 19: '地速飞行', 20: '空速飞行', 21: '起飞准备',
     22: '人工起飞', 23: '人工着陆', 24: '避障开', 25: '避障关'
   }
-  return `CmdIdx ${currentCmdIdx.value} ${cmdMap[currentCmdIdx.value] || ''}`
+  return `CmdIdx ${cmdIdx} ${cmdMap[cmdIdx] || ''}`
+}
+
+const planningCmdIdxInfo = computed(() => {
+  const selectedText = formatCmdLabel(selectedCmdIdx.value)
+  const telemetryText = formatCmdLabel(telemetryCmdIdx.value)
+  return `规划发送: ${selectedText} | 飞控回传: ${telemetryText}`
 })
 
 const addSysLog = (message, level = 'info') => droneStore.addLog(message, level)
@@ -151,7 +164,7 @@ const sendPlanningCommand = async () => {
       targetZ: targetPos.value.z,
       cruiseSpeed: cruiseSpeed.value,
       enable: enableMission.value ? 1 : 0,
-      cmdId: currentCmdIdx.value
+      cmdId: planningCmdIdx.value
     })
 
     if (result?.status === 'success') {
