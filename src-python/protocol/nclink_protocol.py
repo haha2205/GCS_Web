@@ -4,7 +4,7 @@ MiniQGCLinkV2.0 协议定义
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from enum import IntEnum
 import struct
 import time
@@ -63,6 +63,25 @@ SEND_ONLY_PORT = 18506
 RECEIVE_PORT = 18504
 PLANNING_SEND_PORT = 18510
 PLANNING_RECV_PORT = 18511
+
+STRICT_PAYLOAD_SIZES: Dict[int, int] = {
+    NCLINK_RECEIVE_EXTY_FCS_PWMS: 64,
+    NCLINK_RECEIVE_EXTY_FCS_STATES: 56,
+    NCLINK_RECEIVE_EXTY_FCS_DATACTRL: 212,
+    NCLINK_RECEIVE_EXTY_FCS_GNCBUS: 245,
+    NCLINK_RECEIVE_EXTY_FCS_AVOIFLAG: 3,
+    NCLINK_RECEIVE_EXTY_FCS_DATAGCS: 13,
+    NCLINK_RECEIVE_EXTY_FCS_LINESTRUC_AIM2AB: 56,
+    NCLINK_RECEIVE_EXTY_FCS_LINESTRUC_AB: 56,
+    NCLINK_RECEIVE_EXTY_FCS_PARAM: 120,
+    NCLINK_RECEIVE_EXTY_FCS_ESC: 126,
+    NCLINK_RECEIVE_EXTY_FCS_ROOT: 0,
+    0x00: 0,
+}
+
+MIN_PAYLOAD_SIZES: Dict[int, int] = {
+    NCLINK_GCS_TELEMETRY: 48,
+}
 
 # 应答状态码
 RESPONSE_SUCCESS = 0x00
@@ -2137,8 +2156,9 @@ class PortType(IntEnum):
 class NCLinkProtocolParser:
     """NCLink协议解析器"""
     
-    def __init__(self):
+    def __init__(self, on_event: Optional[Callable[[dict[str, Any]], None]] = None):
         self.buffer = bytearray()
+        self.on_event = on_event
         self.fcs_states: Optional[ExtY_FCS_STATES_T] = None
         self.fcs_pwms: Optional[ExtY_FCS_PWMS_T] = None
         self.fcs_datactrl: Optional[ExtY_FCS_DATACTRL_T] = None
@@ -2149,6 +2169,70 @@ class NCLinkProtocolParser:
         self.fcs_esc: Optional[ExtY_FCS_ESC_T] = None
         self.fcs_param: Optional[ExtY_FCS_PARAM_T] = None
         self.gcs_telemetry: Optional[GCSTelemetry_T] = None
+
+    def _emit_event(self, event_type: str, **payload: Any) -> None:
+        if not self.on_event:
+            return
+
+        event = {'type': event_type}
+        event.update(payload)
+        try:
+            self.on_event(event)
+        except Exception as exc:
+            logger.debug('[协议解析] 事件回调失败: %s', exc)
+
+    def _reject_frame(
+        self,
+        reason: str,
+        *,
+        func_code: Optional[int],
+        port_type: PortType,
+        frame_size: int,
+        payload_size: int,
+        details: str = '',
+    ) -> None:
+        self._emit_event(
+            'frame_rejected',
+            reason=reason,
+            func_code=func_code,
+            func_code_hex=f'0x{func_code:02X}' if func_code is not None else None,
+            port_type=port_type.name,
+            frame_size=frame_size,
+            payload_size=payload_size,
+            details=details,
+        )
+
+    def _issue_frame(
+        self,
+        reason: str,
+        *,
+        func_code: Optional[int],
+        port_type: PortType,
+        frame_size: int,
+        payload_size: int,
+        details: str = '',
+    ) -> None:
+        self._emit_event(
+            'frame_issue',
+            reason=reason,
+            func_code=func_code,
+            func_code_hex=f'0x{func_code:02X}' if func_code is not None else None,
+            port_type=port_type.name,
+            frame_size=frame_size,
+            payload_size=payload_size,
+            details=details,
+        )
+
+    def _validate_payload_contract(self, func_code: int, payload_size: int) -> Optional[str]:
+        strict_size = STRICT_PAYLOAD_SIZES.get(func_code)
+        if strict_size is not None and payload_size != strict_size:
+            return f'payload_length_mismatch expected={strict_size} actual={payload_size}'
+
+        min_size = MIN_PAYLOAD_SIZES.get(func_code)
+        if min_size is not None and payload_size < min_size:
+            return f'payload_length_too_short min={min_size} actual={payload_size}'
+
+        return None
     
     def feed_data(self, data: bytes, port_type: PortType = PortType.PORT_18504_RECEIVE) -> List[dict]:
         """feeding数据并解析
@@ -2184,6 +2268,14 @@ class NCLinkProtocolParser:
             
             # 验证帧尾
             if frame_data[-2] != NCLINK_END0 or frame_data[-1] != NCLINK_END1:
+                self._reject_frame(
+                    'tail_mismatch',
+                    func_code=func_code,
+                    port_type=port_type,
+                    frame_size=total_len,
+                    payload_size=data_len,
+                    details='invalid frame tail while scanning buffer',
+                )
                 self.buffer.pop(0)
                 continue
             
@@ -2227,6 +2319,14 @@ class NCLinkProtocolParser:
         # 验证数据长度是否合理
         if data_len > BUFFER_SIZE_MAX:
             logger.warning(f"[协议解析] 数据长度异常: {data_len} (超过最大值)")
+            self._reject_frame(
+                'payload_length_overflow',
+                func_code=func_code,
+                port_type=port_type,
+                frame_size=len(frame_data),
+                payload_size=data_len,
+                details='payload length exceeds BUFFER_SIZE_MAX',
+            )
             return None
         
         # 计算预期帧长度：head(2) + func(1) + len(2) + data(data_len) + checksum(1) + tail(2)
@@ -2242,6 +2342,14 @@ class NCLinkProtocolParser:
             checksum = frame_data[5+data_len]
         except IndexError as e:
             logger.error(f"[协议解析] 提取payload失败: {e}")
+            self._reject_frame(
+                'payload_extract_failed',
+                func_code=func_code,
+                port_type=port_type,
+                frame_size=len(frame_data),
+                payload_size=data_len,
+                details=str(e),
+            )
             return None
         
         # 飞控遥测校验和计算：对 帧头(2) + 功能码(1) + 长度(2) + 载荷(N) 进行异或
@@ -2252,18 +2360,47 @@ class NCLinkProtocolParser:
 
         if checksum != expected_checksum:
             logger.warning(f"[协议解析] 校验和不匹配: 计算{expected_checksum:02X}, 接收{checksum:02X}")
-            # 即使校验和错误，也继续解析（用于调试）
+            self._issue_frame(
+                'checksum_mismatch',
+                func_code=func_code,
+                port_type=port_type,
+                frame_size=expected_frame_len,
+                payload_size=data_len,
+                details=f'expected={expected_checksum:02X} actual={checksum:02X}',
+            )
         
         # 验证帧尾
         if frame_data[-2] != NCLINK_END0 or frame_data[-1] != NCLINK_END1:
             logger.warning(f"[协议解析] 帧尾错误: 0x{frame_data[-2]:02X} 0x{frame_data[-1]:02X}")
+            self._issue_frame(
+                'tail_mismatch',
+                func_code=func_code,
+                port_type=port_type,
+                frame_size=expected_frame_len,
+                payload_size=data_len,
+                details='invalid frame tail in parse_frame',
+            )
+
+        payload_contract_error = self._validate_payload_contract(func_code, len(payload))
+        if payload_contract_error:
+            logger.warning('[协议解析] payload 长度不符合约定: func=0x%02X %s', func_code, payload_contract_error)
+            self._issue_frame(
+                'payload_contract_violation',
+                func_code=func_code,
+                port_type=port_type,
+                frame_size=expected_frame_len,
+                payload_size=data_len,
+                details=payload_contract_error,
+            )
         
         # 根据功能码解析数据
         message = {
             'func_code': func_code,
             'func_code_hex': f'0x{func_code:02X}',
             'port_type': port_type,
-            'timestamp': int(time.time() * 1000)
+            'timestamp': int(time.time() * 1000),
+            'payload_size': data_len,
+            'frame_size': expected_frame_len,
         }
         
         # ============ 飞控数据包解析 (0x40-0x4B) ============
@@ -2280,11 +2417,16 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_states'
                 message['data'] = self.fcs_states.to_json()
             except Exception as e:
-                logger.warning(f"[协议解析] ExtY_FCS_STATES_T解析失败: {e}, 使用默认值")
-                # 提取可用的数据（前56字节）
-                self.fcs_states = ExtY_FCS_STATES_T.from_bytes(payload[:56].ljust(64, b'\x00'))
-                message['type'] = 'fcs_states'
-                message['data'] = self.fcs_states.to_json()
+                logger.warning(f"[协议解析] ExtY_FCS_STATES_T解析失败，丢弃该帧: {e}")
+                self._reject_frame(
+                    'decode_error',
+                    func_code=func_code,
+                    port_type=port_type,
+                    frame_size=expected_frame_len,
+                    payload_size=data_len,
+                    details=str(e),
+                )
+                return None
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_DATACTRL:
             # 0x43: 控制数据循环状态
@@ -2293,10 +2435,16 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_datactrl'
                 message['data'] = self.fcs_datactrl.to_json()
             except Exception as e:
-                logger.warning(f"[协议解析] ExtY_FCS_DATACTRL_T解析失败: {e}, 使用默认值")
-                self.fcs_datactrl = ExtY_FCS_DATACTRL_T.from_bytes(payload[:212].ljust(64, b'\x00'))
-                message['type'] = 'fcs_datactrl'
-                message['data'] = self.fcs_datactrl.to_json()
+                logger.warning(f"[协议解析] ExtY_FCS_DATACTRL_T解析失败，丢弃该帧: {e}")
+                self._reject_frame(
+                    'decode_error',
+                    func_code=func_code,
+                    port_type=port_type,
+                    frame_size=expected_frame_len,
+                    payload_size=data_len,
+                    details=str(e),
+                )
+                return None
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_GNCBUS:
             # 0x44: GN&C总线状态
@@ -2305,10 +2453,16 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_gncbus'
                 message['data'] = self.fcs_gncbus.to_json()
             except Exception as e:
-                logger.warning(f"[协议解析] ExtY_FCS_GNCBUS_T解析失败: {e}, 使用默认值")
-                self.fcs_gncbus = ExtY_FCS_GNCBUS_T.from_bytes(payload[:245].ljust(40, b'\x00'))
-                message['type'] = 'fcs_gncbus'
-                message['data'] = self.fcs_gncbus.to_json()
+                logger.warning(f"[协议解析] ExtY_FCS_GNCBUS_T解析失败，丢弃该帧: {e}")
+                self._reject_frame(
+                    'decode_error',
+                    func_code=func_code,
+                    port_type=port_type,
+                    frame_size=expected_frame_len,
+                    payload_size=data_len,
+                    details=str(e),
+                )
+                return None
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_AVOIFLAG:
             # 0x45: 避障标志
@@ -2323,10 +2477,16 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_datagcs'
                 message['data'] = self.fcs_datagcs.to_json()
             except Exception as e:
-                logger.warning(f"[协议解析] ExtY_FCS_DATAGCS_T解析失败: {e}")
-                self.fcs_datagcs = ExtY_FCS_DATAGCS_T()
-                message['type'] = 'fcs_datagcs'
-                message['data'] = self.fcs_datagcs.to_json()
+                logger.warning(f"[协议解析] ExtY_FCS_DATAGCS_T解析失败，丢弃该帧: {e}")
+                self._reject_frame(
+                    'decode_error',
+                    func_code=func_code,
+                    port_type=port_type,
+                    frame_size=expected_frame_len,
+                    payload_size=data_len,
+                    details=str(e),
+                )
+                return None
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_LINESTRUC_AIM2AB:
             # 0x47: aim2AB航迹线结构
@@ -2335,31 +2495,16 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_line_aim2ab'
                 message['data'] = self.fcs_line_aim2ab.to_json()
             except Exception as e:
-                logger.warning(f"[协议解析] ExtY_FCS_LINESTRUC_ac_aim2AB_T解析失败: {e}")
-                message['type'] = 'fcs_line_aim2ab'
-                message['data'] = {
-                    'lon': 0.0,
-                    'lat': 0.0,
-                    'psi': 0.0,
-                    'alt': 0.0,
-                    'len': 0.0,
-                    'rad': 0.0,
-                    'Vx2nextdot': 0.0,
-                    'next_num': 0,
-                    'next_dot': 0,
-                    'type_dot': 0,
-                    'clockwise_WP': 0,
-                    'R_WP': 0.0,
-                    'type_WP': 0,
-                    'Num_type_WP': 0,
-                    'dL_WP': 0.0,
-                    'Vx_type': 0,
-                    'TTC_Fault_Mode': 0,
-                    'deltaY_ctrl': 0,
-                    'turn_type': 0,
-                    'Inv_type': 0,
-                    'type_line': 0
-                }
+                logger.warning(f"[协议解析] ExtY_FCS_LINESTRUC_ac_aim2AB_T解析失败，丢弃该帧: {e}")
+                self._reject_frame(
+                    'decode_error',
+                    func_code=func_code,
+                    port_type=port_type,
+                    frame_size=expected_frame_len,
+                    payload_size=data_len,
+                    details=str(e),
+                )
+                return None
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_LINESTRUC_AB:
             # 0x48: AB航迹线结构
@@ -2368,31 +2513,16 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_line_ab'
                 message['data'] = self.fcs_line_ab.to_json()
             except Exception as e:
-                logger.warning(f"[协议解析] ExtY_FCS_LINESTRUC_acAB_T解析失败: {e}")
-                message['type'] = 'fcs_line_ab'
-                message['data'] = {
-                    'lon': 0.0,
-                    'lat': 0.0,
-                    'psi': 0.0,
-                    'alt': 0.0,
-                    'len': 0.0,
-                    'rad': 0.0,
-                    'Vx2nextdot': 0.0,
-                    'next_num': 0,
-                    'next_dot': 0,
-                    'type_dot': 0,
-                    'clockwise_WP': 0,
-                    'R_WP': 0.0,
-                    'type_WP': 0,
-                    'Num_type_WP': 0,
-                    'dL_WP': 0.0,
-                    'Vx_type': 0,
-                    'TTC_Fault_Mode': 0,
-                    'deltaY_ctrl': 0,
-                    'turn_type': 0,
-                    'Inv_type': 0,
-                    'type_line': 0
-                }
+                logger.warning(f"[协议解析] ExtY_FCS_LINESTRUC_acAB_T解析失败，丢弃该帧: {e}")
+                self._reject_frame(
+                    'decode_error',
+                    func_code=func_code,
+                    port_type=port_type,
+                    frame_size=expected_frame_len,
+                    payload_size=data_len,
+                    details=str(e),
+                )
+                return None
         
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_ESC:
             # 0x4A: 电机ESC数据
@@ -2439,42 +2569,23 @@ class NCLinkProtocolParser:
                 message['type'] = 'fcs_param'
                 message['data'] = self.fcs_param.to_json()
             except Exception as e:
-                logger.warning(f"[协议解析] ExtY_FCS_PARAM_T解析失败: {e}")
-                message['type'] = 'fcs_param'
-                message['data'] = ExtY_FCS_PARAM_T().to_json()
+                logger.warning(f"[协议解析] ExtY_FCS_PARAM_T解析失败，丢弃该帧: {e}")
+                self._reject_frame(
+                    'decode_error',
+                    func_code=func_code,
+                    port_type=port_type,
+                    frame_size=expected_frame_len,
+                    payload_size=data_len,
+                    details=str(e),
+                )
+                return None
 
         elif func_code == NCLINK_RECEIVE_EXTY_FCS_ROOT:
-            # 0x4B: 飞控根参数扩展数据
-            try:
-                if len(payload) < 17:
-                    raise ValueError(f'payload too short for fcs_root: {len(payload)} < 17')
-
-                xacc_lmt, yacc_lmt, hground, auto_takeoff_hcmd = struct.unpack('<4f', payload[:16])
-                ftb_interrupt_plan = struct.unpack('<b', payload[16:17])[0]
-                timestamp_value = ''
-                if len(payload) >= 21:
-                    timestamp_value = struct.unpack('<i', payload[17:21])[0]
-
-                message['type'] = 'fcs_root'
-                message['data'] = {
-                    'XaccLMT': xacc_lmt,
-                    'YaccLMT': yacc_lmt,
-                    'Hground': hground,
-                    'AutoTakeoffHcmd': auto_takeoff_hcmd,
-                    'ftb_intterrupt_plan': ftb_interrupt_plan,
-                    'TimeStamp': timestamp_value,
-                }
-            except Exception as e:
-                logger.warning(f"[协议解析] fcs_root解析失败: {e}")
-                message['type'] = 'fcs_root'
-                message['data'] = {
-                    'XaccLMT': 0.0,
-                    'YaccLMT': 0.0,
-                    'Hground': 0.0,
-                    'AutoTakeoffHcmd': 0.0,
-                    'ftb_intterrupt_plan': 0,
-                    'TimeStamp': '',
-                }
+            # 0x4B: 当前链路保留功能字定义，但不再做字段解析或记录
+            logger.info('[协议解析] 收到0x4B功能字，当前按保留功能字跳过字段解析与记录')
+            message['type'] = 'fcs_root'
+            message['data'] = {}
+            message['skip_recording'] = True
         
         # ============ 规划系统数据包解析 (0x70-0x71) ============
         elif func_code == NCLINK_GCS_TELEMETRY:
@@ -2484,14 +2595,28 @@ class NCLinkProtocolParser:
                 if self.gcs_telemetry:
                     message['type'] = 'planning_telemetry'
                     message['data'] = self.gcs_telemetry.to_json()
-                    logger.info(f"[协议解析] 成功解析规划遥测数据 (0x71): {message['data']}")
+                    logger.debug(f"[协议解析] 成功解析规划遥测数据 (0x71): {message['data']}")
                 else:
-                    message['type'] = 'planning_telemetry_failed'
-                    message['data'] = {'error': 'Failed to parse GCSTelemetry_T from bytes'}
+                    self._reject_frame(
+                        'decode_error',
+                        func_code=func_code,
+                        port_type=port_type,
+                        frame_size=expected_frame_len,
+                        payload_size=data_len,
+                        details='GCSTelemetry_T returned None',
+                    )
+                    return None
             except Exception as e:
                 logger.error(f"[协议解析] 解析规划遥测数据 (0x71) 时发生异常: {e}")
-                message['type'] = 'planning_telemetry_error'
-                message['data'] = {'error': str(e)}
+                self._reject_frame(
+                    'decode_error',
+                    func_code=func_code,
+                    port_type=port_type,
+                    frame_size=expected_frame_len,
+                    payload_size=data_len,
+                    details=str(e),
+                )
+                return None
         
         elif func_code == 0x00 and len(payload) == 0:
             message['type'] = 'heartbeat_ack'
@@ -2504,6 +2629,8 @@ class NCLinkProtocolParser:
                 'hex_payload': payload.hex()[:32],
                 'length': len(payload)
             }
+
+        self._emit_event('message_parsed', message=message)
         
         return message
 

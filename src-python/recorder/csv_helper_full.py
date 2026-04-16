@@ -11,8 +11,8 @@ from datetime import datetime
 # ==================== 列数常量 ====================
 
 # 总列数（重新核对）
-# 1 + 8 + 12 + 53 + 73 + 3 + 6 + 4 + 21 + 21 + 26 + 36 = 264
-TOTAL_COLUMNS = 264
+# 1 + 8 + 12 + 53 + 73 + 3 + 6 + 4 + 21 + 21 + 30 + 36 = 268
+TOTAL_COLUMNS = 268
 
 # 各数据段的列数（根据interface.h严格计数）
 COL_TIMESTAMP = 1
@@ -25,7 +25,7 @@ COL_FUTABA = 6
 COL_GCS = 4        
 COL_AC_AIM2AB = 21 
 COL_AC_AB = 21      
-COL_PARAM = 26
+COL_PARAM = 30
 COL_ESC = 36
 
 # 累计偏移量
@@ -350,16 +350,16 @@ def get_full_header() -> str:
         "acAB_turn_type", "acAB_Inv_type", "acAB_type_line"
     ])
     
-    # 11. PARAMS数据 (26字段)
+    # 11. PARAMS数据 (30字段)
     header_fields.extend([
         "ParamAil_F_KaPHI", "ParamAil_F_KaP", "ParamAil_F_KaY", "ParamAil_F_IaY",
-        "ParamAil_F_KaVy", "ParamAil_F_IaVy", "ParamAil_F_KaAy",
+        "ParamAil_F_KaVy", "ParamAil_F_IaVy", "ParamAil_F_KaAy", "ParamAil_YaccLMT",
         "ParamEle_F_KeTHETA", "ParamEle_F_KeQ", "ParamEle_F_KeX", "ParamEle_F_IeX",
-        "ParamEle_F_KeVx", "ParamEle_F_IeVx", "ParamEle_F_KeAx",
+        "ParamEle_F_KeVx", "ParamEle_F_IeVx", "ParamEle_F_KeAx", "ParamEle_XaccLMT",
         "ParamRud_F_KrR", "ParamRud_F_IrR", "ParamRud_F_KrAy", "ParamRud_F_KrPSI",
         "ParamH_F_KcH", "ParamH_F_IcH", "ParamH_F_KcHdot", "ParamH_F_IcHdot", "ParamH_F_KcAz",
         "ParamRPM_F_KgRPM", "ParamRPM_F_IgRPM",
-        "ParamScale_F_scale_factor"
+        "ParamScale_F_scale_factor", "ParamGuide_Hground", "ParamGuide_AutoTakeoffHcmd"
     ])
     
     # 12. ESC数据 (36字段)
@@ -756,19 +756,19 @@ def _format_acab_row(timestamp: str, data: Dict[str, Any]) -> str:
     return ",".join(row)
 
 def _format_param_row(timestamp: str, param_data: Dict[str, Any]) -> str:
-    """Format PARAM data row (26 columns)"""
+    """Format PARAM data row (30 columns)."""
     row = [timestamp]
     row.extend([""] * (OFFSET_PARAM - 1))
     
     keys = [
         "ParamAil_F_KaPHI", "ParamAil_F_KaP", "ParamAil_F_KaY", "ParamAil_F_IaY",
-        "ParamAil_F_KaVy", "ParamAil_F_IaVy", "ParamAil_F_KaAy",
+        "ParamAil_F_KaVy", "ParamAil_F_IaVy", "ParamAil_F_KaAy", "ParamAil_YaccLMT",
         "ParamEle_F_KeTHETA", "ParamEle_F_KeQ", "ParamEle_F_KeX", "ParamEle_F_IeX",
-        "ParamEle_F_KeVx", "ParamEle_F_IeVx", "ParamEle_F_KeAx",
+        "ParamEle_F_KeVx", "ParamEle_F_IeVx", "ParamEle_F_KeAx", "ParamEle_XaccLMT",
         "ParamRud_F_KrR", "ParamRud_F_IrR", "ParamRud_F_KrAy", "ParamRud_F_KrPSI",
         "ParamH_F_KcH", "ParamH_F_IcH", "ParamH_F_KcHdot", "ParamH_F_IcHdot", "ParamH_F_KcAz",
         "ParamRPM_F_KgRPM", "ParamRPM_F_IgRPM",
-        "ParamScale_F_scale_factor"
+        "ParamScale_F_scale_factor", "ParamGuide_Hground", "ParamGuide_AutoTakeoffHcmd"
     ]
     
     for key in keys:

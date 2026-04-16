@@ -13,7 +13,6 @@ for package_name in (
     'pydantic',
     'numpy',
     'pandas',
-    'scipy',
 ):
     hiddenimports += collect_submodules(package_name)
 
