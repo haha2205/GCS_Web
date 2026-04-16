@@ -74,6 +74,14 @@ from protocol.nclink_protocol import (
 from protocol.protocol_parser import UDPHandler
 from recorder import RawDataRecorder
 from recorder.csv_helper_full import get_data_for_type, get_full_header
+from routes import create_config_router, create_general_router, create_operations_router
+from runtime_helpers import (
+    build_default_session_id as _build_default_session_id,
+    cache_ws_snapshot as _runtime_cache_ws_snapshot,
+    get_pipeline_status as _runtime_get_pipeline_status,
+    get_transport_runtime_stats as _runtime_get_transport_runtime_stats,
+    resolve_command_channel as _runtime_resolve_command_channel,
+)
 from websocket.websocket_manager import WebSocketManager
 
 
@@ -379,65 +387,27 @@ def _enqueue_online_analysis_message(payload: dict[str, Any]) -> None:
             )
 
 
-def _cache_ws_snapshot(payload: dict, cache_key: str) -> dict:
-    manager.cache_message(payload, cache_key)
-    return payload
-
-
 def _is_high_frequency_packet(msg_type: str) -> bool:
     return msg_type in HIGH_FREQUENCY_PACKET_TYPES
 
 
+def _cache_ws_snapshot(payload: dict, cache_key: str) -> dict:
+    return _runtime_cache_ws_snapshot(manager, payload, cache_key)
+
+
 def _get_pipeline_status() -> dict:
-    return {
-        'packet_queue_size': packet_processing_queue.qsize() if packet_processing_queue else 0,
-        'recording_queue_size': recording_queue.qsize() if recording_queue else 0,
-        'online_analysis_queue_size': online_analysis_queue.qsize() if online_analysis_queue else 0,
-        'pending_latest_packet_types': len(pending_latest_packets),
-        'pending_online_analysis_packet_types': len(pending_online_analysis_packets),
-        'drop_counters': dict(packet_drop_counters),
-    }
+    return _runtime_get_pipeline_status(
+        packet_processing_queue,
+        recording_queue,
+        online_analysis_queue,
+        pending_latest_packets,
+        pending_online_analysis_packets,
+        packet_drop_counters,
+    )
 
 
 def _get_transport_runtime_stats() -> dict:
-    if not udp_handler:
-        recent = _build_empty_recent_traffic_snapshot()
-        return {
-            'is_running': False,
-            'listening_ports': [],
-            'window_seconds': recent['window_seconds'],
-            'rx_datagrams': {
-                'packets_total': 0,
-                'payload_bytes_total': 0,
-                'recent': recent,
-                'by_port_total': {},
-            },
-            'tx_packets': {
-                'packets_total': 0,
-                'payload_bytes_total': 0,
-                'recent': recent,
-                'by_source_port_total': {},
-                'by_target_total': {},
-            },
-            'parsed_messages': {
-                'messages_total': 0,
-                'payload_bytes_total': 0,
-                'frame_bytes_total': 0,
-                'recent': recent,
-                'by_type_total': {},
-            },
-            'parser_rejections': {
-                'total': 0,
-                'by_reason_total': {},
-                'recent': recent,
-            },
-            'parser_issues': {
-                'total': 0,
-                'by_reason_total': {},
-                'recent': recent,
-            },
-        }
-    return udp_handler.get_runtime_stats()
+    return _runtime_get_transport_runtime_stats(udp_handler, _build_empty_recent_traffic_snapshot())
 
 
 def _should_broadcast_packet(msg_type: str, func_code: int, current_time: float) -> bool:
@@ -485,16 +455,8 @@ def _append_session_communication_log(event: str, **fields: Any) -> None:
     )
 
 
-def _resolve_command_channel(command_type: str) -> Optional[str]:
-    if command_type in {'cmd_idx', 'cmd_mission', 'set_pids'}:
-        return 'flight_control'
-    if command_type in {'gcs_command', 'waypoints_upload'}:
-        return 'planning'
-    return None
-
-
 async def _check_command_send_rate(command_type: str) -> Optional[dict]:
-    channel = _resolve_command_channel(command_type)
+    channel = _runtime_resolve_command_channel(command_type)
     if not channel:
         return None
 
@@ -537,10 +499,6 @@ async def _release_command_channel(channel: Optional[str]) -> None:
         return
     async with command_send_lock:
         command_channel_busy[channel] = False
-
-
-def _build_default_session_id() -> str:
-    return datetime.now().strftime('%Y%m%d_%H%M%S')
 
 
 async def _heartbeat_loop() -> None:
@@ -873,52 +831,7 @@ def on_udp_message_received(message: dict) -> None:
 
 
 async def send_pid_params_to_drone(pids_data: dict) -> dict:
-    global cached_pid_params
-
-    try:
-        cached_pid_params.update(pids_data)
-        payload = encode_extu_fcs_from_dict(
-            cached_pid_params,
-            cmd_idx=0,
-            cmd_mission=0,
-            cmd_mission_val=0.0,
-        )
-        packet = encode_command_packet(NCLINK_SEND_EXTU_FCS, payload)
-
-        if not udp_handler:
-            return {
-                'type': 'command_response',
-                'command': 'set_pids',
-                'status': 'error',
-                'message': 'UDP服务器未启动',
-                'timestamp': int(time.time() * 1000),
-            }
-
-        udp_handler.send_data(packet, connection_config.remoteIp, connection_config.commandRecvPort)
-        _append_session_communication_log(
-            'uplink_command_sent',
-            command_type='set_pids',
-            func_code=f'0x{NCLINK_SEND_EXTU_FCS:02X}',
-            target=f'{connection_config.remoteIp}:{connection_config.commandRecvPort}',
-            bytes=len(packet),
-            params=_build_command_log_params('set_pids', pids_data),
-        )
-        return {
-            'type': 'command_response',
-            'command': 'set_pids',
-            'status': 'success',
-            'message': 'PID参数已发送',
-            'timestamp': int(time.time() * 1000),
-        }
-    except Exception as exc:
-        logger.error('发送 PID 参数失败: %s', exc)
-        return {
-            'type': 'command_response',
-            'command': 'set_pids',
-            'status': 'error',
-            'message': f'发送失败: {exc}',
-            'timestamp': int(time.time() * 1000),
-        }
+    return await send_command_to_drone(CommandRequest(type='set_pids', params=pids_data))
 
 
 async def handle_client_message(message: dict, websocket: WebSocket) -> None:
@@ -938,16 +851,24 @@ async def handle_client_message(message: dict, websocket: WebSocket) -> None:
         command = message.get('command')
         params = message.get('params', {})
 
-        if command == 'set_pids':
-            result = await send_pid_params_to_drone(params)
+        supported_commands = {
+            'cmd_idx',
+            'cmd_mission',
+            'set_pids',
+            'gcs_command',
+            'waypoints_upload',
+        }
+
+        if command in supported_commands:
+            result = await send_command_to_drone(CommandRequest(type=command, params=params))
             await websocket.send_json(result)
             return
 
         await websocket.send_json({
             'type': 'command_response',
             'command': command,
-            'status': 'success',
-            'message': '指令确认',
+            'status': 'error',
+            'message': f'WebSocket 指令未接入后端发送链路: {command}',
             'timestamp': int(time.time() * 1000),
         })
         return
@@ -1003,7 +924,6 @@ async def handle_client_message(message: dict, websocket: WebSocket) -> None:
             })
 
 
-@app.get('/')
 async def root() -> dict:
     return {
         'name': 'GCS Web Backend',
@@ -1012,7 +932,6 @@ async def root() -> dict:
     }
 
 
-@app.get('/health')
 async def health_check() -> dict:
     return {
         'status': 'healthy',
@@ -1031,7 +950,6 @@ async def health_check() -> dict:
     }
 
 
-@app.get('/api/traffic/stats')
 async def get_traffic_stats() -> dict:
     return {
         'type': 'traffic_stats',
@@ -1041,7 +959,6 @@ async def get_traffic_stats() -> dict:
     }
 
 
-@app.websocket('/ws/drone')
 async def websocket_endpoint(websocket: WebSocket) -> None:
     manager.cache_message(
         _build_udp_status_payload(
@@ -1069,7 +986,6 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         manager.disconnect(websocket)
 
 
-@app.get('/api/config/connection')
 async def get_connection_config() -> dict:
     active_config = _reset_connection_config()
     return {
@@ -1094,7 +1010,6 @@ async def get_connection_config() -> dict:
     }
 
 
-@app.post('/api/config/connection')
 async def update_connection_config(config_payload: ConnectionConfig) -> dict:
     del config_payload
     active_config = _reset_connection_config()
@@ -1111,7 +1026,6 @@ async def update_connection_config(config_payload: ConnectionConfig) -> dict:
     }
 
 
-@app.get('/api/config/log')
 async def get_log_config() -> dict:
     return {
         'type': 'log_config',
@@ -1120,7 +1034,6 @@ async def get_log_config() -> dict:
     }
 
 
-@app.post('/api/config/log')
 async def update_log_config(config_payload: LogConfig) -> dict:
     global log_config, log_file_handles
 
@@ -1158,7 +1071,6 @@ async def update_log_config(config_payload: LogConfig) -> dict:
     return {'status': 'success', 'message': '日志配置已更新'}
 
 
-@app.post('/api/log/save')
 async def save_log_entry(data: dict) -> dict:
     if not log_config.autoRecord:
         return {'status': 'skipped', 'message': '自动记录未启用'}
@@ -1171,7 +1083,6 @@ async def save_log_entry(data: dict) -> dict:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post('/api/udp/start')
 async def start_udp_server() -> dict:
     global udp_handler, udp_server_started, heartbeat_task
 
@@ -1217,7 +1128,6 @@ async def start_udp_server() -> dict:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post('/api/udp/stop')
 async def stop_udp_server() -> dict:
     global udp_server_started, heartbeat_task
 
@@ -1244,7 +1154,6 @@ async def stop_udp_server() -> dict:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get('/api/udp/status')
 async def get_udp_status() -> dict:
     global udp_server_started
 
@@ -1276,7 +1185,6 @@ async def get_udp_status() -> dict:
         },
     }
 
-@app.get('/api/online-analysis/status')
 async def get_online_analysis_status() -> dict:
     return {
         'status': 'success',
@@ -1294,13 +1202,12 @@ async def get_online_analysis_status() -> dict:
     }
 
 
-@app.post('/api/command')
 async def send_command_to_drone(request: CommandRequest) -> dict:
     try:
         command_type = request.type
         params = request.params
         packet = None
-        channel = _resolve_command_channel(command_type)
+        channel = _runtime_resolve_command_channel(command_type)
         target_host = connection_config.remoteIp
         target_port = connection_config.commandRecvPort
         response_message = '指令已发送'
@@ -1461,13 +1368,11 @@ async def send_command_to_drone(request: CommandRequest) -> dict:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.get('/api/recording/status')
 async def get_recording_status() -> dict:
     session_info = recorder.get_session_info() if recorder else None
     return _build_recording_status_payload(recording_active, current_session_id, session_info)
 
 
-@app.post('/api/recording/start')
 async def start_recording(config_payload: RecordingConfig) -> dict:
     global recording_active, current_session_id, recorder
 
@@ -1521,7 +1426,6 @@ async def start_recording(config_payload: RecordingConfig) -> dict:
         raise HTTPException(status_code=500, detail=str(exc))
 
 
-@app.post('/api/recording/stop')
 async def stop_recording() -> dict:
     global recording_active, current_session_id
 
@@ -1558,6 +1462,32 @@ async def stop_recording() -> dict:
         logger.error('停止录制失败: %s', exc)
         raise HTTPException(status_code=500, detail=str(exc))
 
+
+app.include_router(create_general_router(
+    root_handler=root,
+    health_handler=health_check,
+    traffic_stats_handler=get_traffic_stats,
+    websocket_handler=websocket_endpoint,
+))
+
+app.include_router(create_config_router(
+    get_connection_config_handler=get_connection_config,
+    update_connection_config_handler=update_connection_config,
+    get_log_config_handler=get_log_config,
+    update_log_config_handler=update_log_config,
+    save_log_entry_handler=save_log_entry,
+))
+
+app.include_router(create_operations_router(
+    start_udp_server_handler=start_udp_server,
+    stop_udp_server_handler=stop_udp_server,
+    get_udp_status_handler=get_udp_status,
+    get_online_analysis_status_handler=get_online_analysis_status,
+    send_command_handler=send_command_to_drone,
+    get_recording_status_handler=get_recording_status,
+    start_recording_handler=start_recording,
+    stop_recording_handler=stop_recording,
+))
 
 manager.cache_message({
     'type': 'config_update',
