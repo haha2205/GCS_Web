@@ -1,0 +1,76 @@
+flowchart LR
+    subgraph DS[Data Sources]
+        UAV[UAV / Flight Controller Telemetry]
+        PLAN[Planning Telemetry]
+        LIDAR[Lidar / Radar]
+        FE[Frontend Vue App]
+    end
+
+    subgraph UDPIN[Backend UDP Ingress]
+        P30509[UDP 30509 Main Aggregate]
+        P18506[UDP 18506 Telemetry Fallback]
+        P18511[UDP 18511 Planning]
+        P18507[UDP 18507 Lidar]
+        PARSER[Per-Port NCLink Parser]
+    end
+
+    subgraph CORE[Backend Core Pipeline]
+        RXCB[datagram_received callback]
+        PQ[Packet Processing Queue\nbounded + coalescing]
+        PLOOP[Packet Processing Loop\nbatch processing]
+        SNAP[Snapshot Cache]
+        OAQ[Online Analysis Queue\nbounded + coalescing]
+        RQ[Recording Queue\nbounded]
+    end
+
+    subgraph OUT[Backend Outputs]
+        WS[WebSocket Manager\nlatest-only broadcast + timeout]
+        HTTP[FastAPI HTTP API]
+        REC[Recorder / CSV / Logs]
+        OA[Online Analysis Service]
+        CMD[UDP Command Sender]
+    end
+
+    subgraph UI[Frontend]
+        VIEW[Realtime Panels / Charts / Status]
+        CTRL[Mission / PID / Recording Controls]
+    end
+
+    UAV --> P30509
+    UAV --> P18506
+    PLAN --> P18511
+    LIDAR --> P18507
+
+    P30509 --> PARSER
+    P18506 --> PARSER
+    P18511 --> PARSER
+    P18507 --> PARSER
+    PARSER --> RXCB
+    RXCB --> PQ
+    PQ --> PLOOP
+
+    PLOOP --> SNAP
+    PLOOP --> WS
+    PLOOP --> OAQ
+    PLOOP --> RQ
+
+    OAQ --> OA
+    RQ --> REC
+    SNAP --> WS
+    WS --> VIEW
+
+    FE --> HTTP
+    FE --> WS
+    CTRL --> HTTP
+    CTRL --> WS
+    HTTP --> CMD
+    WS --> CMD
+    CMD --> UAV
+    CMD --> PLAN
+
+    classDef queue fill:#fff3cd,stroke:#946200,color:#3a2a00;
+    classDef io fill:#d9ecff,stroke:#2b6cb0,color:#153e75;
+    classDef out fill:#e6ffed,stroke:#2f855a,color:#22543d;
+    class PQ,OAQ,RQ queue;
+    class P30509,P18506,P18511,P18507,PARSER,RXCB,WS,HTTP,CMD io;
+    class REC,OA,VIEW out;

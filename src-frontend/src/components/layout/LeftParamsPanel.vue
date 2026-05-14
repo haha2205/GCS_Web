@@ -180,7 +180,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useDroneStore } from '@/store/drone'
 
 const droneStore = useDroneStore()
@@ -241,6 +241,22 @@ const pid = ref({
   AutoTakeoffHcmd: 10.0 // 自动起飞高度指令
 })
 
+function syncPidFormFromRLTuning() {
+  const rlTuning = droneStore.rlTuning || {}
+  const candidateParams = rlTuning.candidateParams || {}
+  const currentParams = rlTuning.currentParams || {}
+  const sourceParams = Object.keys(candidateParams).length ? candidateParams : currentParams
+
+  if (!sourceParams || !Object.keys(sourceParams).length) {
+    return
+  }
+
+  pid.value = {
+    ...pid.value,
+    ...sourceParams
+  }
+}
+
 // PID操作
 const readPids = () => {
   console.log('读取PID参数')
@@ -255,7 +271,15 @@ const writePids = () => {
 
 onMounted(() => {
   readPids()
+  syncPidFormFromRLTuning()
 })
+
+watch(
+  () => [droneStore.rlTuning?.lastUpdated, droneStore.rlTuning?.state],
+  () => {
+    syncPidFormFromRLTuning()
+  }
+)
 </script>
 
 <style scoped>

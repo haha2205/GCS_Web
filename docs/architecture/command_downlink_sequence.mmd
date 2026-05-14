@@ -1,0 +1,31 @@
+sequenceDiagram
+    autonumber
+    participant FE as Frontend
+    participant API as FastAPI / WebSocket API
+    participant RL as Command Rate Limit
+    participant ENC as Command Encoder
+    participant UDP as UDP Sender
+    participant UAV as UAV / Planner
+    participant WS as WebSocket Manager
+
+    FE->>API: command / recording / PID request
+    API->>RL: check channel busy + min interval
+
+    alt rate limited
+        RL-->>API: reject with retry_after
+        API-->>FE: command_response(rate_limited)
+    else accepted
+        API->>ENC: encode NCLink packet
+        ENC-->>API: bytes packet
+        API->>UDP: send_data(packet, host, port)
+        UDP-->>UAV: UDP command packet
+        API-->>FE: command_response(success)
+        opt state changed
+            API->>WS: broadcast status snapshot
+            WS-->>FE: config / recording / udp status update
+        end
+    end
+
+    Note over FE,API: Frontend refresh only drops the browser-side connection.
+    Note over API,UDP: UDP command channel remains alive independently of WebSocket lifecycle.
+    Note over RL,ENC: Burst commands are serialized per channel to avoid internal congestion.

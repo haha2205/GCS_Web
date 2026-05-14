@@ -1,0 +1,38 @@
+sequenceDiagram
+    autonumber
+    participant UAV as UAV / Sensors
+    participant UDP as UDP Listener
+    participant PARSER as NCLink Parser
+    participant PQ as Processing Queue
+    participant LOOP as Processing Loop
+    participant WS as WebSocket Manager
+    participant RQ as Recording Queue
+    participant OAQ as OnlineAnalysis Queue
+    participant FE as Frontend
+    participant REC as Recorder
+    participant OA as OnlineAnalysis
+
+    UAV->>UDP: UDP telemetry packet
+    UDP->>PARSER: feed_data(data, port_type)
+    PARSER-->>UDP: decoded message list
+    UDP->>PQ: enqueue message
+
+    alt queue full and high-frequency
+        PQ-->>PQ: coalesce latest packet by type
+    else accepted
+        PQ->>LOOP: batched dequeue
+        LOOP->>LOOP: build ws payload and throttle by type
+        LOOP->>WS: schedule latest broadcast
+        LOOP->>RQ: enqueue recording message
+        opt eligible for online analysis
+            LOOP->>OAQ: enqueue analysis payload
+        end
+    end
+
+    WS-->>FE: latest snapshot / realtime update
+    RQ->>REC: async batch write CSV / logs
+    OAQ->>OA: async forward payload
+
+    Note over UDP,LOOP: UDP callback path stays lightweight to reduce packet loss.
+    Note over WS,FE: Slow frontend clients are timeout-pruned rather than blocking the pipeline.
+    Note over RQ,REC: Recording is decoupled from UDP ingress and UI push.

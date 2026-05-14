@@ -1,0 +1,8 @@
+{
+  "path": "E:\\Apollo-GCS-Web\\src-frontend\\rl_tuning\\rl_tuning_1778566220230\\checkpoints\\agent_latest.pt",
+  "versioned_path": "E:\\Apollo-GCS-Web\\src-frontend\\rl_tuning\\rl_tuning_1778566220230\\checkpoints\\agent_ep000_1778566222529_session_started.pt",
+  "updated_at_ms": 1778566222529,
+  "event": "session_started",
+  "episode_index": 0,
+  "replay_size": 0
+}

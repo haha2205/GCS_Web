@@ -5,10 +5,20 @@
 
 const { contextBridge, ipcRenderer } = require('electron')
 
+const FIXED_BACKEND_BASE_URL = 'http://localhost:8000'
+
 // 暴露 API 到渲染进程
 contextBridge.exposeInMainWorld('electronAPI', {
+  runtime: {
+    isDesktopApp: true,
+    backendBaseUrl: FIXED_BACKEND_BASE_URL
+  },
+
   // 获取系统信息
   getSystemInfo: () => ipcRenderer.invoke('get-system-info'),
+
+  // 获取运行时配置
+  getRuntimeConfig: () => ipcRenderer.invoke('get-runtime-config'),
   
   // 重启 Python 后端
   restartPythonBackend: () => ipcRenderer.send('restart-python-backend'),

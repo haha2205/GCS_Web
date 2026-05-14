@@ -56,6 +56,7 @@ let timeInterval = null
 let recordingPoll = null
 let udpPoll = null
 let trafficPoll = null
+let rlTuningPoll = null
 
 const updateTime = () => {
   const now = new Date()
@@ -70,6 +71,7 @@ onMounted(() => {
   void droneStore.fetchRecordingStatus()
   void droneStore.fetchUdpStatus()
   void droneStore.fetchTrafficStats()
+  void droneStore.fetchRLTuningStatus()
   recordingPoll = setInterval(() => {
     void droneStore.fetchRecordingStatus()
   }, 1500)
@@ -79,6 +81,9 @@ onMounted(() => {
   trafficPoll = setInterval(() => {
     void droneStore.fetchTrafficStats()
   }, 2000)
+  rlTuningPoll = setInterval(() => {
+    void droneStore.fetchRLTuningStatus()
+  }, 1200)
 })
 
 onUnmounted(() => {
@@ -86,6 +91,7 @@ onUnmounted(() => {
   if (recordingPoll) clearInterval(recordingPoll)
   if (udpPoll) clearInterval(udpPoll)
   if (trafficPoll) clearInterval(trafficPoll)
+  if (rlTuningPoll) clearInterval(rlTuningPoll)
 })
 
 const udpClass = computed(() => {
@@ -145,6 +151,9 @@ const startRecording = async () => {
 const stopRecording = async () => {
   recordingLoading.value = true
   try {
+    if (['episode_running', 'waiting_param_echo'].includes(droneStore.rlTuning.state)) {
+      await droneStore.finishRLTuningEpisode(true)
+    }
     await droneStore.stopFullRecording()
   } finally {
     recordingLoading.value = false

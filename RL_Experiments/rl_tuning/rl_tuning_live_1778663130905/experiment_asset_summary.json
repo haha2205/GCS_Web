@@ -1,0 +1,37 @@
+{
+  "session_id": "rl_tuning_live_1778663130905",
+  "output_dir": "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid",
+  "chapter4_figures": [
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_best_longitudinal_control_terms.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_best_pitch_pwm_diagnostics.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_best_velocity_response.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_metric_trends.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_parameter_trajectories.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_pwm_spectrum.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_reward_convergence.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_reward_decomposition.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_velocity_spectrum.png"
+  ],
+  "chapter4_experiment_figures": [
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_best_longitudinal_control_terms.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_best_pitch_pwm_diagnostics.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_best_velocity_response.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_metric_trends.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_parameter_trajectories.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_pwm_spectrum.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_reward_convergence.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_reward_decomposition.png",
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/figures_a1_valid/fig_a1_velocity_spectrum.png"
+  ],
+  "available_groups": [
+    "A1"
+  ],
+  "group_counts": {
+    "A1": 13
+  },
+  "history_rows": 13,
+  "valid_a1_rows": 13,
+  "source_files": [
+    "E:/Apollo-GCS-Web/RL_Experiments/rl_tuning/rl_tuning_live_1778663130905/history.jsonl"
+  ]
+}

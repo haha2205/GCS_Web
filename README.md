@@ -42,6 +42,16 @@ Apollo-GCS-Web/
 
 ## 快速开始
 
+## 与 OnlineAnalysis 协同
+
+当前推荐的实时评测架构是：
+
+1. Apollo-GCS-Web 继续负责实时数据接收、记录和前端展示。
+2. OnlineAnalysis 作为独立 sidecar 接收 Apollo 转发的实时消息。
+3. Apollo 前端仅展示简洁的在线评测摘要，不额外复制整套评测逻辑。
+
+跨电脑部署时，可参考 `src-python/.env.example` 配置网络参数与 sidecar 地址。
+
 ### 环境要求
 
 - Node.js 16+

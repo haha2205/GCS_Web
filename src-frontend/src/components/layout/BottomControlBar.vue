@@ -97,8 +97,9 @@ const normalizeCmdIdx = (value) => {
 }
 
 const selectedCmdIdx = computed(() => normalizeCmdIdx(droneStore.selectedCmdIdx))
+const lastSentCmdIdx = computed(() => normalizeCmdIdx(droneStore.lastSentCmdIdx))
 const telemetryCmdIdx = computed(() => normalizeCmdIdx(droneStore.lastTelemetryCmdIdx || droneStore.gcsData?.Tele_GCS_CmdIdx))
-const planningCmdIdx = computed(() => normalizeCmdIdx(droneStore.latchedPlanningCmdIdx || droneStore.selectedCmdIdx || droneStore.lastTelemetryCmdIdx || droneStore.gcsData?.Tele_GCS_CmdIdx))
+const planningCmdIdx = computed(() => normalizeCmdIdx(droneStore.latchedPlanningCmdIdx || droneStore.selectedCmdIdx))
 const sysLogs = computed(() => droneStore.displaySystemLogs)
 
 watch(() => sysLogs.value.length, () => {
@@ -122,8 +123,9 @@ const formatCmdLabel = (cmdIdx) => {
 
 const planningCmdIdxInfo = computed(() => {
   const selectedText = formatCmdLabel(selectedCmdIdx.value)
+  const sentText = formatCmdLabel(lastSentCmdIdx.value)
   const telemetryText = formatCmdLabel(telemetryCmdIdx.value)
-  return `规划发送: ${selectedText} | 飞控回传: ${telemetryText}`
+  return `待发送: ${selectedText} | 最近发送: ${sentText} | 飞控回传: ${telemetryText}`
 })
 
 const addSysLog = (message, level = 'info') => droneStore.addLog(message, level)
@@ -141,6 +143,15 @@ const triggerCriticalCommand = async (cmd) => {
   try {
     const result = await droneStore.sendRemoteCommand(cmd.id, cmd.name)
     if (result?.status === 'success') {
+      if (cmd.id === 17) {
+        if (result?.rl_finish?.status === 'success') {
+          addSysLog('复原指令已发送，SAC回合已完成结算', 'success')
+        } else {
+          addSysLog(result?.rl_finish?.message || '复原指令已发送，但SAC回合结算未成功完成', 'warning')
+        }
+        return
+      }
+
       const level = cmd.tone === 'danger' ? 'warning' : cmd.tone === 'success' ? 'success' : 'info'
       addSysLog(`${cmd.name}指令已发送`, level)
     }

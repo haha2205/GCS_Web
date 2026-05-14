@@ -390,6 +390,9 @@ export const useDroneStore = defineStore('drone', {
     },
 
     selectedCmdIdx: 0,
+    lastSentCmdIdx: 0,
+    lastSentCommandAt: 0,
+    externalControlArmed: false,
     lastTelemetryCmdIdx: 0,
     latchedPlanningCmdIdx: 0,
 
@@ -511,6 +514,50 @@ export const useDroneStore = defineStore('drone', {
       metricHistory: buildOnlineAnalysisMetricHistoryState()
     },
 
+    rlTuning: {
+      state: 'idle',
+      sessionId: '',
+      episodeId: '',
+      lastActiveSessionId: '',
+      lastActiveEpisodeId: '',
+      episodeSummaryWindowStartedAtMs: null,
+      strategyMode: 'lightweight_sac',
+      parameterKeys: [],
+      currentParams: {},
+      safeParams: {},
+      candidateParams: {},
+      paramEchoConfirmed: false,
+      rollbackTriggered: false,
+      taskStartAllowed: false,
+      parameterUpdateAllowed: false,
+      lastReward: null,
+      bestReward: null,
+      replaySize: 0,
+      latestStateVector: [],
+      latestNextStateVector: [],
+      latestActionVector: [],
+      parameterSpecs: {},
+      agentMetrics: {
+        mode: 'lightweight_sac',
+        actor_loss: null,
+        critic1_loss: null,
+        critic2_loss: null,
+        alpha: null,
+        avg_q: null,
+        avg_log_prob: null,
+        policy_mean: [],
+        policy_std: [],
+        policy_log_prob: null
+      },
+      historySize: 0,
+      artifactDir: '',
+      checkpointPath: '',
+      checkpointUpdatedAtMs: 0,
+      restoredFromArtifact: '',
+      currentTraceSamples: 0,
+      lastUpdated: null
+    },
+
     trafficStats: buildTrafficStatsState(),
     trafficTrend: buildTrafficTrendState(),
 
@@ -556,9 +603,10 @@ export const useDroneStore = defineStore('drone', {
       return '差'
     },
     selectedCommandIdx: (state) => state.selectedCmdIdx || 0,
+    lastSentCommandIdx: (state) => state.lastSentCmdIdx || 0,
     telemetryCommandIdx: (state) => state.lastTelemetryCmdIdx || state.gcsData.Tele_GCS_CmdIdx || 0,
-    planningCommandIdx: (state) => state.latchedPlanningCmdIdx || state.selectedCmdIdx || state.lastTelemetryCmdIdx || state.gcsData.Tele_GCS_CmdIdx || 0,
-    activeCommandIdx: (state) => state.selectedCmdIdx || state.lastTelemetryCmdIdx || state.gcsData.Tele_GCS_CmdIdx || 0,
+    planningCommandIdx: (state) => state.latchedPlanningCmdIdx || state.selectedCmdIdx || 0,
+    activeCommandIdx: (state) => state.selectedCmdIdx || 0,
     displaySystemLogs: (state) => state.systemLogs,
     trafficHealthLevel: (state) => {
       if (!state.trafficStats.available) return 'idle'
@@ -636,12 +684,6 @@ export const useDroneStore = defineStore('drone', {
       const normalizedCmdId = Math.max(0, parseInt(cmdId, 10) || 0)
       if (source === 'telemetry') {
         this.lastTelemetryCmdIdx = normalizedCmdId
-        if (!this.latchedPlanningCmdIdx && normalizedCmdId > 0) {
-          this.latchedPlanningCmdIdx = normalizedCmdId
-        }
-        if (!this.selectedCmdIdx && normalizedCmdId > 0) {
-          this.selectedCmdIdx = normalizedCmdId
-        }
         return
       }
 
@@ -1214,6 +1256,9 @@ export const useDroneStore = defineStore('drone', {
           case 'command_response':
             this.handleCommandResponse(data)
             break
+          case 'rl_tuning_status':
+            this.updateRLTuningStatus(data)
+            break
           case 'log':
             this.addLog(data.message, data.level)
             break
@@ -1307,6 +1352,95 @@ export const useDroneStore = defineStore('drone', {
       Object.entries(metrics).forEach(([key, value]) => {
         this._pushOnlineAnalysisMetricHistory(key, value, timestamp)
       })
+    },
+
+    updateRLTuningStatus(payload = {}) {
+      const data = payload.data || {}
+      const timestamp = Number(payload.timestamp || Date.now())
+
+      const hasStructuredStatus = Object.prototype.hasOwnProperty.call(data, 'state')
+        || Object.prototype.hasOwnProperty.call(data, 'session_id')
+        || Object.prototype.hasOwnProperty.call(data, 'current_episode_id')
+
+      if (!hasStructuredStatus) {
+        return
+      }
+
+      const nextState = data.state || 'idle'
+      const nextSessionId = data.session_id || ''
+      const nextEpisodeId = data.current_episode_id || ''
+      const previousEpisodeId = this.rlTuning.episodeId || ''
+      const previousState = this.rlTuning.state || 'idle'
+      const shouldLatchActiveEpisode = !!nextSessionId
+        && !!nextEpisodeId
+        && ['episode_running', 'waiting_param_echo', 'episode_evaluating', 'applying_params', 'episode_preparing'].includes(nextState)
+      const enteredNewEpisode = shouldLatchActiveEpisode
+        && (nextEpisodeId !== previousEpisodeId || !['episode_running', 'waiting_param_echo', 'episode_evaluating', 'applying_params', 'episode_preparing'].includes(previousState))
+      const nextEpisodeSummaryWindowStartedAtMs = enteredNewEpisode
+        ? timestamp
+        : (!shouldLatchActiveEpisode && ['session_ready', 'session_finished', 'idle', 'error'].includes(nextState)
+            ? null
+            : this.rlTuning.episodeSummaryWindowStartedAtMs)
+
+      this.rlTuning = {
+        ...this.rlTuning,
+        state: nextState,
+        sessionId: nextSessionId,
+        episodeId: nextEpisodeId,
+        lastActiveSessionId: shouldLatchActiveEpisode ? nextSessionId : this.rlTuning.lastActiveSessionId,
+        lastActiveEpisodeId: shouldLatchActiveEpisode ? nextEpisodeId : this.rlTuning.lastActiveEpisodeId,
+        episodeSummaryWindowStartedAtMs: nextEpisodeSummaryWindowStartedAtMs,
+        strategyMode: data.strategy_mode || 'lightweight_sac',
+        parameterKeys: Array.isArray(data.parameter_keys) ? data.parameter_keys : [],
+        currentParams: data.current_params || {},
+        safeParams: data.safe_params || {},
+        candidateParams: data.candidate_params || {},
+        paramEchoConfirmed: !!data.param_echo_confirmed,
+        rollbackTriggered: !!data.rollback_triggered,
+        taskStartAllowed: !!data.task_start_allowed,
+        parameterUpdateAllowed: !!data.parameter_update_allowed,
+        lastReward: Number.isFinite(Number(data.last_reward)) ? Number(data.last_reward) : null,
+        bestReward: Number.isFinite(Number(data.best_reward)) ? Number(data.best_reward) : null,
+        replaySize: Number(data.replay_size || 0),
+        latestStateVector: Array.isArray(data.latest_state_vector) ? data.latest_state_vector : [],
+        latestNextStateVector: Array.isArray(data.latest_next_state_vector) ? data.latest_next_state_vector : [],
+        latestActionVector: Array.isArray(data.latest_action_vector) ? data.latest_action_vector : [],
+        parameterSpecs: data.parameter_specs || {},
+        agentMetrics: data.agent_metrics || this.rlTuning.agentMetrics,
+        historySize: Number(data.history_size || 0),
+        artifactDir: data.artifact_dir || '',
+        checkpointPath: data.checkpoint_path || '',
+        checkpointUpdatedAtMs: Number(data.checkpoint_updated_at_ms || 0),
+        restoredFromArtifact: data.restored_from_artifact || '',
+        currentTraceSamples: Number(data.current_trace_samples || 0),
+        lastUpdated: timestamp
+      }
+    },
+
+    _hasReusableRLTuningSession(statusPayload = null) {
+      const data = statusPayload?.data || statusPayload || this.rlTuning || {}
+      const sessionId = data.session_id || data.sessionId || ''
+      const state = data.state || 'idle'
+      return !!sessionId && !['idle', 'session_finished', 'error'].includes(state)
+    },
+
+    _resolveRLTuningState(statusPayload = null) {
+      const data = statusPayload?.data || statusPayload || this.rlTuning || {}
+      return data.state || 'idle'
+    },
+
+    _isRLTuningEpisodeActive(statusPayload = null) {
+      const data = statusPayload?.data || statusPayload || this.rlTuning || {}
+      const state = data.state || 'idle'
+      const episodeId = data.current_episode_id || data.episodeId || ''
+      const candidateParams = data.current_candidate_params || data.candidate_params || data.candidateParams || {}
+      const hasCandidateParams = !!candidateParams && Object.keys(candidateParams).length > 0
+
+      if (['episode_running', 'applying_params', 'waiting_param_echo', 'episode_evaluating'].includes(state)) {
+        return true
+      }
+
+      return !!episodeId && hasCandidateParams && state !== 'session_finished'
     },
 
     _handleUdpInnerMessage(messageType, payload) {
@@ -1656,8 +1790,90 @@ export const useDroneStore = defineStore('drone', {
         this.addLog('UDP未连接，指令不会发往机载端', 'warning')
         return null
       }
+
+      if (Number(cmdId) === 1) {
+        const status = await this.fetchRLTuningStatus()
+        if (status === null) {
+          this.addLog('获取SAC状态失败，暂不发送外控命令', 'warning')
+          return null
+        }
+
+        let latestStatus = status
+
+        if (!this._hasReusableRLTuningSession(latestStatus)) {
+          const sessionResult = await this.ensureRLTuningSession()
+          if (sessionResult?.status !== 'success') {
+            this.addLog(sessionResult?.message || '外控发送前SAC会话启动失败', 'warning')
+            return null
+          }
+          latestStatus = sessionResult
+        }
+
+        const refreshedStatus = await this.fetchRLTuningStatus()
+        if (refreshedStatus) {
+          latestStatus = refreshedStatus
+        }
+
+        const latestState = this._resolveRLTuningState(latestStatus)
+
+        if (latestState === 'session_ready') {
+          const episodeResult = await this.startRLTuningEpisode()
+          if (episodeResult?.status !== 'success') {
+            this.addLog(episodeResult?.message || '外控发送前SAC回合启动失败', 'warning')
+            return null
+          }
+        } else if (!['episode_running', 'applying_params', 'waiting_param_echo', 'episode_evaluating'].includes(latestState)) {
+          this.addLog(`当前SAC状态不允许发送外控命令: ${latestState}`, 'warning')
+          return null
+        }
+      }
+
+      if ([14, 21, 22].includes(Number(cmdId))) {
+        const externalReady = await this._ensureExternalControlReady()
+        if (externalReady?.status !== 'success') {
+          this.addLog(externalReady?.message || `${cmdName}发送前未能确认外控态`, 'warning')
+          return externalReady || null
+        }
+
+        const taskStartReady = await this._ensureRLTuningTaskStartAllowed(cmdName)
+        if (taskStartReady?.status !== 'success') {
+          this.addLog(taskStartReady?.message || `${cmdName}发送前未能确认候选PID回读`, 'warning')
+          return taskStartReady || null
+        }
+      }
+
       this.setSelectedCommandIdx(cmdId, 'ui')
-      return this.sendCommandREST('cmd_idx', { cmdId, name: cmdName })
+      const commandResult = await this.sendCommandREST('cmd_idx', { cmdId, name: cmdName })
+
+      if (Number(cmdId) === 1 && commandResult?.status === 'success') {
+        this.addLog('外控命令已发送；新回合候选PID已下发，起飞前需等待后端确认任务可启动', 'info')
+        return commandResult
+      }
+
+      if (Number(cmdId) === 17 && commandResult?.status === 'success') {
+        const latestStatus = await this.fetchRLTuningStatus()
+        const finishData = latestStatus?.data || this.rlTuning || {}
+        const finishSessionId = finishData.session_id || finishData.sessionId || this.rlTuning.sessionId || this.rlTuning.lastActiveSessionId
+        const finishEpisodeId = finishData.current_episode_id || finishData.episodeId || this.rlTuning.episodeId || this.rlTuning.lastActiveEpisodeId
+
+        if (finishSessionId) {
+          const finishResult = await this.finishRLTuningEpisode(true, {
+            session_id: finishSessionId,
+            episode_id: finishEpisodeId
+          })
+          if (finishResult?.status !== 'success') {
+            this.addLog(finishResult?.message || '复原后未能完成SAC回合结算', 'warning')
+          }
+          return {
+            ...commandResult,
+            rl_finish: finishResult || null
+          }
+        }
+
+        this.addLog('复原已发送，但后端当前未返回可结算的SAC回合标识', 'warning')
+      }
+
+      return commandResult
     },
 
     async fetchRecordingStatus() {
@@ -1702,6 +1918,268 @@ export const useDroneStore = defineStore('drone', {
         }
         return null
       }
+    },
+
+    async fetchRLTuningStatus() {
+      try {
+        const status = await backend.rlTuning.getStatus()
+        this.updateRLTuningStatus(status)
+        return status
+      } catch (error) {
+        if (!isBackendUnavailableError(error)) {
+          this.addLog(`获取SAC状态失败: ${error.message}`, 'warning')
+        }
+        return null
+      }
+    },
+
+    _buildAutoRLTuningSessionId() {
+      if (this.dataRecording.sessionId) {
+        return `${this.dataRecording.sessionId}_torch_sac`
+      }
+      return `rl_tuning_live_${Date.now()}`
+    },
+
+    _collectRecentSeriesValues(series = [], maxPoints = 120, startedAtMs = null) {
+      if (!Array.isArray(series) || !series.length) {
+        return []
+      }
+
+      const filteredSeries = Number.isFinite(Number(startedAtMs))
+        ? series.filter((entry) => Number(entry?.timestamp) >= Number(startedAtMs))
+        : series
+
+      return filteredSeries
+        .slice(-maxPoints)
+        .map((entry) => Number(entry?.value))
+        .filter((value) => Number.isFinite(value))
+    },
+
+    _computeStd(values = []) {
+      if (!Array.isArray(values) || values.length < 2) {
+        return 0
+      }
+
+      const mean = values.reduce((sum, value) => sum + value, 0) / values.length
+      const variance = values.reduce((sum, value) => sum + ((value - mean) ** 2), 0) / values.length
+      return Math.sqrt(Math.max(variance, 0))
+    },
+
+    _buildRLTuningEpisodeSummary() {
+      const summaryWindowStartedAtMs = this.rlTuning.episodeSummaryWindowStartedAtMs
+      const targetSeries = this._collectRecentSeriesValues(this.history.speedTarget, 120, summaryWindowStartedAtMs)
+      const actualSeries = this._collectRecentSeriesValues(this.history.speedActual, 120, summaryWindowStartedAtMs)
+      const sampleCount = Math.min(targetSeries.length, actualSeries.length)
+
+      let trackingRmse = 0
+      let steadyStateError = 0
+      let overshootPct = 0
+
+      if (sampleCount > 0) {
+        const pairedTarget = targetSeries.slice(-sampleCount)
+        const pairedActual = actualSeries.slice(-sampleCount)
+        const squaredErrors = pairedTarget.map((target, index) => {
+          const error = pairedActual[index] - target
+          return error * error
+        })
+        trackingRmse = Math.sqrt(squaredErrors.reduce((sum, value) => sum + value, 0) / sampleCount)
+        steadyStateError = pairedActual[sampleCount - 1] - pairedTarget[sampleCount - 1]
+        const referenceTarget = pairedTarget[sampleCount - 1]
+        if (Math.abs(referenceTarget) > 1e-6) {
+          const peakActual = Math.max(...pairedActual)
+          overshootPct = Math.max(0, ((peakActual - referenceTarget) / Math.abs(referenceTarget)) * 100)
+        }
+      } else {
+        const target = this._safeNumber(this.gncBus.GNCBus_CmdValue_Vx_cmd)
+        const actual = this._safeNumber(this.velocity.x)
+        trackingRmse = Math.abs(actual - target)
+        steadyStateError = actual - target
+      }
+
+      const pwmJitters = [1, 2, 3, 4, 5, 6]
+        .map((index) => this._collectRecentSeriesValues(this.history[`pwm${index}`], 120, summaryWindowStartedAtMs))
+        .filter((values) => values.length >= 2)
+        .map((values) => {
+          const deltas = values.slice(1).map((value, idx) => value - values[idx])
+          return this._computeStd(deltas)
+        })
+
+      const pwmJitter = pwmJitters.length
+        ? pwmJitters.reduce((sum, value) => sum + value, 0) / pwmJitters.length
+        : 0
+
+      return {
+        tracking_rmse: trackingRmse,
+        steady_state_error: steadyStateError,
+        overshoot_pct: overshootPct,
+        pwm_jitter: pwmJitter,
+        target_vx: this._safeNumber(this.gncBus.GNCBus_CmdValue_Vx_cmd),
+        current_vx: this._safeNumber(this.velocity.x)
+      }
+    },
+
+    async ensureRLTuningSession(payload = {}) {
+      const state = this.rlTuning.state || 'idle'
+      if (this.rlTuning.sessionId && !['idle', 'session_finished', 'error'].includes(state)) {
+        return { status: 'success', data: { ...this.rlTuning } }
+      }
+
+      if (payload.restore_artifact_dir || payload.restore_session_id) {
+        const restoreResponse = await this.restoreRLTuningSession({
+          artifact_dir: payload.restore_artifact_dir || '',
+          session_id: payload.restore_session_id || payload.session_id || ''
+        })
+        if (restoreResponse?.status === 'success') {
+          return restoreResponse
+        }
+      }
+
+      const response = await backend.rlTuning.startSession({
+        session_id: payload.session_id || this._buildAutoRLTuningSessionId(),
+        task_type: payload.task_type || 'velocity_tracking',
+        parameter_keys: payload.parameter_keys || ['fKeVx', 'fIeVx', 'fKeAx'],
+        initial_params: payload.initial_params || {},
+        max_episodes: payload.max_episodes || 20,
+        strategy_mode: payload.strategy_mode || 'torch_sac'
+      })
+      this.updateRLTuningStatus(response)
+
+      const responseData = response?.data || {}
+      const reusableExistingSession = response?.status !== 'success'
+        && !!responseData.session_id
+        && !['idle', 'session_finished', 'error'].includes(responseData.state || 'idle')
+
+      if (reusableExistingSession) {
+        this.addLog(`复用已有SAC会话: ${responseData.session_id}`, 'info')
+        return {
+          ...response,
+          status: 'success',
+          reused_existing_session: true,
+          message: response?.message || '复用已有调参会话'
+        }
+      }
+
+      if (response?.status === 'success') {
+        this.addLog(`SAC会话已启动: ${response?.data?.session_id || this.rlTuning.sessionId}`, 'success')
+      }
+      return response
+    },
+
+    async restoreRLTuningSession(payload = {}) {
+      const response = await backend.rlTuning.restoreSession({
+        session_id: payload.session_id || '',
+        artifact_dir: payload.artifact_dir || ''
+      })
+      this.updateRLTuningStatus(response)
+      if (response?.status === 'success') {
+        const restoredFrom = response?.data?.restored_from_artifact || response?.data?.artifact_dir || payload.artifact_dir || payload.session_id || ''
+        this.addLog(`SAC会话已恢复: ${restoredFrom}`, 'success')
+      }
+      return response
+    },
+
+    async startRLTuningEpisode(payload = {}) {
+      const sessionId = payload.session_id || this.rlTuning.sessionId
+      if (!sessionId) {
+        throw new Error('当前没有可用的SAC会话')
+      }
+
+      const response = await backend.rlTuning.startEpisode({
+        session_id: sessionId,
+        episode_id: payload.episode_id || ''
+      })
+      this.updateRLTuningStatus(response)
+      const responseState = this._resolveRLTuningState(response)
+      if (response?.status === 'success' && this._isRLTuningEpisodeActive(response)) {
+        this.addLog(
+          responseState === 'waiting_param_echo'
+            ? 'SAC候选参数已下发，回合已启动并等待参数回读确认'
+            : 'SAC候选参数已下发，回合已进入运行态',
+          'success'
+        )
+        return response
+      }
+
+      const confirmedStatus = await this.fetchRLTuningStatus()
+      const confirmedState = this._resolveRLTuningState(confirmedStatus)
+      if (this._isRLTuningEpisodeActive(confirmedStatus)) {
+        this.addLog(
+          confirmedState === 'waiting_param_echo'
+            ? 'SAC候选参数已下发，回合已启动并等待参数回读确认'
+            : 'SAC候选参数已下发，回合已进入运行态',
+          'success'
+        )
+        return {
+          ...response,
+          status: 'success',
+          message: response?.message || (confirmedState === 'waiting_param_echo'
+            ? 'SAC回合已启动，等待参数回读确认'
+            : 'SAC回合已由状态确认进入运行态'),
+          data: confirmedStatus?.data || response?.data || {}
+        }
+      }
+
+      return response
+    },
+
+    async finishRLTuningEpisode(taskSuccess = true, payload = {}) {
+      const sessionId = payload.session_id || this.rlTuning.sessionId || this.rlTuning.lastActiveSessionId
+      const episodeId = payload.episode_id || this.rlTuning.episodeId || this.rlTuning.lastActiveEpisodeId
+
+      if (!sessionId) {
+        return null
+      }
+
+      const response = await backend.rlTuning.finishEpisode({
+        session_id: sessionId,
+        episode_id: episodeId || '',
+        summary: this._buildRLTuningEpisodeSummary(),
+        task_success: !!taskSuccess
+      })
+      this.updateRLTuningStatus(response)
+      if (response?.status === 'success') {
+        this.rlTuning.lastActiveSessionId = ''
+        this.rlTuning.lastActiveEpisodeId = ''
+        this.addLog('SAC回合已完成并记录结果', 'success')
+      }
+      return response
+    },
+
+    _markSuccessfulCmdIdx(cmdId) {
+      const normalizedCmdId = Math.max(0, parseInt(cmdId, 10) || 0)
+      this.lastSentCmdIdx = normalizedCmdId
+      this.lastSentCommandAt = Date.now()
+      if (normalizedCmdId === 1) {
+        this.externalControlArmed = true
+      } else if ([2, 3].includes(normalizedCmdId)) {
+        this.externalControlArmed = false
+      }
+    },
+
+    async _ensureExternalControlReady() {
+      if (this.externalControlArmed) {
+        return { status: 'success', message: '外控指令已发送，可继续发送后续任务指令' }
+      }
+
+      return { status: 'error', message: '请先点击外控，RL 与后续任务指令都以前端外控点击为准' }
+    },
+
+    async _ensureRLTuningTaskStartAllowed(cmdName = '任务指令') {
+      const status = await this.fetchRLTuningStatus()
+      if (status === null) {
+        return { status: 'error', message: `获取SAC状态失败，暂不发送${cmdName}` }
+      }
+
+      if (!this._hasReusableRLTuningSession(status)) {
+        return { status: 'success', message: '当前无活动SAC会话，可直接发送任务指令' }
+      }
+
+      const data = status?.data || this.rlTuning || {}
+      if (data.task_start_allowed || data.taskStartAllowed) {
+        return { status: 'success', message: '候选PID已完成回读确认，可发送任务指令' }
+      }
+
+      return { status: 'error', message: '候选PID尚未完成回读确认，暂不发送任务启动指令' }
     },
 
     async startFullRecording(config = {}) {
@@ -1823,6 +2301,7 @@ export const useDroneStore = defineStore('drone', {
 
     async sendCommandREST(type, payload) {
       try {
+        const normalizedCmdId = type === 'cmd_idx' ? Math.max(0, parseInt(payload?.cmdId, 10) || 0) : 0
         if (type === 'cmd_idx' && payload?.cmdId !== undefined) {
           this.setSelectedCommandIdx(payload.cmdId, 'ui')
         }
@@ -1844,6 +2323,9 @@ export const useDroneStore = defineStore('drone', {
           body: JSON.stringify({ type, params: payload })
         })
         const result = await response.json()
+        if (type === 'cmd_idx' && result?.status === 'success') {
+          this._markSuccessfulCmdIdx(normalizedCmdId)
+        }
         this.addLog(`指令发送: ${type} ${this._formatCommandDetails(type, payload)} - ${result.status || 'unknown'}`, 'info')
         return result
       } catch (error) {

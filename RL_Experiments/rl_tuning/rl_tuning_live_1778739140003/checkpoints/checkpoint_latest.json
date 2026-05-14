@@ -1,0 +1,8 @@
+{
+  "path": "E:\\Apollo-GCS-Web\\RL_Experiments\\rl_tuning\\rl_tuning_live_1778739140003\\checkpoints\\agent_latest.pt",
+  "versioned_path": "E:\\Apollo-GCS-Web\\RL_Experiments\\rl_tuning\\rl_tuning_live_1778739140003\\checkpoints\\agent_ep020_1778742365229_episode_finished.pt",
+  "updated_at_ms": 1778742365229,
+  "event": "episode_finished",
+  "episode_index": 20,
+  "replay_size": 20
+}

@@ -4,17 +4,19 @@
   "description": "Apollo Dreamview 风格的无人机地面站 Web 版",
   "main": "src-electron/main.js",
   "scripts": {
-    "dev": "concurrently \"npm run dev:electron\" \"npm run dev:frontend\" \"npm run dev:backend\"",
+    "dev": "concurrently \"npm run dev:electron\" \"npm run dev:frontend\"",
+    "dev:web": "concurrently \"npm run dev:frontend\" \"npm run dev:backend\"",
     "dev:electron": "electron src-electron/main.js",
     "dev:frontend": "cd src-frontend && npm run dev",
-    "dev:backend": "cd src-python && uvicorn main:app --reload --host 0.0.0.0 --port 8000",
+    "dev:backend": "node .\\scripts\\run_backend.js",
+    "build:backend": "cd src-python && .packenv\\python.exe -m PyInstaller ApolloGCSBackend.spec --noconfirm --clean",
     "build:frontend": "cd src-frontend && npm run build",
-    "build": "npm run build:frontend && electron-builder",
-    "build:win": "npm run build:frontend && electron-builder --win",
-    "build:mac": "npm run build:frontend && electron-builder --mac",
-    "build:linux": "npm run build:frontend && electron-builder --linux",
+    "build": "npm run build:frontend && npm run build:backend && electron-builder",
+    "build:win": "npm run build:frontend && npm run build:backend && electron-builder --win",
+    "build:mac": "npm run build:frontend && npm run build:backend && electron-builder --mac",
+    "build:linux": "npm run build:frontend && npm run build:backend && electron-builder --linux",
     "lint": "cd src-frontend && npm run lint",
-    "postinstall": "cd src-frontend && npm install && cd ../src-python && pip install -r requirements.txt"
+    "postinstall": "cd src-frontend && npm install && cd .. && node .\\scripts\\install_backend_deps.js"
   },
   "keywords": [
     "drone",
@@ -37,6 +39,19 @@
     "directories": {
       "output": "dist"
     },
+    "extraResources": [
+      {
+        "from": "src-python/dist",
+        "to": "backend",
+        "filter": [
+          "ApolloGCSBackend*"
+        ]
+      },
+      {
+        "from": "src-python",
+        "to": "backend/src-python"
+      }
+    ],
     "files": [
       "src-electron/**/*",
       "src-frontend/dist/**/*",
@@ -44,7 +59,8 @@
     ],
     "win": {
       "target": "nsis",
-      "icon": "src-electron/assets/icon.ico"
+      "icon": "src-electron/assets/icon.ico",
+      "signAndEditExecutable": false
     },
     "mac": {
       "target": "dmg",

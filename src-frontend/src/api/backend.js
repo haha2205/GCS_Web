@@ -279,6 +279,39 @@ export const trafficApi = {
 }
 
 /**
+ * RL 调参 API
+ */
+export const rlTuningApi = {
+  startSession: async (payload) => {
+    return await apiRequest('/api/rl-tuning/session/start', payload, 'POST')
+  },
+
+  stopSession: async (payload) => {
+    return await apiRequest('/api/rl-tuning/session/stop', payload, 'POST')
+  },
+
+  restoreSession: async (payload) => {
+    return await apiRequest('/api/rl-tuning/session/restore', payload, 'POST')
+  },
+
+  startEpisode: async (payload) => {
+    return await apiRequest('/api/rl-tuning/episode/start', payload, 'POST')
+  },
+
+  finishEpisode: async (payload) => {
+    return await apiRequest('/api/rl-tuning/episode/finish', payload, 'POST')
+  },
+
+  getStatus: async () => {
+    return await apiRequest('/api/rl-tuning/status')
+  },
+
+  getHistory: async (sessionId) => {
+    return await apiRequest(`/api/rl-tuning/history?session_id=${encodeURIComponent(sessionId || '')}`)
+  }
+}
+
+/**
  * 回放数据 API
  */
 export const replayApi = {
@@ -354,6 +387,7 @@ export default {
   log: logApi,
   recording: recordingApi,
   replay: replayApi,
+  rlTuning: rlTuningApi,
   traffic: trafficApi,
   udp: udpApi,
   request: apiRequest

@@ -60,6 +60,11 @@
               :optionOverrides="defaultTimeChartOverrides"
             />
           </div>
+
+          <div class="monitor-section">
+            <div class="section-subtitle">SAC 在线调参过程</div>
+            <SACTuningCard />
+          </div>
         </div>
       </section>
 
@@ -99,6 +104,7 @@
 import { computed } from 'vue'
 import { useDroneStore } from '@/store/drone'
 import EChartWrapper from '@/components/monitor/EChartWrapper.vue'
+import SACTuningCard from '@/components/monitor/SACTuningCard.vue'
 import LinkHealthCard from './LinkHealthCard.vue'
 import OnlineAnalysisDrawer from './OnlineAnalysisDrawer.vue'
 

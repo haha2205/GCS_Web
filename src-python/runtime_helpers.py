@@ -69,8 +69,10 @@ def get_transport_runtime_stats(udp_handler: Any, empty_recent_snapshot: dict) -
 
 
 def resolve_command_channel(command_type: str) -> Optional[str]:
-    if command_type in {'cmd_idx', 'cmd_mission', 'set_pids'}:
+    if command_type in {'cmd_idx', 'cmd_mission'}:
         return 'flight_control'
+    if command_type == 'set_pids':
+        return 'parameter_update'
     if command_type in {'gcs_command', 'waypoints_upload'}:
         return 'planning'
     return None

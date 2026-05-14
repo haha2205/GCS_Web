@@ -3,7 +3,7 @@ export const remoteCommandButtons = [
   { id: 2, name: '混控' },
   { id: 3, name: '程控' },
   { id: 4, name: '爬升' },
-  { id: 5, name: '巡航' },
+  { id: 5, name: '定高' },
   { id: 6, name: '下降' },
   { id: 7, name: '解除定高' },
   { id: 8, name: '航向保持' },

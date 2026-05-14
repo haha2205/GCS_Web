@@ -34,14 +34,27 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 RESOURCE_PYTHON_ROOT = os.getenv('APOLLO_GCS_PYTHON_ROOT') or SCRIPT_DIR
 PROJECT_ROOT = os.getenv('APOLLO_GCS_PROJECT_ROOT') or os.path.dirname(RESOURCE_PYTHON_ROOT)
 DATA_ROOT = os.getenv('APOLLO_GCS_DATA_ROOT') or PROJECT_ROOT
+RL_EXPERIMENT_ROOT = os.getenv('APOLLO_GCS_RL_EXPERIMENT_ROOT') or os.path.join(PROJECT_ROOT, 'RL_Experiments')
 
 os.makedirs(DATA_ROOT, exist_ok=True)
+os.makedirs(RL_EXPERIMENT_ROOT, exist_ok=True)
 
 for candidate_path in (SCRIPT_DIR, RESOURCE_PYTHON_ROOT):
     if candidate_path and candidate_path not in sys.path:
         sys.path.insert(0, candidate_path)
 
-from app_models import CommandRequest, ConnectionConfig, LogConfig, RecordingConfig
+from app_models import (
+    CommandRequest,
+    ConnectionConfig,
+    LogConfig,
+    RecordingConfig,
+    RLTuningApplyRequest,
+    RLTuningEpisodeFinishRequest,
+    RLTuningEpisodeStartRequest,
+    RLTuningSessionControlRequest,
+    RLTuningSessionRestoreRequest,
+    RLTuningSessionStartRequest,
+)
 from config import config
 from events import build_standard_event
 from online_analysis_adapter import (
@@ -74,7 +87,8 @@ from protocol.nclink_protocol import (
 from protocol.protocol_parser import UDPHandler
 from recorder import RawDataRecorder
 from recorder.csv_helper_full import get_data_for_type, get_full_header
-from routes import create_config_router, create_general_router, create_operations_router
+from rl_tuner import PIDTuningService
+from routes import create_config_router, create_general_router, create_operations_router, create_rl_tuning_router
 from runtime_helpers import (
     build_default_session_id as _build_default_session_id,
     cache_ws_snapshot as _runtime_cache_ws_snapshot,
@@ -86,7 +100,7 @@ from websocket.websocket_manager import WebSocketManager
 
 
 _HTTP_BIND_ALL = os.getenv('GCS_HTTP_BIND_ALL', '').strip() in ('1', 'true', 'yes')
-_ENABLE_COMMAND_HEARTBEAT = False
+_ENABLE_COMMAND_HEARTBEAT = os.getenv('GCS_ENABLE_COMMAND_HEARTBEAT', '0').strip().lower() in ('1', 'true', 'yes')
 BACKEND_HTTP_HOST = '0.0.0.0' if _HTTP_BIND_ALL else '127.0.0.1'
 BACKEND_HTTP_PORT = 8000
 FRONTEND_HTTP_PORT = 5173
@@ -154,6 +168,7 @@ logger = logging.getLogger(__name__)
 config.print_config()
 
 online_analysis_service = None
+tuner_service: Optional[PIDTuningService] = None
 
 
 online_analysis_service = _create_embedded_online_analysis_service(
@@ -210,7 +225,7 @@ packet_drop_counters: Dict[str, int] = {
 }
 
 HEARTBEAT_FUNC_CODE = 0x00
-HEARTBEAT_INTERVAL_SEC = 10.0
+HEARTBEAT_INTERVAL_SEC = max(float(os.getenv('GCS_HEARTBEAT_INTERVAL_SEC', '1.0') or 1.0), 0.2)
 COMMAND_SEND_MIN_INTERVAL_SEC = 0.5
 CMD_IDX_REPEAT_COUNT = 6
 CMD_IDX_RESET_TO_ZERO = True
@@ -220,10 +235,12 @@ PLANNING_COMMAND_REPEAT_INTERVAL_SEC = 0.5
 command_send_lock: asyncio.Lock = asyncio.Lock()
 command_last_send_at = {
     'flight_control': 0.0,
+    'parameter_update': 0.0,
     'planning': 0.0,
 }
 command_channel_busy = {
     'flight_control': False,
+    'parameter_update': False,
     'planning': False,
 }
 online_analysis_runtime: Dict[str, Any] = {
@@ -240,7 +257,7 @@ online_analysis_runtime: Dict[str, Any] = {
 if ONLINE_ANALYSIS_ENABLED and _is_online_analysis_embedded(ONLINE_ANALYSIS_ENABLED, ONLINE_ANALYSIS_MODE) and online_analysis_service is None:
     online_analysis_runtime['last_error'] = 'embedded service unavailable'
 
-cached_pid_params = {
+DEFAULT_PID_PARAMS = {
     'fKaPHI': 0.8, 'fKaP': 0.3, 'fKaY': 0.3, 'fIaY': 0.005,
     'fKaVy': 2.0, 'fIaVy': 0.4, 'fKaAy': 0.28,
     'fKeTHETA': 0.8, 'fKeQ': 0.3, 'fKeX': 0.3, 'fIeX': 0.01,
@@ -249,6 +266,41 @@ cached_pid_params = {
     'fKcH': 0.36, 'fIcH': 0.015, 'fKcHdot': 0.5, 'fIcHdot': 0.05,
     'fKcAz': 0.5, 'fIgRPM': 0.0, 'fKgRPM': 0.0, 'fScale_factor': 0.3,
     'XaccLMT': 1.0, 'YaccLMT': 1.0, 'Hground': 0.4, 'AutoTakeoffHcmd': 10.0,
+}
+
+cached_pid_params = dict(DEFAULT_PID_PARAMS)
+
+FCS_PARAM_ECHO_TO_CACHE_KEY = {
+    'ParamAil_F_KaPHI': 'fKaPHI',
+    'ParamAil_F_KaP': 'fKaP',
+    'ParamAil_F_KaY': 'fKaY',
+    'ParamAil_F_IaY': 'fIaY',
+    'ParamAil_F_KaVy': 'fKaVy',
+    'ParamAil_F_IaVy': 'fIaVy',
+    'ParamAil_F_KaAy': 'fKaAy',
+    'ParamAil_YaccLMT': 'YaccLMT',
+    'ParamEle_F_KeTHETA': 'fKeTHETA',
+    'ParamEle_F_KeQ': 'fKeQ',
+    'ParamEle_F_KeX': 'fKeX',
+    'ParamEle_F_IeX': 'fIeX',
+    'ParamEle_F_KeVx': 'fKeVx',
+    'ParamEle_F_IeVx': 'fIeVx',
+    'ParamEle_F_KeAx': 'fKeAx',
+    'ParamEle_XaccLMT': 'XaccLMT',
+    'ParamRud_F_KrR': 'fKrR',
+    'ParamRud_F_IrR': 'fIrR',
+    'ParamRud_F_KrAy': 'fKrAy',
+    'ParamRud_F_KrPSI': 'fKrPSI',
+    'ParamH_F_KcH': 'fKcH',
+    'ParamH_F_IcH': 'fIcH',
+    'ParamH_F_KcHdot': 'fKcHdot',
+    'ParamH_F_IcHdot': 'fIcHdot',
+    'ParamH_F_KcAz': 'fKcAz',
+    'ParamRPM_F_KgRPM': 'fKgRPM',
+    'ParamRPM_F_IgRPM': 'fIgRPM',
+    'ParamScale_F_scale_factor': 'fScale_factor',
+    'ParamGuide_Hground': 'Hground',
+    'ParamGuide_AutoTakeoffHcmd': 'AutoTakeoffHcmd',
 }
 
 last_broadcast_times: Dict[str, float] = {}
@@ -294,6 +346,39 @@ def _normalize_listen_ports() -> list[int]:
             seen.add(port)
             ordered.append(port)
     return ordered
+
+
+def _sync_cached_pid_params_from_fcs_param(message: dict[str, Any]) -> None:
+    if str(message.get('type') or '') != 'fcs_param':
+        return
+
+    raw_data = message.get('data') or {}
+    if not isinstance(raw_data, dict):
+        return
+
+    for echo_key, cache_key in FCS_PARAM_ECHO_TO_CACHE_KEY.items():
+        value = raw_data.get(echo_key)
+        if value is None:
+            continue
+        try:
+            cached_pid_params[cache_key] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+
+def _resolve_extu_pid_params_for_command() -> dict[str, float]:
+    merged = dict(DEFAULT_PID_PARAMS)
+    merged.update(cached_pid_params)
+
+    # Some fcs_param echoes appear to arrive as all-zero snapshots before a valid
+    # parameter state is available. Do not let cmd_idx/cmd_mission piggyback a
+    # fully zeroed PID payload, because that mutates the controller while only
+    # trying to switch modes.
+    nonzero_default_keys = [key for key, value in DEFAULT_PID_PARAMS.items() if abs(float(value)) > 1e-9]
+    if nonzero_default_keys and all(abs(float(merged.get(key, 0.0))) <= 1e-9 for key in nonzero_default_keys):
+        return dict(DEFAULT_PID_PARAMS)
+
+    return merged
 
 
 async def _forward_to_online_analysis(envelope: dict[str, Any]) -> None:
@@ -533,6 +618,11 @@ async def _heartbeat_loop() -> None:
 
 
 def _prepare_udp_message_result(message: dict) -> dict:
+    _sync_cached_pid_params_from_fcs_param(message)
+
+    if tuner_service is not None:
+        tuner_service.ingest_udp_message(message)
+
     msg_type = message.get('type', 'unknown')
     func_code = int(message.get('func_code', 0) or 0)
     current_time = time.time()
@@ -832,6 +922,98 @@ def on_udp_message_received(message: dict) -> None:
 
 async def send_pid_params_to_drone(pids_data: dict) -> dict:
     return await send_command_to_drone(CommandRequest(type='set_pids', params=pids_data))
+
+
+def get_current_recording_context() -> dict:
+    if not recording_active or recorder is None:
+        return {}
+    return {
+        'recording_session_id': current_session_id or '',
+        'recording_session_directory': getattr(recorder, 'session_directory', ''),
+        'recording_records_directory': getattr(recorder, 'records_directory', ''),
+        'recording_fcs_csv': os.path.join(getattr(recorder, 'fcs_directory', ''), 'fcs_telemetry.csv') if getattr(recorder, 'fcs_directory', '') else '',
+        'recording_planning_csv': os.path.join(getattr(recorder, 'planning_directory', ''), 'planning_telemetry.csv') if getattr(recorder, 'planning_directory', '') else '',
+    }
+
+
+tuner_service = PIDTuningService(
+    send_pid_params_handler=send_pid_params_to_drone,
+    cached_pid_params=cached_pid_params,
+    baseline_pid_params=DEFAULT_PID_PARAMS,
+    broadcast_handler=manager.broadcast,
+    logger=logger,
+    artifact_root=RL_EXPERIMENT_ROOT,
+    recording_context_provider=get_current_recording_context,
+)
+
+
+async def start_rl_tuning_session(request: RLTuningSessionStartRequest) -> dict:
+    return await tuner_service.start_session(
+        task_type=request.task_type,
+        parameter_keys=request.parameter_keys,
+        initial_params=request.initial_params,
+        max_episodes=request.max_episodes,
+        strategy_mode=request.strategy_mode,
+        session_id=request.session_id,
+    )
+
+
+async def stop_rl_tuning_session(request: RLTuningSessionControlRequest) -> dict:
+    return await tuner_service.stop_session(request.session_id)
+
+
+async def pause_rl_tuning_session(request: RLTuningSessionControlRequest) -> dict:
+    return await tuner_service.pause_session(request.session_id)
+
+
+async def resume_rl_tuning_session(request: RLTuningSessionControlRequest) -> dict:
+    return await tuner_service.resume_session(request.session_id)
+
+
+async def restore_rl_tuning_session(request: RLTuningSessionRestoreRequest) -> dict:
+    return await tuner_service.restore_session(
+        session_id=request.session_id,
+        artifact_dir=request.artifact_dir,
+    )
+
+
+async def start_rl_tuning_episode(request: RLTuningEpisodeStartRequest) -> dict:
+    return await tuner_service.start_episode(request.session_id, request.episode_id)
+
+
+async def finish_rl_tuning_episode(request: RLTuningEpisodeFinishRequest) -> dict:
+    return await tuner_service.finish_episode(
+        request.session_id,
+        request.episode_id,
+        request.summary,
+        task_success=request.task_success,
+    )
+
+
+async def apply_rl_tuning_params(request: RLTuningApplyRequest) -> dict:
+    return await tuner_service.apply_params(request.params)
+
+
+async def rollback_rl_tuning_session(request: RLTuningSessionControlRequest) -> dict:
+    return await tuner_service.rollback(request.session_id)
+
+
+async def get_rl_tuning_status() -> dict:
+    return {
+        'type': 'rl_tuning_status_response',
+        'status': 'success',
+        'data': tuner_service.get_status(),
+        'timestamp': int(time.time() * 1000),
+    }
+
+
+async def get_rl_tuning_history(session_id: str) -> dict:
+    return {
+        'type': 'rl_tuning_history_response',
+        'status': 'success',
+        'data': tuner_service.get_history(session_id),
+        'timestamp': int(time.time() * 1000),
+    }
 
 
 async def handle_client_message(message: dict, websocket: WebSocket) -> None:
@@ -1214,7 +1396,7 @@ async def send_command_to_drone(request: CommandRequest) -> dict:
 
         if command_type == 'cmd_idx':
             payload = encode_extu_fcs_from_dict(
-                cached_pid_params,
+                _resolve_extu_pid_params_for_command(),
                 cmd_idx=params.get('cmdId', 0),
                 cmd_mission=0,
                 cmd_mission_val=0.0,
@@ -1222,7 +1404,7 @@ async def send_command_to_drone(request: CommandRequest) -> dict:
             packet = encode_command_packet(NCLINK_SEND_EXTU_FCS, payload)
         elif command_type == 'cmd_mission':
             payload = encode_extu_fcs_from_dict(
-                cached_pid_params,
+                _resolve_extu_pid_params_for_command(),
                 cmd_idx=0,
                 cmd_mission=params.get('cmd_mission', 0),
                 cmd_mission_val=params.get('value', 0.0),
@@ -1303,7 +1485,7 @@ async def send_command_to_drone(request: CommandRequest) -> dict:
 
                     if CMD_IDX_RESET_TO_ZERO:
                         payload_zero = encode_extu_fcs_from_dict(
-                            cached_pid_params,
+                            _resolve_extu_pid_params_for_command(),
                             cmd_idx=0,
                             cmd_mission=0,
                             cmd_mission_val=0.0,
@@ -1522,6 +1704,20 @@ app.include_router(create_operations_router(
     get_recording_status_handler=get_recording_status,
     start_recording_handler=start_recording,
     stop_recording_handler=stop_recording,
+))
+
+app.include_router(create_rl_tuning_router(
+    start_session_handler=start_rl_tuning_session,
+    stop_session_handler=stop_rl_tuning_session,
+    pause_session_handler=pause_rl_tuning_session,
+    resume_session_handler=resume_rl_tuning_session,
+    restore_session_handler=restore_rl_tuning_session,
+    start_episode_handler=start_rl_tuning_episode,
+    finish_episode_handler=finish_rl_tuning_episode,
+    apply_params_handler=apply_rl_tuning_params,
+    rollback_handler=rollback_rl_tuning_session,
+    get_status_handler=get_rl_tuning_status,
+    get_history_handler=get_rl_tuning_history,
 ))
 
 manager.cache_message({
